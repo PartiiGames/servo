@@ -2559,6 +2559,12 @@ impl Document {
                 // Step 9.1. Update the current document readiness to "complete".
                 document.update_the_current_document_readiness(cx, DocumentReadyState::Complete);
 
+                // If the load was stopped between queueing this task and running it, do not
+                // fire the `load` event or report completion to the constellation.
+                if document.loader().aborted() {
+                    return;
+                }
+
                 // Step 9.2. If the Document object's browsing context is null, then abort these steps.
                 if document.browsing_context().is_none() {
                     return;
