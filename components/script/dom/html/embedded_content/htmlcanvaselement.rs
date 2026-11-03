@@ -93,6 +93,16 @@ pub(crate) struct HTMLCanvasElement {
     /// itself which will take care of cleaning it up.
     #[no_trace]
     image_key: Cell<Option<ImageKey>>,
+    /// The WebRender image key reserved for the OffscreenCanvas this element is the
+    /// placeholder for (set by `transferControlToOffscreen`). The OffscreenCanvas's
+    /// 2D context draws into this key, on whichever thread it lives. It becomes this
+    /// element's `image_key` once the first frame has been committed.
+    #[no_trace]
+    placeholder_image_key: Cell<Option<ImageKey>>,
+    /// The epoch of the last frame the OffscreenCanvas committed to this placeholder
+    /// that has not yet been part of "update the rendering".
+    #[no_trace]
+    pending_placeholder_frame: Cell<Option<Epoch>>,
 }
 
 impl HTMLCanvasElement {
@@ -107,6 +117,8 @@ impl HTMLCanvasElement {
             callback_id: Cell::new(0),
             blob_callbacks: RefCell::new(FxHashMap::default()),
             image_key: Default::default(),
+            placeholder_image_key: Default::default(),
+            pending_placeholder_frame: Default::default(),
         }
     }
 
@@ -427,6 +439,61 @@ impl HTMLCanvasElement {
         }
     }
 
+    /// The image key an OffscreenCanvas whose placeholder is this element should draw
+    /// into, if any.
+    pub(crate) fn placeholder_image_key(&self) -> Option<ImageKey> {
+        self.placeholder_image_key.get()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#offscreencanvas-placeholder>
+    ///
+    /// The OffscreenCanvas this element is the placeholder for committed a frame: its
+    /// image (`placeholder_image_key`) has been sent to the renderer with `epoch`. Show
+    /// it at the next rendering update. Called on this element's thread, directly when
+    /// the OffscreenCanvas lives here too, otherwise from a task the OffscreenCanvas's
+    /// thread queued (see `OffscreenCanvas::commit_to_placeholder`).
+    pub(crate) fn placeholder_frame_committed(
+        &self,
+        cx: &mut js::context::JSContext,
+        epoch: Epoch,
+        size: Option<Size2D<u64>>,
+    ) {
+        let Some(image_key) = self.placeholder_image_key.get() else {
+            return;
+        };
+        if !matches!(
+            *self.context_mode.borrow(),
+            Some(RenderingContext::Placeholder(..))
+        ) {
+            return;
+        }
+        if let Some(size) = size {
+            // A size change made on another thread: mirror it, as SetWidth/SetHeight
+            // do for an OffscreenCanvas on this thread.
+            if u64::from(self.Width()) != size.width {
+                self.set_natural_width(cx, size.width.try_into().unwrap_or(u32::MAX));
+            }
+            if u64::from(self.Height()) != size.height {
+                self.set_natural_height(cx, size.height.try_into().unwrap_or(u32::MAX));
+            }
+        }
+        if self.image_key.get() != Some(image_key) {
+            self.image_key.set(Some(image_key));
+            self.upcast::<Node>()
+                .dirty(cx.no_gc(), NodeDamage::ContentOrHeritage);
+        }
+        self.pending_placeholder_frame.set(Some(epoch));
+        self.owner_document()
+            .mark_canvas_as_dirty(&Dom::from_ref(self));
+    }
+
+    /// Takes the frame an OffscreenCanvas committed to this placeholder since the last
+    /// rendering update, as the image key and the epoch the renderer should wait for.
+    pub(crate) fn take_placeholder_frame(&self) -> Option<(ImageKey, Epoch)> {
+        let epoch = self.pending_placeholder_frame.take()?;
+        Some((self.placeholder_image_key.get()?, epoch))
+    }
+
     pub(crate) fn update_rendering(&self, epoch: Epoch) -> Option<ImageKey> {
         let context = self.context()?;
         let image_key = self.image_key.get()?;
@@ -689,6 +756,12 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
         self.set_rendering_context(cx.no_gc(), || {
             RenderingContext::Placeholder(offscreen_canvas.as_traced())
         });
+
+        // Reserve the image the OffscreenCanvas will draw into, here or (once it is
+        // transferred) on a worker's thread; it is shown as this element's content once
+        // a frame has been committed (`placeholder_frame_committed`).
+        self.placeholder_image_key
+            .set(self.owner_window().image_cache().get_image_key());
 
         // Step 5. Return offscreenCanvas.
         Ok(offscreen_canvas)

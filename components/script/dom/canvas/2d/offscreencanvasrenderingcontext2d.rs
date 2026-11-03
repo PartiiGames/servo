@@ -2,12 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
 use dom_struct::dom_struct;
 use euclid::default::Size2D;
 use js::context::{JSContext, NoGC};
 use pixels::Snapshot;
 use script_bindings::reflector::reflect_dom_object;
+use servo_base::Epoch;
 use servo_canvas_traits::canvas::CanvasCommand;
+use webrender_api::ImageKey;
 
 use crate::canvas_context::{CanvasContext, HTMLCanvasElementOrOffscreenCanvas};
 use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
@@ -39,6 +43,12 @@ use crate::dom::textmetrics::TextMetrics;
 #[dom_struct]
 pub(crate) struct OffscreenCanvasRenderingContext2D {
     context: CanvasRenderingContext2D,
+    /// The placeholder's image key, until it has been given to the canvas paint
+    /// thread. That waits for a non-empty bitmap, since an empty one drops commands.
+    #[no_trace]
+    pending_image_key: Cell<Option<ImageKey>>,
+    /// Whether the canvas paint thread has the placeholder's image key.
+    image_key_sent: Cell<bool>,
 }
 
 impl OffscreenCanvasRenderingContext2D {
@@ -51,6 +61,8 @@ impl OffscreenCanvasRenderingContext2D {
     ) -> Option<OffscreenCanvasRenderingContext2D> {
         Some(OffscreenCanvasRenderingContext2D {
             context: CanvasRenderingContext2D::new_inherited(global, canvas, size, settings)?,
+            pending_image_key: Cell::new(None),
+            image_key_sent: Cell::new(false),
         })
     }
 
@@ -76,6 +88,28 @@ impl OffscreenCanvasRenderingContext2D {
 
     pub(crate) fn send_canvas_command_immediate(&self, msg: CanvasCommand) {
         self.context.send_canvas_command_immediate(msg)
+    }
+
+    /// Draw into the image the placeholder canvas element shows.
+    pub(crate) fn set_image_key(&self, image_key: ImageKey) {
+        self.pending_image_key.set(Some(image_key));
+    }
+
+    /// Send the bitmap to the renderer as the placeholder's image, tagged `epoch`.
+    /// Returns false if nothing was sent (an empty bitmap, or no placeholder): then
+    /// nobody may wait for `epoch`.
+    pub(crate) fn commit(&self, epoch: Epoch) -> bool {
+        if !self.context.is_paintable() {
+            return false;
+        }
+        if let Some(image_key) = self.pending_image_key.take() {
+            self.context.set_image_key(image_key);
+            self.image_key_sent.set(true);
+        }
+        if !self.image_key_sent.get() {
+            return false;
+        }
+        self.context.commit_to_placeholder(epoch)
     }
 }
 

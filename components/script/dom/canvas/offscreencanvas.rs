@@ -3,10 +3,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::sync::{LazyLock, Mutex};
 
 use dom_struct::dom_struct;
 use euclid::default::Size2D;
 use js::error::throw_type_error;
+use js::jsapi::JSTracer;
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject, HandleValue};
 use pixels::{EncodedImageType, Snapshot};
@@ -18,10 +20,12 @@ use script_bindings::inheritance::Castable;
 use script_bindings::reflector::DomObject;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use script_bindings::weakref::WeakRef;
+use servo_base::Epoch;
 use servo_base::id::{OffscreenCanvasId, OffscreenCanvasIndex};
 #[cfg(feature = "webgl")]
 use servo_canvas_traits::webgl::{GLContextAttributes, WebGLVersion};
 use servo_constellation_traits::{BlobImpl, TransferableOffscreenCanvas};
+use webrender_api::ImageKey;
 
 use crate::canvas_context::{CanvasContext, OffscreenRenderingContext};
 #[cfg(feature = "webgl")]
@@ -41,6 +45,7 @@ use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::structuredclone::StructuredData;
+use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::bindings::transferable::Transferable;
 use crate::dom::blob::Blob;
 use crate::dom::eventtarget::EventTarget;
@@ -54,6 +59,7 @@ use crate::dom::promise::Promise;
 use crate::dom::types::{WebGLRenderingContext, Window};
 #[cfg(feature = "webgl")]
 use crate::dom::webgl::webgl2renderingcontext::WebGL2RenderingContext;
+use crate::tasks::task_source::SendableTaskSource;
 
 /// <https://html.spec.whatwg.org/multipage/#offscreencanvas>
 #[dom_struct]
@@ -70,7 +76,48 @@ pub(crate) struct OffscreenCanvas {
 
     /// <https://html.spec.whatwg.org/multipage/#offscreencanvas-placeholder>
     placeholder: Option<WeakRef<HTMLCanvasElement>>,
+
+    /// The placeholder canvas element when it lives on another thread: this
+    /// OffscreenCanvas was transferred (to a worker) after `transferControlToOffscreen`.
+    /// <https://html.spec.whatwg.org/multipage/#offscreencanvas-placeholder>
+    #[ignore_malloc_size_of = "Channels and refcounts"]
+    remote_placeholder: DomRefCell<Option<RemotePlaceholder>>,
+
+    /// The image key the placeholder reserved, which the 2D context draws into.
+    #[no_trace]
+    placeholder_image_key: Cell<Option<ImageKey>>,
+
+    /// Whether a task to commit this canvas's bitmap to its placeholder is queued.
+    commit_queued: Cell<bool>,
+
+    /// The epoch of the last frame committed to the placeholder.
+    commit_epoch: Cell<u32>,
+
+    /// Whether the bitmap's size changed since the last commit.
+    size_changed: Cell<bool>,
 }
+
+/// A placeholder canvas element on another thread of this agent cluster, and the way
+/// to reach it: tasks queued on its event loop root `canvas` there.
+pub(crate) struct RemotePlaceholder {
+    canvas: Trusted<HTMLCanvasElement>,
+    task_source: SendableTaskSource,
+}
+
+// `Trusted` keeps the element alive by itself, and the task source holds no GC things.
+#[expect(unsafe_code)]
+unsafe impl JSTraceable for RemotePlaceholder {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {}
+}
+
+/// Placeholder links between `transfer` and `transfer_receive`. The transfer data
+/// crosses threads as serializable data, which can't carry a `Trusted`, so the link
+/// waits here under the transferred canvas's id. Dedicated workers run in the same
+/// process as their owner, so a process-wide table is enough. (An entry whose message
+/// is never received keeps its placeholder element alive; that is a small leak.)
+static PENDING_PLACEHOLDERS: LazyLock<
+    Mutex<FxHashMap<OffscreenCanvasId, (RemotePlaceholder, Option<ImageKey>)>>,
+> = LazyLock::new(Default::default);
 
 impl OffscreenCanvas {
     pub(crate) fn new_inherited(
@@ -84,6 +131,11 @@ impl OffscreenCanvas {
             height: Cell::new(height),
             context: DomRefCell::new(None),
             placeholder,
+            remote_placeholder: DomRefCell::new(None),
+            placeholder_image_key: Cell::new(None),
+            commit_queued: Cell::new(false),
+            commit_epoch: Cell::new(0),
+            size_changed: Cell::new(false),
         }
     }
 
@@ -192,6 +244,12 @@ impl OffscreenCanvas {
         *self.context.safe_borrow_mut(cx.no_gc()) = Some(OffscreenRenderingContext::Context2d(
             Dom::from_ref(&*context),
         ));
+        // With a placeholder canvas element, the context draws into the image the
+        // placeholder shows (see `commit_to_placeholder`).
+        if let Some(image_key) = self.placeholder_image_key() {
+            context.set_image_key(image_key);
+            self.queue_commit_to_placeholder();
+        }
         Some(context)
     }
 
@@ -305,6 +363,80 @@ impl OffscreenCanvas {
             .as_ref()
             .and_then(|placeholder| placeholder.root())
     }
+
+    fn has_placeholder(&self) -> bool {
+        self.placeholder.is_some() || self.remote_placeholder.borrow().is_some()
+    }
+
+    /// The image key of the placeholder canvas element, on this thread or another.
+    fn placeholder_image_key(&self) -> Option<ImageKey> {
+        if let Some(image_key) = self.placeholder_image_key.get() {
+            return Some(image_key);
+        }
+        let image_key = self.placeholder()?.placeholder_image_key();
+        self.placeholder_image_key.set(image_key);
+        image_key
+    }
+
+    /// The bitmap changed: commit it to the placeholder canvas element once the
+    /// current task is done, so a frame's worth of drawing lands as one image.
+    /// <https://html.spec.whatwg.org/multipage/#offscreencanvas-placeholder>
+    pub(crate) fn queue_commit_to_placeholder(&self) {
+        if self.commit_queued.get() || !self.has_placeholder() {
+            return;
+        }
+        let Some(OffscreenRenderingContext::Context2d(_)) = self.context.borrow().as_ref() else {
+            return;
+        };
+        let global = self.global();
+        let task_manager = global.task_manager();
+        // A dedicated worker can only queue tasks while it handles a message; drawing
+        // outside one is committed with the next drawing inside one.
+        if task_manager.sender().is_none() {
+            return;
+        }
+        self.commit_queued.set(true);
+        let this = Trusted::new(self);
+        task_manager
+            .canvas_blob_task_source()
+            .queue(task!(commit_offscreen_canvas: move |cx| {
+                this.root().commit_to_placeholder(cx);
+            }));
+    }
+
+    /// Sends the bitmap to the renderer as the placeholder's image, then tells the
+    /// placeholder (on its own thread) to show that frame at its next rendering update.
+    fn commit_to_placeholder(&self, cx: &mut js::context::JSContext) {
+        self.commit_queued.set(false);
+        let committed = match self.context.borrow().as_ref() {
+            Some(OffscreenRenderingContext::Context2d(context)) => {
+                let epoch = Epoch(self.commit_epoch.get().wrapping_add(1));
+                context.commit(epoch).then_some(epoch)
+            },
+            _ => None,
+        };
+        let Some(epoch) = committed else {
+            return;
+        };
+        self.commit_epoch.set(epoch.0);
+
+        if let Some(canvas) = self.placeholder() {
+            canvas.placeholder_frame_committed(cx, epoch, None);
+            return;
+        }
+        let size = self
+            .size_changed
+            .replace(false)
+            .then(|| Size2D::new(self.width.get(), self.height.get()));
+        if let Some(remote) = self.remote_placeholder.borrow().as_ref() {
+            let canvas = remote.canvas.clone();
+            remote
+                .task_source
+                .queue(task!(placeholder_frame_committed: move |cx| {
+                    canvas.root().placeholder_frame_committed(cx, epoch, size);
+                }));
+        }
+    }
 }
 
 impl Transferable for OffscreenCanvas {
@@ -330,10 +462,25 @@ impl Transferable for OffscreenCanvas {
             return Err(Error::InvalidState(None));
         }
 
-        // TODO(#37882): Allow to transfer with a placeholder canvas element.
-        if self.placeholder.is_some() {
-            return Err(Error::InvalidState(None));
-        }
+        // Step 8 (below) needs a link to the placeholder that works from another
+        // thread: a `Trusted` element and its event loop. Build it before detaching.
+        let placeholder_link = match self.placeholder() {
+            Some(canvas) => Some((
+                RemotePlaceholder {
+                    canvas: Trusted::new(&*canvas),
+                    task_source: canvas
+                        .global()
+                        .task_manager()
+                        .canvas_blob_task_source()
+                        .to_sendable(),
+                },
+                canvas.placeholder_image_key(),
+            )),
+            None => self.remote_placeholder.borrow_mut().take().map(|remote| {
+                // Transferring onwards again: hand on the link we were given.
+                (remote, self.placeholder_image_key.get())
+            }),
+        };
 
         // Step 2. Set value's context mode to detached.
         *self.context.safe_borrow_mut(cx.no_gc()) = Some(OffscreenRenderingContext::Detached);
@@ -352,19 +499,27 @@ impl Transferable for OffscreenCanvas {
         // TODO(#37918) Step 7. Set dataHolder.[[Language]] to language and
         // dataHolder.[[Direction]] to direction.
 
-        // TODO(#37882) Step 8. Set dataHolder.[[PlaceholderCanvas]] to be a
+        // Step 8. Set dataHolder.[[PlaceholderCanvas]] to be a
         // weak reference to value's placeholder canvas element, if value has
         // one, or null if it does not.
+        // The link is kept by id until `transfer_receive` (see PENDING_PLACEHOLDERS);
+        // it holds the element strongly rather than weakly while it is in flight.
         let transferred = TransferableOffscreenCanvas { width, height };
+        let id = OffscreenCanvasId::new();
+        if let Some(link) = placeholder_link {
+            if let Ok(mut pending) = PENDING_PLACEHOLDERS.lock() {
+                pending.insert(id, link);
+            }
+        }
 
-        Ok((OffscreenCanvasId::new(), transferred))
+        Ok((id, transferred))
     }
 
     /// <https://html.spec.whatwg.org/multipage/#the-offscreencanvas-interface:transfer-receiving-steps>
     fn transfer_receive(
         cx: &mut js::context::JSContext,
         owner: &GlobalScope,
-        _: OffscreenCanvasId,
+        id: OffscreenCanvasId,
         transferred: TransferableOffscreenCanvas,
     ) -> Result<DomRoot<Self>, ()> {
         // Step 1. Initialize value's bitmap to a rectangular array of
@@ -379,14 +534,17 @@ impl Transferable for OffscreenCanvas {
         // set value's placeholder canvas element to
         // dataHolder.[[PlaceholderCanvas]] (while maintaining the weak
         // reference semantics).
-        Ok(OffscreenCanvas::new(
-            cx,
-            owner,
-            None,
-            transferred.width,
-            transferred.height,
-            None,
-        ))
+        let canvas =
+            OffscreenCanvas::new(cx, owner, None, transferred.width, transferred.height, None);
+        let link = PENDING_PLACEHOLDERS
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&id));
+        if let Some((remote, image_key)) = link {
+            *canvas.remote_placeholder.borrow_mut() = Some(remote);
+            canvas.placeholder_image_key.set(image_key);
+        }
+        Ok(canvas)
     }
 
     fn serialized_storage<'a>(
@@ -473,6 +631,8 @@ impl OffscreenCanvasMethods<crate::DomTypeHolder> for OffscreenCanvas {
         if let Some(canvas) = self.placeholder() {
             canvas.set_natural_width(cx, value as _)
         }
+        self.size_changed.set(true);
+        self.queue_commit_to_placeholder();
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-offscreencanvas-height>
@@ -491,6 +651,8 @@ impl OffscreenCanvasMethods<crate::DomTypeHolder> for OffscreenCanvas {
         if let Some(canvas) = self.placeholder() {
             canvas.set_natural_height(cx, value as _)
         }
+        self.size_changed.set(true);
+        self.queue_commit_to_placeholder();
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-offscreencanvas-transfertoimagebitmap>

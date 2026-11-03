@@ -150,6 +150,16 @@ impl CanvasRenderingContext2D {
         }
         self.canvas_state.update_rendering(Some(canvas_epoch))
     }
+
+    /// Sends the bitmap to the renderer under this context's image key regardless of
+    /// where the canvas is: used by an OffscreenCanvas to update its placeholder.
+    pub(crate) fn commit_to_placeholder(&self, canvas_epoch: Epoch) -> bool {
+        self.canvas_state.update_rendering(Some(canvas_epoch))
+    }
+
+    pub(crate) fn is_paintable(&self) -> bool {
+        self.canvas_state.is_paintable()
+    }
 }
 
 impl CanvasContext for CanvasRenderingContext2D {

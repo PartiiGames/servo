@@ -31,8 +31,15 @@ pub(crate) enum HTMLCanvasElementOrOffscreenCanvas {
 
 impl HTMLCanvasElementOrOffscreenCanvas {
     pub(crate) fn mark_as_dirty(&self) {
-        if let HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) = self {
-            canvas.owner_document().mark_canvas_as_dirty(canvas);
+        match self {
+            HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) => {
+                canvas.owner_document().mark_canvas_as_dirty(canvas);
+            },
+            // An OffscreenCanvas with a placeholder canvas element commits its bitmap
+            // to it after the current task.
+            HTMLCanvasElementOrOffscreenCanvas::OffscreenCanvas(canvas) => {
+                canvas.queue_commit_to_placeholder();
+            },
         }
     }
 }

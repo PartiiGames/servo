@@ -3287,12 +3287,34 @@ impl Document {
         let current_rendering_epoch = self.current_rendering_epoch.get();
 
         // All dirty canvases are flushed before updating the rendering.
+        // Placeholders of OffscreenCanvases have had their image sent already (from
+        // whichever thread the OffscreenCanvas is on), under that canvas's own epoch.
+        let mut placeholder_frames = Vec::new();
         let image_keys: Vec<_> = self
             .dirty_canvases
             .borrow_mut()
             .drain(..)
-            .filter_map(|canvas| canvas.update_rendering(current_rendering_epoch))
+            .filter_map(|canvas| {
+                if let Some(frame) = canvas.take_placeholder_frame() {
+                    placeholder_frames.push(frame);
+                    return None;
+                }
+                canvas.update_rendering(current_rendering_epoch)
+            })
             .collect();
+
+        // Wait for each placeholder's committed image before showing a frame, as for
+        // the canvases below.
+        for (image_key, canvas_epoch) in placeholder_frames {
+            phases.insert(ReflowPhasesRun::UpdatedImageData);
+            self.waiting_on_canvas_image_updates.set(true);
+            self.window().paint_api().delay_new_frame_for_canvas(
+                self.webview_id(),
+                self.window().pipeline_id(),
+                canvas_epoch,
+                vec![image_key],
+            );
+        }
 
         // The renderer should wait to display the frame until all canvas images are
         // uploaded. This allows canvas image uploading to happen asynchronously.

@@ -1555,11 +1555,18 @@ pub(crate) struct FrameDelayer {
     /// A list of pipelines that should be notified when we are no longer waiting for
     /// canvas images.
     waiting_pipelines: FxHashSet<PipelineId>,
+    /// Canvas images that have been deleted. An OffscreenCanvas's placeholder asks to
+    /// wait for an image that another thread uploads, and that thread may delete it
+    /// (its worker closed) before the request arrives; such a wait would never end.
+    /// Image keys are never reused, so a deleted key can be skipped for good.
+    deleted_canvas_images: FxHashSet<ImageKey>,
 }
 
 impl FrameDelayer {
     pub(crate) fn delete_image(&mut self, image_key: ImageKey) {
-        self.image_epochs.remove(&image_key);
+        if self.image_epochs.remove(&image_key).is_some() {
+            self.deleted_canvas_images.insert(image_key);
+        }
         self.pending_canvas_images.remove(&image_key);
     }
 
@@ -1580,6 +1587,9 @@ impl FrameDelayer {
         image_keys: Vec<ImageKey>,
     ) {
         for image_key in image_keys.into_iter() {
+            if self.deleted_canvas_images.contains(&image_key) {
+                continue;
+            }
             // If we've already seen the necessary epoch for this image, do not
             // start waiting for it.
             if self
