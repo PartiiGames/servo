@@ -261,8 +261,21 @@ impl VertexArrayObject {
 
 impl Drop for VertexArrayObject {
     fn drop(&mut self) {
-        if self.id.is_some() {
-            self.delete(Operation::Fallible);
+        // This runs while the GC finalizes the owning DOM object, possibly in the same sweep as
+        // the buffers in `vertex_attribs` / `element_array_buffer`, in any order. Those `Dom`
+        // pointers may already be dangling, so don't touch them (`delete` decrements their
+        // attached counters: a use-after-free that shows up as `assertion failed:
+        // self.is_deleted()` in WebGLBuffer::delete, e.g. at every shutdown of a three.js page).
+        // Only release the GL name; a still-live buffer stays "attached" and is freed with the
+        // context.
+        if self.id.is_some() && !self.is_deleted.get() {
+            self.is_deleted.set(true);
+            if let Some(context) = self.context.root() {
+                context.send_with_fallibility(
+                    WebGLCommand::DeleteVertexArray(self.id.unwrap()),
+                    Operation::Fallible,
+                );
+            }
         }
     }
 }
