@@ -1088,6 +1088,11 @@ impl WorkerGlobalScopeMethods<crate::DomTypeHolder> for WorkerGlobalScope {
         self.upcast::<GlobalScope>().is_secure_context()
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-crossoriginisolated>
+    fn CrossOriginIsolated(&self) -> bool {
+        self.upcast::<GlobalScope>().cross_origin_isolated_capability()
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-structuredclone>
     fn StructuredClone(
         &self,

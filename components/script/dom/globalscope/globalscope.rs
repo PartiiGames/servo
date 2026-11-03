@@ -2836,6 +2836,16 @@ impl GlobalScope {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#secure-context>
+    /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-cross-origin-isolated-capability>
+    ///
+    /// Servo does not derive cross-origin isolation from COOP/COEP yet; the
+    /// `dom_cross_origin_isolated_always` pref lets an embedder that only loads trusted content
+    /// declare every global isolated. This must agree with the realm option set when the global
+    /// was created (`script_bindings::interface::create_global_object`).
+    pub(crate) fn cross_origin_isolated_capability(&self) -> bool {
+        pref!(dom_cross_origin_isolated_always)
+    }
+
     pub(crate) fn is_secure_context(&self) -> bool {
         // This differs from the specification, but it seems that
         // `inherited_secure_context` implements more-or-less the exact same logic, in a
@@ -2993,7 +3003,7 @@ impl GlobalScope {
                 .map(|js: &RootedTraceableBox<Heap<*mut JSObject>>| js.get())
                 .collect::<Vec<_>>());
 
-        let data = structuredclone::write(cx, value, Some(guard))?;
+        let data = structuredclone::write_for_same_agent_cluster(cx, self, value, Some(guard))?;
 
         structuredclone::read(cx, self, data, retval)?;
 

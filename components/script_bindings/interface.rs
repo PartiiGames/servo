@@ -146,7 +146,14 @@ pub(crate) unsafe fn create_global_object<D: DomTypes>(
 
     let mut options = RealmOptions::default();
     options.creationOptions_.traceGlobal_ = Some(trace);
-    options.creationOptions_.sharedMemoryAndAtomics_ = false;
+    // Shared memory (SharedArrayBuffer, Atomics, shared WebAssembly.Memory) is only for
+    // cross-origin isolated globals. Servo does not compute isolation from COOP/COEP yet, so the
+    // only way in is the embedder pref that declares all content trusted. System globals never
+    // get it.
+    let shared_memory = !use_system_compartment && cross_origin_isolated_capability();
+    options.creationOptions_.sharedMemoryAndAtomics_ = shared_memory;
+    // Pick SpiderMonkey's COOP/COEP flavoured DataCloneError messages for isolated globals.
+    options.creationOptions_.coopAndCoep_ = shared_memory;
     if use_system_compartment {
         options.creationOptions_.compSpec_ = CompartmentSpecifier::NewCompartmentAndZone;
         options.creationOptions_.__bindgen_anon_1.comp_ = std::ptr::null_mut();
@@ -192,6 +199,15 @@ pub(crate) unsafe fn create_global_object<D: DomTypes>(
     let cx = &mut cx;
 
     unsafe { JS_FireOnNewGlobalObject(cx, rval.handle()) };
+}
+
+/// Whether globals created now have the cross-origin isolated capability
+/// (<https://html.spec.whatwg.org/multipage/#concept-settings-object-cross-origin-isolated-capability>).
+///
+/// TODO: compute this per agent cluster from COOP + COEP (the policy container already carries
+/// COEP) and pass it in from the caller instead of reading a process-wide pref.
+pub fn cross_origin_isolated_capability() -> bool {
+    servo_config::pref!(dom_cross_origin_isolated_always)
 }
 
 /// Choose the compartment to create a new global object in.

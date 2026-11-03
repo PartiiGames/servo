@@ -150,6 +150,13 @@ pub struct Preferences {
     pub dom_cookiestore_enabled: bool,
     // feature: Credential Management API | #38788 | Web/API/Credential_Management_API
     pub dom_credential_management_enabled: bool,
+    /// Treat every global as cross-origin isolated, whatever its COOP/COEP headers say: expose
+    /// `SharedArrayBuffer` and `Atomics`, report `crossOriginIsolated === true`, allow posting
+    /// shared memory to dedicated workers, and allow `Atomics.wait` in workers. Only for
+    /// embedders that load nothing but trusted content (single-app shells, game runtimes); like
+    /// Gecko's `dom.postMessage.sharedArrayBuffer.bypassCOOP_COEP.insecure.enabled`, this
+    /// removes the Spectre mitigation that cross-origin isolation exists for.
+    pub dom_cross_origin_isolated_always: bool,
     // feature: WebCrypto API | #40687 | Web/API/Web_Crypto_API
     pub dom_crypto_subtle_enabled: bool,
     pub dom_document_dblclick_timeout: i64,
@@ -435,6 +442,7 @@ impl Preferences {
             dom_composition_event_enabled: false,
             dom_cookiestore_enabled: false,
             dom_credential_management_enabled: false,
+            dom_cross_origin_isolated_always: false,
             dom_crypto_subtle_enabled: true,
             dom_document_dblclick_dist: 1,
             dom_document_dblclick_timeout: 300,

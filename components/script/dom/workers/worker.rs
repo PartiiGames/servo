@@ -142,7 +142,13 @@ impl Worker {
         message: HandleValue,
         transfer: CustomAutoRooterGuard<Vec<*mut JSObject>>,
     ) -> ErrorResult {
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        // The worker is a thread in this process and in this agent cluster.
+        let data = structuredclone::write_for_same_agent_cluster(
+            cx,
+            &self.global(),
+            message,
+            Some(transfer),
+        )?;
         let address = Trusted::new(self);
 
         // NOTE: step 9 of https://html.spec.whatwg.org/multipage/#dom-messageport-postmessage

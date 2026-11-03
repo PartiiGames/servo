@@ -498,6 +498,11 @@ impl DedicatedWorkerGlobalScope {
                 // because it will never outlive it (runtime destruction happens at the end of this function)
                 let mut cx = unsafe { runtime.cx() };
                 let cx = &mut cx;
+                // A dedicated worker agent's [[CanBlock]] is true
+                // (<https://html.spec.whatwg.org/multipage/#obtain-a-dedicated/shared-worker-agent>):
+                // let `Atomics.wait` block this thread. (Without shared memory there is nothing to
+                // wait on, so this only matters for cross-origin isolated workers.)
+                unsafe { js::rust::wrappers2::JS_SetFutexCanWait(cx) };
                 let debugger_global = DebuggerGlobalScope::new(
                     pipeline_id,
                     init.to_devtools_sender.clone(),
@@ -1037,7 +1042,13 @@ impl DedicatedWorkerGlobalScope {
         message: HandleValue,
         transfer: CustomAutoRooterGuard<Vec<*mut JSObject>>,
     ) -> ErrorResult {
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        // The owner runs in this process and in this agent cluster.
+        let data = structuredclone::write_for_same_agent_cluster(
+            cx,
+            self.upcast::<GlobalScope>(),
+            message,
+            Some(transfer),
+        )?;
         let worker = self.worker.borrow().as_ref().unwrap().clone();
         let global_scope = self.upcast::<GlobalScope>();
         let pipeline_id = global_scope.pipeline_id();

@@ -20,12 +20,31 @@ use servo_base::id::{
 use strum::IntoEnumIterator;
 pub use transferable::*;
 
+/// A structured clone written for a reader in this same process (SpiderMonkey's `SameProcess`
+/// scope). It can hold raw pointers (shared memory, transferred buffers), so it must never be
+/// copied out as bytes or sent across processes; it is consumed by exactly one reader, and
+/// dropping it unread releases what it holds. Opaque here so this crate needs no SpiderMonkey types.
+pub struct InProcessCloneData(pub Box<dyn std::any::Any + Send>);
+
+impl std::fmt::Debug for InProcessCloneData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InProcessCloneData")
+    }
+}
+
 /// A data-holder for serialized data and transferred objects.
 /// <https://html.spec.whatwg.org/multipage/#structuredserializewithtransfer>
 #[derive(Debug, Default, Deserialize, MallocSizeOf, Serialize)]
 pub struct StructuredSerializedData {
     /// Data serialized by SpiderMonkey.
     pub serialized: Vec<u8>,
+    /// Set instead of `serialized` when the clone may contain shared memory (a
+    /// `SharedArrayBuffer`) and was written for a reader in this process, such as a dedicated
+    /// worker. Skipped by serde: if this ever crosses IPC the reader gets empty data and fails
+    /// with a DataCloneError rather than dereferencing foreign pointers.
+    #[serde(skip)]
+    #[ignore_malloc_size_of = "Opaque in-process SpiderMonkey clone buffer"]
+    pub in_process: Option<InProcessCloneData>,
     /// Serialized in a structured callback,
     pub blobs: Option<FxHashMap<BlobId, BlobImpl>>,
     /// Serialized files.

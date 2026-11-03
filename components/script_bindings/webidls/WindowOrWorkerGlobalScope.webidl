@@ -9,6 +9,7 @@ typedef (TrustedScript or DOMString or Function) TimerHandler;
 [Exposed=(Window,Worker)]
 interface mixin WindowOrWorkerGlobalScope {
   [Replaceable] readonly attribute USVString origin;
+  readonly attribute boolean crossOriginIsolated;
 
   undefined reportError(any e);
 

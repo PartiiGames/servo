@@ -2301,6 +2301,11 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         self.as_global_scope().is_secure_context()
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-crossoriginisolated>
+    fn CrossOriginIsolated(&self) -> bool {
+        self.as_global_scope().cross_origin_isolated_capability()
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-window-nameditem>
     fn NamedGetter(&self, cx: &mut JSContext, name: DOMString) -> Option<NamedPropertyValue> {
         if name.is_empty() {
