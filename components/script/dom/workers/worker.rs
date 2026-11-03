@@ -347,8 +347,9 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
         self.terminated.set(true);
 
         // Step 3
+        // CanWait: also wake the worker if it is blocked in `Atomics.wait`.
         if let Some(cx) = self.context_for_interrupt.borrow().as_ref() {
-            cx.request_interrupt_callback()
+            cx.request_interrupt_callback_can_wait()
         }
     }
 

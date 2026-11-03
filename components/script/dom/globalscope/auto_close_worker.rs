@@ -44,7 +44,9 @@ impl Drop for AutoCloseWorker {
             warn!("Couldn't send an exit message to a dedicated worker.");
         }
 
-        self.context.request_interrupt_callback();
+        // The CanWait variant also wakes a worker blocked in `Atomics.wait`; otherwise the join
+        // below would wait forever for a worker parked on shared memory.
+        self.context.request_interrupt_callback_can_wait();
 
         // Step 2. If there are any tasks queued in the `WorkerGlobalScope` object's relevant agent's event loop's task queues, discard them without processing them.
         // Step 3. Abort the script currently running in the worker.
