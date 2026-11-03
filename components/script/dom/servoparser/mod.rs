@@ -26,7 +26,7 @@ use js::context::JSContext;
 use markup5ever::TokenizerResult;
 use mime::{self, Mime};
 use net_traits::mime_classifier::{ApacheBugFlag, MediaType, MimeClassifier, NoSniffFlag};
-use net_traits::policy_container::PolicyContainer;
+use net_traits::policy_container::{EmbedderPolicy, EmbedderPolicyValue, PolicyContainer};
 use net_traits::{
     FetchMetadata, LoadContext, Metadata, NetworkError, ReferrerPolicy, ResourceFetchTiming,
 };
@@ -1002,6 +1002,31 @@ impl ParserContext {
         self.parent_info
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#obtain-an-embedder-policy>
+    ///
+    /// Only `require-corp` (no `credentialless`, no report-only), and only with
+    /// `dom_cross_origin_isolation_from_headers_enabled`, the pref that also makes COOP + COEP
+    /// grant cross-origin isolation: with it, subresources of such a document need CORP or CORS.
+    fn obtain_embedder_policy(metadata: &Metadata) -> EmbedderPolicy {
+        let mut policy = EmbedderPolicy::default();
+        if !pref!(dom_cross_origin_isolation_from_headers_enabled) ||
+            !metadata.final_url.is_potentially_trustworthy()
+        {
+            return policy;
+        }
+        let require_corp = metadata
+            .headers
+            .as_deref()
+            .and_then(|headers| headers.get("cross-origin-embedder-policy"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|token| token.trim() == "require-corp");
+        if require_corp {
+            policy.value = EmbedderPolicyValue::RequireCorp;
+        }
+        policy
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#creating-a-policy-container-from-a-fetch-response>
     fn create_policy_container_from_fetch_response(metadata: &Metadata) -> PolicyContainer {
         // TODO Step 1. If response's URL's scheme is "blob", then return a clone of response's
@@ -1013,10 +1038,10 @@ impl ParserContext {
         PolicyContainer {
             // Step 3. Set result's CSP list to the result of parsing a response's Content Security Policies given response.
             csp_list: parse_csp_list_from_metadata(&metadata.headers),
-            // TODO Step 4. If environment is non-null, then set result's embedder policy to the
+            // Step 4. If environment is non-null, then set result's embedder policy to the
             // result of obtaining an embedder policy given response and environment.
             // Otherwise, set it to "unsafe-none".
-            embedder_policy: Default::default(),
+            embedder_policy: Self::obtain_embedder_policy(metadata),
             // Step 5. Set result's referrer policy to the result of parsing the `Referrer-Policy` header given response. [REFERRERPOLICY]
             referrer_policy: ReferrerPolicy::parse_header_for_response(&metadata.headers),
         }

@@ -534,6 +534,9 @@ pub struct WorkerGlobalScopeInit {
     pub origin: ImmutableOrigin,
     /// True if secure context
     pub inherited_secure_context: Option<bool>,
+    /// Whether the global that creates the worker has the cross-origin isolated capability.
+    /// A dedicated worker inherits it.
+    pub owner_cross_origin_isolated: bool,
     /// Unminify Javascript.
     pub unminify_js: bool,
     /// Handle for communicating messages to the WebGL thread, if available.

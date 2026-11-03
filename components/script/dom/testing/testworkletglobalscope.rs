@@ -60,7 +60,12 @@ impl TestWorkletGlobalScope {
             ),
             lookup_table: Default::default(),
         });
-        TestWorkletGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(cx, &global.origin(), global)
+        TestWorkletGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
+            cx,
+            &global.origin(),
+            servo_config::pref!(dom_cross_origin_isolated_always),
+            global,
+        )
     }
 
     /// Get the value associated with the given key.

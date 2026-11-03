@@ -3952,6 +3952,7 @@ impl Window {
         player_context: WindowGLContext,
         #[cfg(feature = "webgpu")] gpu_id_hub: Arc<IdentityHub>,
         inherited_secure_context: Option<bool>,
+        cross_origin_isolated_capability: bool,
         weak_script_thread: Weak<ScriptThread>,
     ) -> DomRoot<Self> {
         let error_reporter = CSSErrorReporter {
@@ -4051,7 +4052,14 @@ impl Window {
             has_dispatched_input_event: Cell::new(false),
         });
 
-        WindowBinding::Wrap::<crate::DomTypeHolder>(cx, &origin, win)
+        win.as_global_scope()
+            .set_cross_origin_isolated_capability(cross_origin_isolated_capability);
+        WindowBinding::Wrap::<crate::DomTypeHolder>(
+            cx,
+            &origin,
+            cross_origin_isolated_capability,
+            win,
+        )
     }
 
     pub(crate) fn task_manager(&self) -> Rc<TaskManager> {

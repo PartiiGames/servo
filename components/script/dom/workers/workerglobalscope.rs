@@ -143,6 +143,7 @@ pub(crate) fn prepare_workerscope_init(
         pipeline_id: global.pipeline_id(),
         origin: global.origin().immutable().clone(),
         inherited_secure_context: Some(global.is_secure_context()),
+        owner_cross_origin_isolated: global.cross_origin_isolated_capability(),
         unminify_js: global.unminify_js(),
         #[cfg(feature = "webgl")]
         webgl_chan,

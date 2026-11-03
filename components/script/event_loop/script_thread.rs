@@ -3485,11 +3485,26 @@ impl ScriptThread {
         // <https://html.spec.whatwg.org/multipage/#initialise-the-document-object>
         // Step 3. Let creationURL be navigationParams's response's URL.
         let creation_url = final_url.clone();
+        let parent_window = incomplete
+            .parent_info
+            .and_then(|parent_id| self.documents.borrow().find_window(parent_id));
+        let cross_origin_isolated = cross_origin_isolation_for_load(
+            metadata,
+            &final_url,
+            &origin,
+            incomplete.parent_info.is_some(),
+            parent_window.as_deref(),
+        );
+        // A realm's shared memory is fixed when it is created, so only reuse the initial
+        // about:blank Window if its isolation is the same.
         let window = match window_for_replacement(
             &self.window_proxies,
             incomplete.browsing_context_id,
             &origin,
-        ) {
+        )
+        .filter(|window| {
+            window.as_global_scope().cross_origin_isolated_capability() == cross_origin_isolated
+        }) {
             Some(window) => {
                 window.set_up_a_window_environment_settings_object(
                     self.layout_factory.create(layout_config),
@@ -3543,6 +3558,7 @@ impl ScriptThread {
                     #[cfg(feature = "webgpu")]
                     self.gpu_id_hub.clone(),
                     incomplete.load_data.inherited_secure_context,
+                    cross_origin_isolated,
                     self.this.clone(),
                 )
             },
@@ -4641,6 +4657,49 @@ impl Drop for ScriptThread {
 }
 
 /// Steps 1, 5, and 6 of <https://html.spec.whatwg.org/multipage/#initialise-the-document-object>
+/// Whether the Window for a navigation response gets the cross-origin isolated capability.
+/// <https://html.spec.whatwg.org/multipage/#concept-settings-object-cross-origin-isolated-capability>
+///
+/// With `dom_cross_origin_isolation_from_headers_enabled`, Servo treats a browsing context
+/// group as cross-origin isolated when its top-level document is a secure context served with
+/// `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`
+/// (<https://html.spec.whatwg.org/multipage/#coop-enforcement-bcg-switch>). A nested document
+/// shares its parent's isolation if it also sends `require-corp` and is same origin with the
+/// parent (the default `self` allowlist of the "cross-origin-isolated" permissions policy).
+///
+/// Not done yet: switching browsing context groups on a COOP mismatch (an isolated popup keeps
+/// its opener), `credentialless`, and the permissions policy itself.
+fn cross_origin_isolation_for_load(
+    metadata: &Metadata,
+    final_url: &ServoUrl,
+    origin: &MutableOrigin,
+    is_nested: bool,
+    parent: Option<&Window>,
+) -> bool {
+    if pref!(dom_cross_origin_isolated_always) {
+        return true;
+    }
+    if !pref!(dom_cross_origin_isolation_from_headers_enabled) {
+        return false;
+    }
+    // The policy value is the structured header's token, before any parameters (report-to).
+    let policy = |name: &str| -> Option<String> {
+        let value = metadata.headers.as_deref()?.get(name)?.to_str().ok()?;
+        Some(value.split(';').next()?.trim().to_owned())
+    };
+    if policy("cross-origin-embedder-policy").as_deref() != Some("require-corp") {
+        return false;
+    }
+    if !is_nested {
+        return final_url.is_potentially_trustworthy() &&
+            policy("cross-origin-opener-policy").as_deref() == Some("same-origin");
+    }
+    parent.is_some_and(|parent| {
+        let parent = parent.as_global_scope();
+        parent.cross_origin_isolated_capability() && parent.origin().same_origin(origin)
+    })
+}
+
 fn window_for_replacement(
     script_window_proxies: &ScriptWindowProxies,
     id: BrowsingContextId,

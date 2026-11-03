@@ -123,7 +123,12 @@ impl PaintWorkletGlobalScope {
                 missing_image_urls: Vec::new(),
             }),
         });
-        PaintWorkletGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(cx, &global.origin(), global)
+        PaintWorkletGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
+            cx,
+            &global.origin(),
+            servo_config::pref!(dom_cross_origin_isolated_always),
+            global,
+        )
     }
 
     pub(crate) fn image_cache(&self) -> Arc<dyn ImageCache> {

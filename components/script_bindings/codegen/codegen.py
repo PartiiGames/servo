@@ -3436,6 +3436,7 @@ class CGWrapGlobalMethod(CGAbstractMethod):
         assert descriptor.isGlobal()
         args = [Argument('&mut JSContext', 'cx'),
                 Argument('&servo_url::MutableOrigin', 'origin'),
+                Argument('bool', 'cross_origin_isolated'),
                 Argument(f"Box<{descriptor.concreteType}>", 'object')]
         retval = f'DomRoot<{descriptor.concreteType}>'
         CGAbstractMethod.__init__(self, descriptor, 'Wrap', retval, args,
@@ -3467,6 +3468,7 @@ class CGWrapGlobalMethod(CGAbstractMethod):
         {TRACE_HOOK_NAME}::<D>,
         obj.handle_mut(),
         origin,
+        cross_origin_isolated,
         {"true" if self.descriptor.useSystemCompartment else "false"});
     }}
     assert!(!obj.is_null());

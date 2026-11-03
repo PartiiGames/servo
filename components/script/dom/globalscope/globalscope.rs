@@ -307,6 +307,12 @@ pub(crate) struct GlobalScope {
     /// Is considered in a secure context
     inherited_secure_context: Option<bool>,
 
+    /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-cross-origin-isolated-capability>
+    ///
+    /// Fixed before the global's realm is created (it decides whether the realm gets shared
+    /// memory), by `set_cross_origin_isolated_capability`.
+    cross_origin_isolated_capability: Cell<bool>,
+
     /// Directory to store unminified scripts for this window if unminify-js
     /// opt is enabled.
     unminified_js_dir: Option<String>,
@@ -432,6 +438,7 @@ impl GlobalScope {
             console_group_stack: DomRefCell::new(Vec::new()),
             console_count_map: Default::default(),
             inherited_secure_context,
+            cross_origin_isolated_capability: Cell::new(pref!(dom_cross_origin_isolated_always)),
             unminified_js_dir: unminify_js.then(|| unminified_path("unminified-js")),
             byte_length_queuing_strategy_size_function: OnceCell::new(),
             count_queuing_strategy_size_function: OnceCell::new(),
@@ -2835,15 +2842,19 @@ impl GlobalScope {
         self.inherited_secure_context
     }
 
-    /// <https://html.spec.whatwg.org/multipage/#secure-context>
     /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-cross-origin-isolated-capability>
     ///
-    /// Servo does not derive cross-origin isolation from COOP/COEP yet; the
-    /// `dom_cross_origin_isolated_always` pref lets an embedder that only loads trusted content
-    /// declare every global isolated. This must agree with the realm option set when the global
-    /// was created (`script_bindings::interface::create_global_object`).
+    /// Windows derive it from COOP + COEP (`ScriptThread::cross_origin_isolation_for_load`),
+    /// dedicated workers inherit their owner's, and the `dom_cross_origin_isolated_always` pref
+    /// grants it to every global. This is what the global's realm was created with
+    /// (`script_bindings::interface::create_global_object`), so it never changes afterwards.
     pub(crate) fn cross_origin_isolated_capability(&self) -> bool {
-        pref!(dom_cross_origin_isolated_always)
+        self.cross_origin_isolated_capability.get()
+    }
+
+    /// Only before the global's reflector (and realm) is created.
+    pub(crate) fn set_cross_origin_isolated_capability(&self, value: bool) {
+        self.cross_origin_isolated_capability.set(value);
     }
 
     pub(crate) fn is_secure_context(&self) -> bool {

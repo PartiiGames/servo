@@ -314,6 +314,7 @@ impl ServiceWorkerGlobalScope {
         let scope = ServiceWorkerGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
             cx,
             &scope.origin(),
+            servo_config::pref!(dom_cross_origin_isolated_always),
             scope,
         );
         scope

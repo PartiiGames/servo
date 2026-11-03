@@ -157,6 +157,14 @@ pub struct Preferences {
     /// Gecko's `dom.postMessage.sharedArrayBuffer.bypassCOOP_COEP.insecure.enabled`, this
     /// removes the Spectre mitigation that cross-origin isolation exists for.
     pub dom_cross_origin_isolated_always: bool,
+    /// Derive cross-origin isolation from the response headers: a secure top-level document
+    /// served with `Cross-Origin-Opener-Policy: same-origin` and
+    /// `Cross-Origin-Embedder-Policy: require-corp` (and its same-origin iframes and dedicated
+    /// workers) gets the cross-origin isolated capability. Off by default: in single-process
+    /// mode Servo can only offer "logical" isolation, without the process boundary that the
+    /// capability is meant to stand for.
+    /// <https://html.spec.whatwg.org/multipage/#cross-origin-isolation-mode>
+    pub dom_cross_origin_isolation_from_headers_enabled: bool,
     // feature: WebCrypto API | #40687 | Web/API/Web_Crypto_API
     pub dom_crypto_subtle_enabled: bool,
     pub dom_document_dblclick_timeout: i64,
@@ -443,6 +451,7 @@ impl Preferences {
             dom_cookiestore_enabled: false,
             dom_credential_management_enabled: false,
             dom_cross_origin_isolated_always: false,
+            dom_cross_origin_isolation_from_headers_enabled: false,
             dom_crypto_subtle_enabled: true,
             dom_document_dblclick_dist: 1,
             dom_document_dblclick_timeout: 300,

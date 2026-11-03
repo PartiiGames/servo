@@ -353,7 +353,12 @@ impl SharedWorkerGlobalScope {
             extended_lifetime,
             registration_id,
         ));
-        SharedWorkerGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(cx, &scope.origin(), scope)
+        SharedWorkerGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
+            cx,
+            &scope.origin(),
+            servo_config::pref!(dom_cross_origin_isolated_always),
+            scope,
+        )
     }
 
     /// <https://html.spec.whatwg.org/multipage/#run-a-worker>

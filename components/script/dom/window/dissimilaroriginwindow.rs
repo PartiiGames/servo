@@ -88,7 +88,7 @@ impl DissimilarOriginWindow {
             pipeline_id: PipelineId::new(),
             origin: opaque_origin.clone(),
         });
-        DissimilarOriginWindowBinding::Wrap::<crate::DomTypeHolder>(cx, &opaque_origin, win)
+        DissimilarOriginWindowBinding::Wrap::<crate::DomTypeHolder>(cx, &opaque_origin, false, win)
     }
 
     pub(crate) fn origin(&self) -> MutableOrigin {
