@@ -834,6 +834,9 @@ pub enum ScriptToConstellationMessage {
     /// aggregate lock count and notify the provider only when the count transitions from N to 0.
     /// <https://w3c.github.io/screen-wake-lock/#dfn-release-wake-lock>
     ReleaseWakeLock(WakeLockType),
+    /// Partii: an `<iframe>`'s `allow` / `allowfullscreen` changed: the container policy its
+    /// browsing context's next navigation (from inside the frame too) uses.
+    SetContainerPolicy(BrowsingContextId, crate::ContainerPolicy),
 }
 
 impl fmt::Debug for ScriptToConstellationMessage {

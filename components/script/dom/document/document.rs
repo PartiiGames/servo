@@ -3535,9 +3535,11 @@ impl Document {
     /// initial about:blank) gets the default allowlist 'self' against its parent.
     pub(crate) fn is_feature_enabled(&self, feature: PolicyFeature) -> bool {
         if let Some(policy) = self.container_policy.borrow().as_ref() {
-            return policy
-                .allowlist(feature)
-                .matches(self.origin().immutable(), &self.url());
+            return policy.allowlist(feature).matches(
+                self.origin().immutable(),
+                &self.url(),
+                policy.src_url.as_ref(),
+            );
         }
         if self.window.is_top_level() {
             return true;

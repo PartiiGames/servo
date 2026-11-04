@@ -2080,6 +2080,9 @@ where
                     let _ = event_loop.send(ScriptThreadMessage::TriggerGarbageCollection);
                 }
             },
+            ScriptToConstellationMessage::SetContainerPolicy(browsing_context_id, policy) => {
+                self.container_policies.insert(browsing_context_id, policy);
+            },
             ScriptToConstellationMessage::AcquireWakeLock(type_) => match type_ {
                 WakeLockType::Screen => {
                     self.screen_wake_lock_count += 1;

@@ -181,7 +181,7 @@ impl HTMLIFrameElement {
 
         // Partii: the container policy for the document this navigation creates, from this
         // element's allow / allowfullscreen attributes as they are now.
-        load_data.container_policy = Some(self.container_policy(&load_data.url));
+        load_data.container_policy = Some(self.container_policy());
 
         {
             let load_blocker = &self.load_blocker;
@@ -826,13 +826,24 @@ impl HTMLIFrameElement {
     /// A feature the embedding document may not use is never granted; a feature the `allow`
     /// attribute declares gets its allowlist; `allowfullscreen` means `fullscreen *`; anything
     /// else gets the default allowlist 'self' (the embedding document's origin).
-    fn container_policy(&self, url: &ServoUrl) -> ContainerPolicy {
+    fn container_policy(&self) -> ContainerPolicy {
         let document = self.owner_document();
         let self_origin = document.origin().immutable().clone();
-        // 'src': the origin of the URL the frame is navigated to (srcdoc and about:blank
-        // documents share the embedder's origin).
-        let src_origin = match url.origin() {
-            origin if origin.is_tuple() => origin,
+        // 'src': the origin of the URL in the src attribute (srcdoc and about:blank documents
+        // share the embedder's origin).
+        let element = self.upcast::<Element>();
+        let src_url = if element.has_attribute(&local_name!("srcdoc")) {
+            None
+        } else {
+            let src = element.get_string_attribute(&local_name!("src"));
+            if src.is_empty() {
+                None
+            } else {
+                document.base_url().join(&src.to_string()).ok()
+            }
+        };
+        let src_origin = match src_url.as_ref().map(|url| url.origin()) {
+            Some(origin) if origin.is_tuple() => origin,
             _ => self_origin.clone(),
         };
         let allow = self
@@ -843,7 +854,10 @@ impl HTMLIFrameElement {
             .upcast::<Element>()
             .has_attribute(&local_name!("allowfullscreen"));
 
-        let mut policy = ContainerPolicy::default();
+        let mut policy = ContainerPolicy {
+            src_url,
+            ..Default::default()
+        };
         for feature in PolicyFeature::ALL {
             *policy.allowlist_mut(feature) = if !document.is_feature_enabled(feature) {
                 Allowlist::None
@@ -1161,6 +1175,18 @@ impl VirtualMethods for HTMLIFrameElement {
             // > element's iframe sandboxing flag set.
             local_name!("sandbox") if self.browsing_context_id.get().is_some() => {
                 self.parse_sandbox_attribute();
+            },
+            // Partii: the container policy is computed at each navigation of the frame; tell the
+            // constellation, so a navigation started inside the frame uses the current one.
+            local_name!("allow") | local_name!("allowfullscreen") => {
+                if let Some(browsing_context_id) = self.browsing_context_id.get() {
+                    self.owner_window().send_to_constellation(
+                        ScriptToConstellationMessage::SetContainerPolicy(
+                            browsing_context_id,
+                            self.container_policy(),
+                        ),
+                    );
+                }
             },
             local_name!("srcdoc") => {
                 // https://html.spec.whatwg.org/multipage/#the-iframe-element:the-iframe-element-9

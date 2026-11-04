@@ -65,9 +65,15 @@ pub enum Allowlist {
 
 impl Allowlist {
     /// Does this allowlist match a document with `origin` (whose URL is `url`)? An opaque origin
-    /// (a sandboxed frame without `allow-same-origin`) only matches `*`, or its URL's origin when
-    /// that was listed (`'src'`), like other engines.
-    pub fn matches(&self, origin: &ImmutableOrigin, url: &ServoUrl) -> bool {
+    /// (a sandboxed frame without `allow-same-origin`) matches `*`, and otherwise only when it is
+    /// the frame's declared `src` document (`src_url`) and that URL's origin is listed ('src'):
+    /// a later navigation gets a new opaque origin, which no listed origin matches.
+    pub fn matches(
+        &self,
+        origin: &ImmutableOrigin,
+        url: &ServoUrl,
+        src_url: Option<&ServoUrl>,
+    ) -> bool {
         match self {
             Allowlist::All => true,
             Allowlist::None => false,
@@ -76,7 +82,7 @@ impl Allowlist {
                     origins.contains(origin)
                 } else {
                     let url_origin = url.origin();
-                    url_origin.is_tuple() && origins.contains(&url_origin)
+                    src_url == Some(url) && url_origin.is_tuple() && origins.contains(&url_origin)
                 }
             },
         }
@@ -87,6 +93,9 @@ impl Allowlist {
 /// [`PolicyFeature`], computed by the embedding document.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct ContainerPolicy {
+    /// The URL in the `<iframe src>` when the policy was made ('src'); `None` for srcdoc and
+    /// about:blank.
+    pub src_url: Option<ServoUrl>,
     pub fullscreen: Allowlist,
     pub pointer_lock: Allowlist,
     pub gamepad: Allowlist,
