@@ -889,8 +889,12 @@ fn parse_a_margin(value: Option<&DOMString>) -> Result<IntersectionObserverMargi
         _ => "0px",
     };
 
+    // Stylo's IntersectionObserverMargin only takes px and %. Absolute lengths are valid too
+    // (<length-percentage>); like other engines, convert them to whole px first.
+    let value = absolute_lengths_to_px(value);
+
     // Create necessary style ParserContext and utilize stylo's IntersectionObserverMargin
-    let mut parser = Parser::new(value);
+    let mut parser = Parser::new(&value);
 
     let context = parser_context_for_anonymous_content(
         CssRuleType::Style,
@@ -901,6 +905,34 @@ fn parse_a_margin(value: Option<&DOMString>) -> Result<IntersectionObserverMargi
     parser
         .parse_entirely(|p| IntersectionObserverMargin::parse(&context, p))
         .map_err(|_| ())
+}
+
+/// Rewrites each whitespace-separated absolute length (cm, mm, q, in, pt, pc) as whole px,
+/// truncated toward zero (10cm -> 377px), leaving everything else as it is.
+fn absolute_lengths_to_px(value: &str) -> String {
+    value
+        .split_ascii_whitespace()
+        .map(|token| {
+            let lower = token.to_ascii_lowercase();
+            let px_per_unit = [
+                ("cm", 96.0 / 2.54),
+                ("mm", 96.0 / 25.4),
+                ("in", 96.0),
+                ("pt", 96.0 / 72.0),
+                ("pc", 16.0),
+                ("q", 96.0 / 101.6),
+            ];
+            for (unit, factor) in px_per_unit {
+                if let Some(number) = lower.strip_suffix(unit) {
+                    if let Ok(number) = number.parse::<f64>() {
+                        return format!("{}px", (number * factor).trunc() as i64);
+                    }
+                }
+            }
+            token.to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// In terms of intersection observer, we consider zero-area rectangles as long as the area is not negative.
