@@ -131,13 +131,17 @@ impl ConvolverNodeMethods<crate::DomTypeHolder> for ConvolverNode {
                     return Err(Error::NotSupported(None));
                 }
                 // > 2. Acquire the content of the AudioBuffer.
-                let Some(content) = buffer.get_channels(cx) else {
-                    return Err(Error::NotSupported(None));
+                // If its data was detached (transferred), acquiring gives zero-length channel
+                // data: the node then renders silence.
+                // <https://webaudio.github.io/web-audio-api/#acquire-the-content>
+                let (channels, sample_rate) = match buffer.get_channels(cx) {
+                    Some(content) => (content.buffers.clone(), content.sample_rate),
+                    None => (Vec::new(), *buffer.SampleRate()),
                 };
                 // The buffer and the normalize attribute at this time configure the node.
                 Some(ConvolverBuffer {
-                    channels: content.buffers.clone(),
-                    sample_rate: content.sample_rate,
+                    channels,
+                    sample_rate,
                     normalize: self.normalize.get(),
                 })
             },

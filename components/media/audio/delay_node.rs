@@ -50,6 +50,10 @@ pub(crate) struct DelayNode {
     live_frames: usize,
     /// Per-frame delay in frames for the current quantum.
     delays: Vec<f64>,
+    /// For each quantum-sized slot of the lines, the channel count of the input written there
+    /// (0: never written, or silence). The output of a quantum has the channel count of the
+    /// input it delays: mono silence where the history holds no input.
+    slot_channels: Vec<u8>,
 }
 
 impl DelayNode {
@@ -63,6 +67,7 @@ impl DelayNode {
             write: 0,
             live_frames: 0,
             delays: vec![0.; FRAMES_PER_BLOCK_USIZE],
+            slot_channels: Vec::new(),
         }
     }
 
@@ -74,6 +79,7 @@ impl DelayNode {
                 FRAMES_PER_BLOCK_USIZE +
                 2;
             self.len = frames.div_ceil(FRAMES_PER_BLOCK_USIZE) * FRAMES_PER_BLOCK_USIZE;
+            self.slot_channels = vec![0; self.len / FRAMES_PER_BLOCK_USIZE];
         }
     }
 
@@ -89,6 +95,7 @@ impl DelayNode {
         }
         if self.lines.is_empty() || self.live_frames == 0 {
             self.lines = vec![vec![0.; self.len]; channels];
+            self.slot_channels.fill(0);
             return;
         }
         let interpretation = self.channel_info.interpretation;
@@ -162,12 +169,53 @@ impl DelayNode {
                 None => dst.fill(0.),
             }
         }
+        self.slot_channels[start / FRAMES_PER_BLOCK_USIZE] =
+            if silent { 0 } else { block.chan_count() };
         self.write = (start + FRAMES_PER_BLOCK_USIZE) % self.len;
         if silent {
             self.live_frames = self.live_frames.saturating_sub(FRAMES_PER_BLOCK_USIZE);
         } else {
             self.live_frames = self.len;
         }
+    }
+
+    /// The output quantum, where frame `i` reads `delays[i]` frames before line position
+    /// `base + i`.
+    fn render(&self, base: usize) -> Block {
+        // The slots these reads touch (with the interpolation neighbour), and the largest input
+        // channel count among them.
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for (i, d) in self.delays.iter().enumerate() {
+            let p = (base + i) as f64 - d;
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        let slots = self.slot_channels.len() as i64;
+        let first = (lo.floor() as i64).div_euclid(FRAMES_PER_BLOCK_USIZE as i64);
+        let last = (hi.ceil() as i64).div_euclid(FRAMES_PER_BLOCK_USIZE as i64);
+        let mut delayed_channels = 0;
+        for slot in first..=last.min(first + slots - 1) {
+            delayed_channels =
+                delayed_channels.max(self.slot_channels[slot.rem_euclid(slots) as usize]);
+        }
+        if delayed_channels == 0 {
+            return Block::default();
+        }
+        let channels = self.lines.len();
+        let mut block = Block::for_channels_explicit(channels as u8);
+        for chan in 0..channels {
+            let line = &self.lines[chan];
+            let data = block.data_chan_mut(chan as u8);
+            for (i, sample) in data.iter_mut().enumerate() {
+                *sample = Self::read(line, self.len, (base + i) % self.len, self.delays[i]);
+            }
+        }
+        if (delayed_channels as usize) < channels {
+            // Earlier input with fewer channels was up-mixed into the current layout; give it
+            // back with its own channel count.
+            block.mix(delayed_channels, self.channel_info.interpretation);
+        }
+        block
     }
 
     fn channels_for(&self, input: &Block) -> usize {
@@ -191,18 +239,9 @@ impl DelayNode {
             out.blocks.push(Block::default());
             return out;
         }
-        let channels = self.lines.len();
-        let mut block = Block::for_channels_explicit(channels as u8);
         // The frames of this quantum will be written at self.write..; frame i reads relative
         // to where it would be written.
-        for chan in 0..channels {
-            let line = &self.lines[chan];
-            let data = block.data_chan_mut(chan as u8);
-            for (i, sample) in data.iter_mut().enumerate() {
-                *sample = Self::read(line, self.len, (self.write + i) % self.len, self.delays[i]);
-            }
-        }
-        out.blocks.push(block);
+        out.blocks.push(self.render(self.write));
         out
     }
 
@@ -249,13 +288,7 @@ impl AudioNodeEngine for DelayNode {
         // frames cannot happen, as the delay is never negative.
         let start = self.write;
         self.write_block(block, silent_in);
-        for chan in 0..channels {
-            let line = &self.lines[chan];
-            let data = block.data_chan_mut(chan as u8);
-            for (i, sample) in data.iter_mut().enumerate() {
-                *sample = Self::read(line, self.len, start + i, self.delays[i]);
-            }
-        }
+        inputs.blocks[0] = self.render(start);
         inputs
     }
 
@@ -364,19 +397,12 @@ mod tests {
             delay_time: 300. / RATE,
         };
         let mut d = DelayNode::new(opts, ChannelInfo::default());
-        run(&mut d, impulse_block(0), 0);
-        let mut n = 1;
-        let mut saw_impulse = false;
-        loop {
-            let b = run(&mut d, Block::default(), n);
-            if b.is_silence() {
-                break;
-            }
-            saw_impulse |= b.data_chan(0).iter().any(|v| *v != 0.);
-            n += 1;
-            assert!(n < 20, "never went silent");
-        }
-        assert!(saw_impulse);
+        let out = render(&mut d, vec![impulse_block(0)], 10);
+        let peak = out.iter().position(|v| *v != 0.).unwrap();
+        assert_eq!(peak, 300);
+        // Once the line holds only silence, the node stops producing blocks at all.
+        assert!(run(&mut d, Block::default(), 10).is_silence());
+        assert_eq!(d.live_frames, 0);
     }
 
     #[test]
@@ -419,6 +445,36 @@ mod tests {
         }
         let peak = out.iter().position(|v| *v != 0.).unwrap();
         assert_eq!(peak, 7 + 128);
+    }
+
+    #[test]
+    fn output_channels_follow_the_delayed_input() {
+        // delaynode-channel-count-1.html: unfilled history is mono silence, then the delayed
+        // stereo input comes out stereo.
+        // A power-of-two rate, as in the WPT, so the delay is exactly 256 frames.
+        const RATE: f32 = 32768.;
+        let opts = DelayNodeOptions {
+            max_delay_time: 1.,
+            delay_time: 256. / RATE,
+        };
+        let mut d = DelayNode::new(opts, ChannelInfo::default());
+        let mut run = |n: u64| {
+            let mut c = Chunk::default();
+            c.blocks.push(Block::for_vec(vec![0.5; 256]));
+            let info = BlockInfo {
+                sample_rate: RATE,
+                frame: Tick(n * 128),
+                time: 0.,
+            };
+            d.process(c, &info).blocks.remove(0)
+        };
+        let out0 = run(0);
+        assert!(out0.is_silence());
+        assert_eq!(out0.chan_count(), 1);
+        assert_eq!(run(1).chan_count(), 1);
+        let out2 = run(2);
+        assert_eq!(out2.chan_count(), 2);
+        assert_eq!(out2.data_chan(1)[0], 0.5);
     }
 
     #[test]
