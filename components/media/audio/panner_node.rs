@@ -250,18 +250,24 @@ impl PannerNode {
         }
     }
 
-    fn linear_distance(&self, mut distance: f64, rolloff_factor: f64) -> f64 {
-        if distance > self.max_distance {
-            distance = self.max_distance;
+    /// <https://webaudio.github.io/web-audio-api/#dom-distancemodeltype-linear>
+    fn linear_distance(&self, distance: f64, rolloff_factor: f64) -> f64 {
+        let dref = self.ref_distance.min(self.max_distance);
+        let dmax = self.ref_distance.max(self.max_distance);
+        // > In the case where d'ref = d'max, the value of the linear model is taken to be 1-f.
+        if dref == dmax {
+            return 1. - rolloff_factor;
         }
-        if distance < self.ref_distance {
-            distance = self.ref_distance;
-        }
-        let denom = self.max_distance - self.ref_distance;
-        1. - rolloff_factor * (distance - self.ref_distance) / denom
+        let distance = distance.max(dref).min(dmax);
+        1. - rolloff_factor * (distance - dref) / (dmax - dref)
     }
 
+    /// <https://webaudio.github.io/web-audio-api/#dom-distancemodeltype-inverse>
     fn inverse_distance(&self, mut distance: f64, rolloff_factor: f64) -> f64 {
+        // refDistance 0 would divide 0 by 0 at distance 0: silence, as Chrome does.
+        if self.ref_distance == 0. {
+            return 0.;
+        }
         if distance < self.ref_distance {
             distance = self.ref_distance;
         }
@@ -269,7 +275,12 @@ impl PannerNode {
         self.ref_distance / denom
     }
 
+    /// <https://webaudio.github.io/web-audio-api/#dom-distancemodeltype-exponential>
     fn exponential_distance(&self, mut distance: f64, rolloff_factor: f64) -> f64 {
+        // refDistance 0 would give Inf or NaN: silence, as Chrome does.
+        if self.ref_distance == 0. {
+            return 0.;
+        }
         if distance < self.ref_distance {
             distance = self.ref_distance;
         }
