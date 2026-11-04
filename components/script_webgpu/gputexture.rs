@@ -16,7 +16,9 @@ use script_bindings::codegen::GenericBindings::WebGPUBinding::{
 };
 use script_bindings::dom::MutNullableDom;
 use script_bindings::interfaces::PromiseHelpers;
-use script_bindings::reflector::{DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap};
+use script_bindings::reflector::{
+    AssociatedMemory, DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap,
+};
 use webgpu_traits::{
     Extent3d, ImageSubresourceRange, TextureAspect, TextureDescriptor, TextureUsages,
     TextureViewDescriptor, WebGPU, WebGPURequest, WebGPUTexture, WebGPUTextureView,
@@ -55,7 +57,9 @@ impl Drop for DroppableGPUTexture {
 
 #[dom_struct]
 pub struct GPUTexture<D: DomTypes> {
-    reflector_: Reflector,
+    /// Reports an estimate of the texture's size to the JS GC (see `create`), so that
+    /// textures left for GC are collected under GPU memory pressure.
+    reflector_: Reflector<AssociatedMemory>,
     label: DomRefCell<USVString>,
     device: Dom<D::GPUDevice>,
     #[no_trace]
@@ -187,8 +191,20 @@ where
             .expect("Failed to create WebGPU Texture");
 
         let texture = WebGPUTexture(texture_id);
+        // A memory hint for the GC, not an exact size: texels x 4 bytes x layers x samples,
+        // plus a third for a mip chain.
+        let estimate = (size.width as u64)
+            .saturating_mul(size.height as u64)
+            .saturating_mul(size.depth_or_array_layers as u64)
+            .saturating_mul(4)
+            .saturating_mul(descriptor.sampleCount.max(1) as u64);
+        let estimate = if descriptor.mipLevelCount > 1 {
+            estimate.saturating_add(estimate / 3)
+        } else {
+            estimate
+        };
 
-        Ok(GPUTexture::new(
+        let texture = GPUTexture::new(
             cx,
             &*device.global_from_reflector(),
             texture,
@@ -201,7 +217,11 @@ where
             descriptor.format,
             descriptor.usage,
             descriptor.parent.label.clone(),
-        ))
+        );
+        texture
+            .reflector_
+            .update_memory_size(&*texture, usize::try_from(estimate).unwrap_or(usize::MAX));
+        Ok(texture)
     }
 
     pub(crate) fn get_default_view(&self, cx: &mut JSContext) -> WebGPUTextureView {
@@ -296,6 +316,8 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gputexture-destroy>
     fn Destroy(&self) {
+        // The GPU memory goes now, not at GC.
+        self.reflector_.update_memory_size(self, 0);
         if let Err(e) = self
             .droppable
             .channel

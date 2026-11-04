@@ -19,7 +19,9 @@ use script_bindings::codegen::GenericBindings::WebGPUBinding::{
 };
 use script_bindings::error::{Error, Fallible};
 use script_bindings::interfaces::{PromiseHelpers, StackRootPromiseHelpers};
-use script_bindings::reflector::{DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap};
+use script_bindings::reflector::{
+    AssociatedMemory, DomGlobalGeneric, DomObject, Reflector, reflect_dom_object_with_wrap,
+};
 use script_bindings::routed_promise::RoutedPromiseListener;
 use script_bindings::trace::RootedTraceableBox;
 use servo_base::generic_channel::GenericSharedMemory;
@@ -99,7 +101,9 @@ impl Drop for DroppableGPUBuffer {
 
 #[dom_struct]
 pub struct GPUBuffer<D: DomTypes> {
-    reflector_: Reflector,
+    /// Reports the buffer's size to the JS GC (see `create`), so that buffers left for
+    /// GC are collected under GPU memory pressure, not only when JS memory grows.
+    reflector_: Reflector<AssociatedMemory>,
     droppable: DroppableGPUBuffer,
     label: DomRefCell<USVString>,
     device: Dom<D::GPUDevice>,
@@ -211,7 +215,7 @@ where
         let buffer = WebGPUBuffer(id);
 
         let global = <D::GPUDevice as DomGlobalGeneric<D>>::global_from_reflector(device);
-        Ok(GPUBuffer::new(
+        let buffer = GPUBuffer::new(
             cx,
             &*global,
             device.channel(),
@@ -221,7 +225,11 @@ where
             descriptor.usage,
             mapping,
             descriptor.parent.label.clone(),
-        ))
+        );
+        buffer
+            .reflector()
+            .update_memory_size(&*buffer, usize::try_from(descriptor.size).unwrap_or(usize::MAX));
+        Ok(buffer)
     }
 }
 
@@ -269,6 +277,8 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpubuffer-destroy>
     fn Destroy(&self, cx: &mut JSContext) {
+        // The GPU memory goes now, not at GC.
+        self.reflector().update_memory_size(self, 0);
         // Step 1
         self.Unmap(cx);
         // Step 2
