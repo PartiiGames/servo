@@ -791,10 +791,32 @@ struct AudioWorkletHost {
     runtime: Runtime,
 }
 
+/// The render thread's host slot. Normally emptied by the render thread's exit hook. If it
+/// still holds a host when thread-locals are destroyed (the thread ended some other way), the
+/// host is leaked: dropping a SpiderMonkey runtime then would run after mozjs's own thread-locals
+/// are gone and abort the process.
+struct HostSlot(RefCell<Option<AudioWorkletHost>>);
+
+impl Drop for HostSlot {
+    fn drop(&mut self) {
+        if let Some(host) = self.0.get_mut().take() {
+            warn!("AudioWorklet host still alive at thread exit; leaking it.");
+            std::mem::forget(host);
+        }
+    }
+}
+
+impl std::ops::Deref for HostSlot {
+    type Target = RefCell<Option<AudioWorkletHost>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 thread_local! {
     /// Set when a processor ran in the current render quantum.
     static PROCESSED_THIS_QUANTUM: Cell<bool> = const { Cell::new(false) };
-    static HOST: RefCell<Option<AudioWorkletHost>> = const { RefCell::new(None) };
+    static HOST: HostSlot = const { HostSlot(RefCell::new(None)) };
 }
 
 /// Run `f` with the render thread's global, if the host exists.

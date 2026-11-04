@@ -300,7 +300,16 @@ impl AudioRenderThread {
             },
         };
 
-        thread.event_loop(event_queue);
+        // If the loop panics, embedder state (the AudioWorklet's JS runtime) must still be torn
+        // down in order here: left to thread-local destructors, a SpiderMonkey runtime is dropped
+        // after mozjs's own thread-locals are gone, which aborts the process.
+        let looped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            thread.event_loop(event_queue)
+        }));
+        if let Err(panic) = looped {
+            run_exit_hooks();
+            std::panic::resume_unwind(panic);
+        }
         // Embedder state (the AudioWorklet's processors, global and JS runtime) goes before the
         // graph, which may still hold processor handles.
         run_exit_hooks();
