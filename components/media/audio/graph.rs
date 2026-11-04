@@ -381,9 +381,14 @@ impl AudioGraph {
         // AnalyserNodes are processed even when nothing downstream pulls from them: a page may
         // connect a source to an analyser only to read it (Tone.js meters, the j9 probes). The
         // rendering loop orders all of the context's nodes, not only those that reach the
-        // destination.
+        // destination. So are AudioWorkletNodes: an actively processing processor runs whether
+        // or not its outputs reach the destination ("automatic pull"), and one with no outputs
+        // is a sink.
         for ix in self.graph.node_indices() {
-            if self.graph[ix].node.borrow().node_type() == AudioNodeType::AnalyserNode {
+            if matches!(
+                self.graph[ix].node.borrow().node_type(),
+                AudioNodeType::AnalyserNode | AudioNodeType::AudioWorkletNode
+            ) {
                 roots.push(ix);
             }
         }

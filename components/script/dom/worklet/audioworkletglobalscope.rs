@@ -40,7 +40,9 @@ use servo_media::audio::audio_node::BlockInfo;
 use servo_media::audio::audio_worklet_node::AudioWorkletProcessorHandle;
 use servo_media::audio::block::{Block, FRAMES_PER_BLOCK_USIZE};
 use servo_media::audio::context::RenderTaskSender;
-use servo_media::audio::render_thread::{on_render_thread_exit, on_render_thread_idle};
+use servo_media::audio::render_thread::{
+    on_render_quantum_end, on_render_thread_exit, on_render_thread_idle,
+};
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use style::thread_state::{self, ThreadState};
 
@@ -307,6 +309,7 @@ impl AudioWorkletGlobalScope {
         info: &BlockInfo,
     ) -> bool {
         self.set_time(info);
+        PROCESSED_THIS_QUANTUM.with(|p| p.set(true));
         let mut realm = enter_auto_realm(cx, self);
         let cx = &mut realm.current_realm();
         let global = self.upcast::<GlobalScope>();
@@ -341,7 +344,15 @@ impl AudioWorkletGlobalScope {
                     .iter()
                     .map(|v| v.len())
                     .ne(output_channels.iter().copied());
-            if shape_changed &&
+            // The page may transfer a channel's buffer away (it can't transfer the frozen arrays
+            // themselves): hand it fresh arrays next time.
+            let detached = state
+                .input_arrays
+                .iter()
+                .chain(state.output_arrays.iter())
+                .flatten()
+                .any(|array| is_detached(array.get()));
+            if (shape_changed || detached) &&
                 reshape_arrays(cx, state, &input_channels, &output_channels).is_err()
             {
                 drop(processors);
@@ -546,11 +557,18 @@ fn reshape_arrays(
                     }
                     list.push(Heap::boxed(a.get()));
                 }
+                // inputs[n] and outputs[n] are FrozenArrays.
+                if !js::rust::wrappers2::JS_FreezeObject(cx, inner.handle()) {
+                    return Err(());
+                }
                 rooted!(&in(cx) let v = ObjectValue(inner.get()));
                 if !JS_SetElement(cx, outer.handle(), n as u32, v.handle()) {
                     return Err(());
                 }
                 arrays.push(list);
+            }
+            if !js::rust::wrappers2::JS_FreezeObject(cx, outer.handle()) {
+                return Err(());
             }
             out.set(ObjectValue(outer.get()));
             Ok(())
@@ -558,6 +576,16 @@ fn reshape_arrays(
     }
     build(cx, input_channels, &mut state.input_arrays, &state.inputs)?;
     build(cx, output_channels, &mut state.output_arrays, &state.outputs)
+}
+
+/// Whether a Float32Array we handed out has lost its buffer (been transferred).
+#[expect(unsafe_code)]
+fn is_detached(array: *mut JSObject) -> bool {
+    match TypedArray::<Float32, *mut JSObject>::from(array) {
+        #[allow(deprecated)]
+        Ok(mut array) => unsafe { array.as_mut_slice() }.is_none_or(|s| s.is_empty()),
+        Err(_) => true,
+    }
 }
 
 /// Copy `data` into a Float32Array (no-op if it was detached or resized by the page).
@@ -684,7 +712,7 @@ impl AudioWorkletGlobalScopeMethods<crate::DomTypeHolder> for AudioWorkletGlobal
     /// <https://webaudio.github.io/web-audio-api/#dom-audioworkletglobalscope-port>
     fn Port(&self, cx: &mut JSContext) -> DomRoot<MessagePort> {
         self.port.or_init(|| {
-            // Not yet entangled with the AudioWorklet's port: a v1 gap (see DESIGN.md).
+            // Only if the AudioWorklet's end couldn't be transferred: an unentangled port.
             let port = MessagePort::new(cx, self.upcast());
             self.upcast::<GlobalScope>().track_message_port(&port, None);
             port
@@ -717,6 +745,8 @@ struct AudioWorkletHost {
 }
 
 thread_local! {
+    /// Set when a processor ran in the current render quantum.
+    static PROCESSED_THIS_QUANTUM: Cell<bool> = const { Cell::new(false) };
     static HOST: RefCell<Option<AudioWorkletHost>> = const { RefCell::new(None) };
 }
 
@@ -753,6 +783,7 @@ struct HostInit {
     context: Trusted<BaseAudioContext>,
     sender: RenderTaskSender,
     worklet_id: WorkletId,
+    global_port: Option<StructuredSerializedData>,
 }
 
 #[expect(unsafe_code)]
@@ -780,6 +811,16 @@ fn ensure_host(init: HostInit) {
         init.sample_rate,
         init.context,
     );
+    // AudioWorkletGlobalScope.port: the transferred end of AudioWorklet.port, in place before
+    // any module runs.
+    if let Some(data) = init.global_port {
+        rooted!(&in(&mut cx) let mut value = UndefinedValue());
+        if let Ok(ports) = structuredclone::read(&mut cx, global.upcast(), data, value.handle_mut()) {
+            if let Some(port) = ports.into_iter().next() {
+                global.port.set(Some(&port));
+            }
+        }
+    }
     let roots = RootedTraceableBox::new(HostRoots {
         global: Dom::from_ref(&*global),
     });
@@ -801,6 +842,15 @@ fn ensure_host(init: HostInit) {
             IDLE_NURSERY_THRESHOLD_KB,
         );
     }
+    // <https://webaudio.github.io/web-audio-api/#rendering-loop>: perform a microtask checkpoint
+    // after the render quantum (only if a processor ran, so idle contexts pay nothing).
+    on_render_quantum_end(Box::new(|| {
+        if PROCESSED_THIS_QUANTUM.with(|p| p.replace(false)) {
+            with_host(|cx, global| {
+                global.upcast::<WorkletGlobalScope>().perform_a_microtask_checkpoint(cx)
+            });
+        }
+    }));
     let mut gc_policy = IdleGc::new();
     on_render_thread_idle(Box::new(move || gc_policy.run()));
     // Tear down in order when the context closes and the render loop ends.
@@ -926,14 +976,19 @@ pub(crate) struct AudioWorkletThreadPool {
     init: WorkletGlobalScopeInit,
     sample_rate: f32,
     context: Trusted<BaseAudioContext>,
+    /// AudioWorklet.port's partner, serialized for transfer; taken by the first addModule().
+    #[no_trace]
+    global_port: RefCell<Option<StructuredSerializedData>>,
 }
 
 impl AudioWorkletThreadPool {
     pub(crate) fn new(
         context: &BaseAudioContext,
         init: WorkletGlobalScopeInit,
+        global_port: Option<StructuredSerializedData>,
     ) -> AudioWorkletThreadPool {
         AudioWorkletThreadPool {
+            global_port: RefCell::new(global_port),
             sender: context.audio_context_impl().lock().unwrap().render_task_sender(),
             init,
             sample_rate: *context.SampleRate(),
@@ -970,6 +1025,7 @@ impl WorkletThreadPool for AudioWorkletThreadPool {
             context: self.context.clone(),
             sender: self.sender.clone(),
             worklet_id,
+            global_port: self.global_port.borrow_mut().take(),
         };
         let promise = TrustedPromise::from(promise);
         let script_thread_sender = self.init.to_script_thread_sender.clone();
@@ -1072,11 +1128,9 @@ impl AudioWorkletProcessorHandle for ProcessorHandle {
         info: &BlockInfo,
     ) -> bool {
         let id = self.id;
-        let result = with_host(|cx, global| {
-            let keep_alive = global.process(cx, id, inputs, outputs, params, info);
-            global.upcast::<WorkletGlobalScope>().perform_a_microtask_checkpoint(cx);
-            keep_alive
-        });
+        // The microtask checkpoint comes once the whole quantum is rendered
+        // (`on_render_quantum_end` in ensure_host), not after each processor.
+        let result = with_host(|cx, global| global.process(cx, id, inputs, outputs, params, info));
         result.unwrap_or(false)
     }
 }
