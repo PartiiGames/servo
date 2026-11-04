@@ -236,6 +236,9 @@ impl WheelEventMethods<crate::DomTypeHolder> for WheelEvent {
             init.deltaZ,
             init.deltaMode,
         );
+        event
+            .upcast::<MouseEvent>()
+            .set_movement((*init.parent.movementX, *init.parent.movementY));
 
         Ok(event)
     }

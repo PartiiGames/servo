@@ -1356,10 +1356,73 @@ impl ScriptThread {
         }
     }
 
+    /// Whether any fully active, unthrottled document has `requestIdleCallback()` callbacks.
+    fn has_idle_callbacks(&self) -> bool {
+        self.documents.borrow().iter().any(|(_, document)| {
+            document.is_fully_active()
+                && !document.window().throttled()
+                && document.window().has_idle_callbacks()
+        })
+    }
+
+    /// <https://w3c.github.io/requestidlecallback/#start-an-idle-period-algorithm>
+    ///
+    /// The event loop has nothing to do: run idle callbacks until the deadline, which is at most
+    /// 50 ms away and never past the next timer or, while a page animates, the next frame.
+    /// Returns whether any callback ran (if not, there was no idle time left).
+    fn run_an_idle_period(&self, cx: &mut js::context::JSContext) -> bool {
+        let now = Instant::now();
+        let mut deadline = now + Duration::from_millis(50);
+        if let Some(next_timer) = self.timer_scheduler.borrow().next_deadline() {
+            deadline = deadline.min(next_timer);
+        }
+        let documents: Vec<_> = self
+            .documents
+            .borrow()
+            .iter()
+            .map(|(_, document)| document)
+            .collect();
+        let animating = documents.iter().any(|document| {
+            document.is_fully_active()
+                && (document.has_active_request_animation_frame_callbacks()
+                    || document.animation_manager().running_animation_count() != 0)
+        });
+        if animating {
+            let last_frame = self.last_render_opportunity_time.get().unwrap_or(now);
+            deadline = deadline.min(last_frame + Duration::from_micros(16_667));
+        }
+        if deadline <= now {
+            return false;
+        }
+        let mut ran = false;
+        for document in documents {
+            let window = document.window();
+            if document.is_fully_active() && !window.throttled() && window.has_idle_callbacks() {
+                ran |= window.run_idle_period(cx, deadline);
+            }
+        }
+        ran
+    }
+
     /// Handle incoming messages from other tasks and the task queue.
     fn handle_msgs(&self, cx: &mut js::context::JSContext) -> bool {
         // Proritize rendering tasks and others, and gather all other events as `sequential`.
         let mut sequential: SmallVec<[MixedMessage; 10]> = SmallVec::new();
+
+        // <https://w3c.github.io/requestidlecallback/#start-an-idle-period-algorithm>: when
+        // a page has idle callbacks and nothing is waiting to run, use the time until the next
+        // timer or frame as an idle period before blocking.
+        let fully_active = self.get_fully_active_document_ids();
+        let mut ready_event = None;
+        while self.has_idle_callbacks() {
+            if let Some(event) = self.receivers.try_recv(&self.task_queue, &fully_active) {
+                ready_event = Some(event);
+                break;
+            }
+            if !self.run_an_idle_period(cx) {
+                break;
+            }
+        }
 
         // Notify the background-hang-monitor we are waiting for an event.
         self.background_hang_monitor.notify_wait();
@@ -1367,11 +1430,14 @@ impl ScriptThread {
         // Receive at least one message so we don't spinloop.
         debug!("Waiting for event.");
         let fully_active = self.get_fully_active_document_ids();
-        let mut event = self.receivers.recv(
-            &self.task_queue,
-            &self.timer_scheduler.borrow(),
-            &fully_active,
-        );
+        let mut event = match ready_event {
+            Some(event) => event,
+            None => self.receivers.recv(
+                &self.task_queue,
+                &self.timer_scheduler.borrow(),
+                &fully_active,
+            ),
+        };
 
         loop {
             debug!("Handling event: {event:?}");
@@ -1758,6 +1824,12 @@ impl ScriptThread {
             },
             ScriptThreadMessage::ResizeInactive(id, new_size) => {
                 self.handle_resize_inactive_msg(id, new_size)
+            },
+            ScriptThreadMessage::ExitPointerLock(pipeline_id) => {
+                let document = self.documents.borrow().find_document(pipeline_id);
+                if let Some(document) = document {
+                    document.exit_pointer_lock_from_embedder(cx);
+                }
             },
             ScriptThreadMessage::UpdateWebViewState(state) => {
                 self.handle_update_webview_state(cx, state);

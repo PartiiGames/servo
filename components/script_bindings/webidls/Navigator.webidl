@@ -30,6 +30,11 @@ interface mixin NavigatorID {
   [Exposed=Window] readonly attribute DOMString vendorSub; // constant ""
 };
 
+// https://w3c.github.io/vibration/#vibration-interface
+partial interface Navigator {
+  [Pref="dom_vibrate_enabled"] boolean vibrate(VibratePattern pattern);
+};
+
 // https://w3c.github.io/ServiceWorker/#navigator-service-worker
 partial interface Navigator {
   [SameObject, Pref="dom_serviceworker_enabled"] readonly attribute ServiceWorkerContainer serviceWorker;

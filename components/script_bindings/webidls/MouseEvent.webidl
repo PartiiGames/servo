@@ -25,6 +25,9 @@ interface MouseEvent : UIEvent {
     // Introduced in DOM Level 3
     readonly    attribute unsigned short buttons;
     boolean getModifierState (DOMString keyArg);
+    // https://w3c.github.io/pointerlock/#extensions-to-the-mouseevent-interface
+    readonly    attribute double         movementX;
+    readonly    attribute double         movementY;
 };
 
 // https://w3c.github.io/pointerevents/#dom-mouseeventinit
@@ -36,6 +39,9 @@ dictionary MouseEventInit : EventModifierInit {
     short          button = 0;
     unsigned short buttons = 0;
     EventTarget?   relatedTarget = null;
+    // https://w3c.github.io/pointerlock/#extensions-to-the-mouseeventinit-dictionary
+    double         movementX = 0;
+    double         movementY = 0;
 };
 
 // https://w3c.github.io/pointerevents/#dom-mouseevent-initmouseevent

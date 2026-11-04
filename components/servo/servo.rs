@@ -111,7 +111,8 @@ use crate::site_data_manager::{CookieOperationResponse, SiteDataManager};
 use crate::webview::{MINIMUM_WEBVIEW_SIZE, WebView, WebViewInner};
 use crate::webview_delegate::{
     AllowOrDenyRequest, AuthenticationRequest, BluetoothDeviceSelectionRequest, EmbedderControl,
-    FilePicker, NavigationRequest, PermissionRequest, ProtocolHandlerRegistration, WebResourceLoad,
+    FilePicker, NavigationRequest, PermissionRequest, PointerLockRequest,
+    ProtocolHandlerRegistration, WebResourceLoad,
 };
 
 #[cfg(feature = "media-gstreamer")]
@@ -676,6 +677,24 @@ impl ServoInner {
                     webview
                         .delegate()
                         .request_permission(webview, permission_request);
+                }
+            },
+            EmbedderMsg::RequestPointerLock(webview_id, options, callback) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    let request = PointerLockRequest {
+                        options,
+                        allow_deny_request: AllowOrDenyRequest::new_from_callback(
+                            callback,
+                            AllowOrDeny::Allow,
+                            self.servo_errors.sender(),
+                        ),
+                    };
+                    webview.delegate().request_pointer_lock(webview, request);
+                }
+            },
+            EmbedderMsg::ReleasePointerLock(webview_id) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.delegate().notify_pointer_lock_released(webview);
                 }
             },
             EmbedderMsg::OnDevtoolsStarted(port, token) => match port {

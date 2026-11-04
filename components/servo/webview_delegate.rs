@@ -10,9 +10,10 @@ use embedder_traits::{
     ConfirmResponse, ConsoleLogLevel, ContextMenuAction, ContextMenuElementInformation,
     ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlResponse, FilePickerRequest,
     FilterPattern, InputEventId, InputEventResult, InputMethodType, LoadStatus, MediaSessionEvent,
-    NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RgbColor, ScreenGeometry,
-    SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest, TraversalId,
-    WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
+    NewWebViewDetails, Notification, PermissionFeature, PointerLockOptions, PromptResponse,
+    RgbColor, ScreenGeometry, SelectElementOptionOrOptgroup, SelectElementRequest,
+    SimpleDialogRequest, TraversalId, WebResourceRequest, WebResourceResponse,
+    WebResourceResponseMsg,
 };
 use paint_api::rendering_context::RenderingContext;
 use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
@@ -90,6 +91,40 @@ impl PermissionRequest {
     }
 
     /// Deny permission to the web content to access the requested feature.
+    pub fn deny(self) {
+        self.allow_deny_request.deny();
+    }
+}
+
+/// A page in a [`WebView`] asked to lock the pointer (`Element.requestPointerLock()`). Servo
+/// has already checked user activation and that the frame may use pointer lock. To grant it,
+/// grab and hide the cursor (for example winit's `set_cursor_grab` plus
+/// `set_cursor_visible(false)`), send raw motion with [`MouseMoveEvent::new_with_movement`]
+/// while it lasts, and call [`PointerLockRequest::allow`]. Release the grab when Servo calls
+/// [`WebViewDelegate::notify_pointer_lock_released`]; call [`WebView::exit_pointer_lock`] when
+/// the user presses Esc or the window loses focus.
+///
+/// If the request is dropped without an answer, it is allowed: the page gets the lock and
+/// `movementX/Y` are computed from cursor motion.
+///
+/// [`MouseMoveEvent::new_with_movement`]: embedder_traits::MouseMoveEvent::new_with_movement
+pub struct PointerLockRequest {
+    pub(crate) options: PointerLockOptions,
+    pub(crate) allow_deny_request: AllowOrDenyRequest,
+}
+
+impl PointerLockRequest {
+    /// Whether the page asked for raw, unaccelerated motion (`unadjustedMovement: true`).
+    pub fn unadjusted_movement(&self) -> bool {
+        self.options.unadjusted_movement
+    }
+
+    /// Grant the lock: the page's promise resolves and it gets `pointerlockchange`.
+    pub fn allow(self) {
+        self.allow_deny_request.allow();
+    }
+
+    /// Refuse the lock: the page's promise rejects and it gets `pointerlockerror`.
     pub fn deny(self) {
         self.allow_deny_request.deny();
     }
@@ -979,6 +1014,13 @@ pub trait WebViewDelegate {
     /// the page will enter or leave fullscreen state internally according to the [Fullscreen
     /// API](https://fullscreen.spec.whatwg.org/).
     fn notify_fullscreen_state_changed(&self, _webview: WebView, _is_fullscreen: bool) {}
+    /// A page in this [`WebView`] asked to lock the pointer. See [`PointerLockRequest`]. If
+    /// not handled, the lock is granted (without any cursor grab by the embedder).
+    fn request_pointer_lock(&self, _webview: WebView, _request: PointerLockRequest) {}
+    /// The page released the pointer lock it held (`exitPointerLock()`, its target left the
+    /// document, the page went away, or after [`WebView::exit_pointer_lock`]). Release the
+    /// cursor grab and show the cursor again.
+    fn notify_pointer_lock_released(&self, _webview: WebView) {}
 
     /// Whether or not to allow a [`WebView`] to load a URL in its main frame or one of its
     /// nested `<iframe>`s. [`NavigationRequest`]s are accepted by default.

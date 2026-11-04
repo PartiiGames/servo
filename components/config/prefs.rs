@@ -186,6 +186,14 @@ pub struct Preferences {
     pub dom_fullscreen_test: bool,
     // feature: Gamepad API | #10977 | Web/API/Gamepad_API
     pub dom_gamepad_enabled: bool,
+    /// Pointer Lock (`Element.requestPointerLock`, `Document.exitPointerLock`, ...).
+    pub dom_pointerlock_enabled: bool,
+    /// `screen.orientation`: read from the window's aspect, `lock()` resolves as a no-op.
+    pub dom_screen_orientation_enabled: bool,
+    /// `navigator.vibrate()`, played as rumble on the first connected gamepad that has it.
+    pub dom_vibrate_enabled: bool,
+    /// `requestIdleCallback()` / `cancelIdleCallback()`, run when the event loop is idle.
+    pub dom_request_idle_callback_enabled: bool,
     // feature: Geolocation API | #38903 | Web/API/Geolocation_API
     pub dom_geolocation_enabled: bool,
     // feature: Screen Wake Lock API | #43615 | Web/API/Screen_Wake_Lock_API
@@ -482,6 +490,10 @@ impl Preferences {
             dom_fontface_enabled: false,
             dom_fullscreen_test: false,
             dom_gamepad_enabled: true,
+            dom_pointerlock_enabled: true,
+            dom_screen_orientation_enabled: true,
+            dom_vibrate_enabled: true,
+            dom_request_idle_callback_enabled: true,
             dom_geolocation_enabled: false,
             dom_wakelock_enabled: false,
             dom_indexeddb_enabled: false,

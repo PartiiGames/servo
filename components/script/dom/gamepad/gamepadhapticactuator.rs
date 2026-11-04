@@ -307,6 +307,47 @@ impl GamepadHapticActuatorMethods<crate::DomTypeHolder> for GamepadHapticActuato
 }
 
 impl GamepadHapticActuator {
+    /// Whether this gamepad can play a dual-rumble effect.
+    pub(crate) fn supports_dual_rumble(&self) -> bool {
+        self.effects.contains(&GamepadHapticEffectType::Dual_rumble)
+    }
+
+    /// `navigator.vibrate()` routed here: a full-strength dual rumble for `duration_ms`, with
+    /// no promise and without touching `playEffect()`'s state. A later effect replaces it.
+    pub(crate) fn rumble_for_vibrate(&self, duration_ms: u32) {
+        let Ok(callback) = GenericCallback::new(|_: Result<bool, _>| {}) else {
+            return;
+        };
+        let params = DualRumbleEffectParams {
+            duration: duration_ms as f64,
+            start_delay: 0.0,
+            strong_magnitude: 1.0,
+            weak_magnitude: 1.0,
+        };
+        let window = self.global();
+        let window = window.as_window();
+        window.send_to_embedder(EmbedderMsg::PlayGamepadHapticEffect(
+            window.webview_id(),
+            self.gamepad_index as usize,
+            embedder_traits::GamepadHapticEffectType::DualRumble(params),
+            callback,
+        ));
+    }
+
+    /// `navigator.vibrate(0)` or `vibrate([])`: stop the rumble.
+    pub(crate) fn stop_for_vibrate(&self) {
+        let Ok(callback) = GenericCallback::new(|_: Result<bool, _>| {}) else {
+            return;
+        };
+        let window = self.global();
+        let window = window.as_window();
+        window.send_to_embedder(EmbedderMsg::StopGamepadHapticEffect(
+            window.webview_id(),
+            self.gamepad_index as usize,
+            callback,
+        ));
+    }
+
     /// <https://www.w3.org/TR/gamepad/#dom-gamepadhapticactuator-playeffect>
     /// We are in the task queued by the "in-parallel" steps.
     fn handle_haptic_effect_completed(&self, cx: &mut JSContext, completed_successfully: bool) {

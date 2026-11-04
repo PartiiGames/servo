@@ -310,6 +310,14 @@ pub enum AllowOrDeny {
     Deny,
 }
 
+/// What a page asked for in `Element.requestPointerLock(options)`.
+/// <https://w3c.github.io/pointerlock/#pointerlockoptions-dictionary>
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct PointerLockOptions {
+    /// The page wants raw, unaccelerated motion (`unadjustedMovement: true`).
+    pub unadjusted_movement: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 /// Whether a protocol handler is requested to be registered or unregistered.
 pub enum RegisterOrUnregister {
@@ -517,6 +525,14 @@ pub enum EmbedderMsg {
     /// with the user's decision, which resolves or rejects the pending promise
     /// without blocking the script thread.
     RequestWakeLockPermission(WebViewId, GenericCallback<AllowOrDeny>, WakeLockType),
+    /// A page asked to lock the pointer (`Element.requestPointerLock()`), with user activation
+    /// and the iframe permission already checked. The embedder grabs and hides the cursor and
+    /// answers through the callback; the page's promise settles from that answer without
+    /// blocking the script thread. <https://w3c.github.io/pointerlock/>
+    RequestPointerLock(WebViewId, PointerLockOptions, GenericCallback<AllowOrDeny>),
+    /// The page released the pointer lock (`exitPointerLock()`, target removed, page unloaded,
+    /// or after the embedder's own `WebView::exit_pointer_lock`). Release the cursor grab.
+    ReleasePointerLock(WebViewId),
     /// Report the status of Devtools Server with a token that can be used to bypass the permission prompt.
     OnDevtoolsStarted(Result<u16, ()>, String),
     /// Ask the user to allow a devtools client to connect.

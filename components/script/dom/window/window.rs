@@ -6,6 +6,7 @@
 
 use std::borrow::ToOwned;
 use std::cell::{Cell, RefCell, RefMut};
+use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
 use std::default::Default;
 use std::ffi::c_void;
@@ -110,13 +111,16 @@ use webrender_api::ExternalScrollId;
 use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint};
 
 use crate::dom::StatelessWorkletThreadPool;
-use crate::dom::bindings::callback::RootedCallback;
+use crate::dom::bindings::callback::{ExceptionHandling, RootedCallback, TracedCallback};
 use crate::dom::bindings::codegen::Bindings::AnimationFrameProviderBinding::FrameRequestCallback;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
     DocumentMethods, DocumentReadyState, NamedPropertyValue,
 };
 use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
 use crate::dom::bindings::codegen::Bindings::HistoryBinding::History_Binding::HistoryMethods;
+use crate::dom::bindings::codegen::Bindings::IdleDeadlineBinding::{
+    IdleRequestCallback, IdleRequestOptions,
+};
 use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
     ImageBitmapOptions, ImageBitmapSource,
 };
@@ -189,6 +193,7 @@ use crate::dom::types::{FontFace, ImageBitmap, SVGSVGElement, UIEvent};
 use crate::dom::visualviewport::{VisualViewport, VisualViewportChanges};
 #[cfg(feature = "webgpu")]
 use crate::dom::webgpu::identityhub::IdentityHub;
+use crate::dom::window::idledeadline::IdleDeadline;
 use crate::dom::window::layout_image::fetch_image_for_layout;
 use crate::dom::window::screen::Screen;
 use crate::dom::window::scrolling_box::{ScrollingBox, ScrollingBoxSource};
@@ -309,6 +314,12 @@ pub(crate) struct Window {
     #[no_trace]
     navigation_start: Cell<CrossProcessInstant>,
     screen: MutNullableDom<Screen>,
+    /// <https://w3c.github.io/requestidlecallback/#dfn-list-of-idle-request-callbacks>
+    idle_request_callbacks: DomRefCell<VecDeque<(u32, TracedCallback<IdleRequestCallback>)>>,
+    /// <https://w3c.github.io/requestidlecallback/#dfn-list-of-runnable-idle-callbacks>
+    runnable_idle_callbacks: DomRefCell<VecDeque<(u32, TracedCallback<IdleRequestCallback>)>>,
+    /// <https://w3c.github.io/requestidlecallback/#dfn-idle-callback-identifier>
+    idle_callback_identifier: Cell<u32>,
     session_storage: MutNullableDom<Storage>,
     local_storage: MutNullableDom<Storage>,
     /// <https://cookiestore.spec.whatwg.org/#globals>
@@ -1858,6 +1869,43 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         let doc = self.Document();
         doc.cancel_animation_frame(ident);
         Ok(())
+    }
+
+    /// <https://w3c.github.io/requestidlecallback/#the-requestidlecallback-method>
+    fn RequestIdleCallback(
+        &self,
+        callback: RootedCallback<IdleRequestCallback>,
+        options: &IdleRequestOptions,
+    ) -> u32 {
+        // > Increment the window's idle callback identifier by one; let handle be it.
+        let handle = self.idle_callback_identifier.get().wrapping_add(1).max(1);
+        self.idle_callback_identifier.set(handle);
+        // > Push callback to the end of window's list of idle request callbacks.
+        self.idle_request_callbacks
+            .borrow_mut()
+            .push_back((handle, callback.to_traced()));
+        // > If timeout is present and greater than 0, wait timeout milliseconds (after this
+        // > window's tasks with the same timer key), then run the idle callback timeout steps.
+        if let Some(timeout) = options.timeout.filter(|timeout| *timeout > 0) {
+            self.as_global_scope().run_steps_after_a_timeout(
+                DOMString::from("requestIdleCallback"),
+                timeout as i64,
+                move |cx, global| {
+                    global.as_window().invoke_idle_callback_timeout(cx, handle);
+                },
+            );
+        }
+        handle
+    }
+
+    /// <https://w3c.github.io/requestidlecallback/#the-cancelidlecallback-method>
+    fn CancelIdleCallback(&self, handle: u32) {
+        self.idle_request_callbacks
+            .borrow_mut()
+            .retain(|(id, _)| *id != handle);
+        self.runnable_idle_callbacks
+            .borrow_mut()
+            .retain(|(id, _)| *id != handle);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-window-postmessage>
@@ -3603,6 +3651,12 @@ impl Window {
             uievent.upcast::<Event>().fire(cx, self.upcast());
         }
 
+        // <https://w3c.github.io/screen-orientation/>: in a desktop window the orientation
+        // follows the window's aspect, so a resize may change it.
+        if let Some(screen) = self.screen.get() {
+            screen.viewport_changed(cx);
+        }
+
         true
     }
 
@@ -3702,6 +3756,66 @@ impl Window {
 
     pub(crate) fn set_last_activation_timestamp(&self, time: UserActivationTimestamp) {
         self.last_activation_timestamp.set(time);
+    }
+
+    /// Whether `requestIdleCallback()` callbacks are waiting for an idle period.
+    pub(crate) fn has_idle_callbacks(&self) -> bool {
+        !self.idle_request_callbacks.borrow().is_empty()
+            || !self.runnable_idle_callbacks.borrow().is_empty()
+    }
+
+    /// <https://w3c.github.io/requestidlecallback/#start-an-idle-period-algorithm> and
+    /// <https://w3c.github.io/requestidlecallback/#invoke-idle-callbacks-algorithm>: the
+    /// script thread found the event loop idle until `deadline`. Run the callbacks that were
+    /// requested before this period began, in order, while time remains. Returns whether any
+    /// callback ran.
+    pub(crate) fn run_idle_period(&self, cx: &mut JSContext, deadline: Instant) -> bool {
+        // > Append all entries from the list of idle request callbacks to the list of
+        // > runnable idle callbacks, and clear the list of idle request callbacks.
+        {
+            let pending = std::mem::take(&mut *self.idle_request_callbacks.borrow_mut());
+            self.runnable_idle_callbacks.borrow_mut().extend(pending);
+        }
+        let mut ran = false;
+        // > If now is less than deadline: pop the top callback from the list of runnable
+        // > idle callbacks and call it with a new IdleDeadline (deadline, timeout false).
+        while Instant::now() < deadline {
+            let Some((_, callback)) = self.runnable_idle_callbacks.borrow_mut().pop_front() else {
+                break;
+            };
+            ran = true;
+            let mut realm = enter_auto_realm(cx, self);
+            let cx = &mut realm.current_realm();
+            let idle_deadline = IdleDeadline::new(cx, self, deadline, false);
+            let _ = callback.Call__(cx, &idle_deadline, ExceptionHandling::Report);
+            self.perform_a_microtask_checkpoint(cx);
+        }
+        ran
+    }
+
+    /// <https://w3c.github.io/requestidlecallback/#invoke-idle-callback-timeout-algorithm>
+    fn invoke_idle_callback_timeout(&self, cx: &mut JSContext, handle: u32) {
+        let take = |list: &DomRefCell<VecDeque<(u32, TracedCallback<IdleRequestCallback>)>>| {
+            let mut list = list.borrow_mut();
+            let index = list.iter().position(|(id, _)| *id == handle)?;
+            list.remove(index).map(|(_, callback)| callback)
+        };
+        // > If callback is in either list, remove it and call it with an IdleDeadline whose
+        // > deadline is now and whose timeout is true.
+        let Some(callback) =
+            take(&self.idle_request_callbacks).or_else(|| take(&self.runnable_idle_callbacks))
+        else {
+            return;
+        };
+        let mut realm = enter_auto_realm(cx, self);
+        let cx = &mut realm.current_realm();
+        let idle_deadline = IdleDeadline::new(cx, self, Instant::now(), true);
+        let _ = callback.Call__(cx, &idle_deadline, ExceptionHandling::Report);
+    }
+
+    /// `navigator`, if the page has touched it (no need to create it otherwise).
+    pub(crate) fn navigator_if_created(&self) -> Option<DomRoot<Navigator>> {
+        self.navigator.get()
     }
 
     pub(crate) fn send_to_embedder(&self, msg: EmbedderMsg) {
@@ -3997,6 +4111,9 @@ impl Window {
             performance: Default::default(),
             navigation_start: Cell::new(navigation_start),
             screen: Default::default(),
+            idle_request_callbacks: Default::default(),
+            runnable_idle_callbacks: Default::default(),
+            idle_callback_identifier: Cell::new(0),
             session_storage: Default::default(),
             local_storage: Default::default(),
             cookie_store: Default::default(),

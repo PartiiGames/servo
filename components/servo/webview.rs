@@ -692,6 +692,18 @@ impl WebView {
         self.servo().paint().device_pixels_per_page_pixel(self.id())
     }
 
+    /// Release the pointer lock held by a page in this [`WebView`], if any (the user pressed
+    /// Esc, the window lost focus, ...). The page gets a `pointerlockchange` event and then
+    /// sends [`WebViewDelegate::notify_pointer_lock_released`], so the embedder can release
+    /// its cursor grab in one place.
+    ///
+    /// [`WebViewDelegate::notify_pointer_lock_released`]: crate::WebViewDelegate::notify_pointer_lock_released
+    pub fn exit_pointer_lock(&self) {
+        self.servo()
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::ExitPointerLock(self.id()));
+    }
+
     /// Tell the currently active page in this [`WebView`] to exit fullscreen mode.
     pub fn exit_fullscreen(&self) {
         self.servo()

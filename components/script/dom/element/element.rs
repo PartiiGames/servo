@@ -82,7 +82,8 @@ use crate::dom::attr::{Attr, is_relevant_attribute};
 use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::codegen::Bindings::ElementBinding::{
-    ElementMethods, GetHTMLOptions, ScrollIntoViewContainer, ScrollLogicalPosition, ShadowRootInit,
+    ElementMethods, GetHTMLOptions, PointerLockOptions, ScrollIntoViewContainer,
+    ScrollLogicalPosition, ShadowRootInit,
 };
 use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
 use crate::dom::bindings::codegen::Bindings::FunctionBinding::Function;
@@ -4094,6 +4095,16 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         doc.enter_fullscreen(cx, self)
     }
 
+    /// <https://w3c.github.io/pointerlock/#dom-element-requestpointerlock>
+    fn RequestPointerLock(
+        &self,
+        cx: &mut CurrentRealm,
+        options: &PointerLockOptions,
+    ) -> RootedPromise {
+        let doc = self.owner_document();
+        doc.request_pointer_lock(cx, self, options)
+    }
+
     /// <https://w3c.github.io/pointerevents/#dom-element-setpointercapture>
     fn SetPointerCapture(&self, pointer_id: i32) -> ErrorResult {
         let document = self.owner_document();
@@ -4117,7 +4128,11 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
 
         // Step 3. If this method is invoked while the document has a locked element
         // (pointerLockElement), throw an "InvalidStateError" DOMException.
-        // TODO: Implement when pointer lock is supported.
+        if document.pointer_lock_element().is_some() {
+            return Err(Error::InvalidState(Some(
+                "Can't capture the pointer while it is locked".into(),
+            )));
+        }
 
         // Step 4/5. If the pointer is not in the active buttons state or the element's
         // node document is not the active document of the pointer, then terminate these
@@ -4896,6 +4911,12 @@ impl VirtualMethods for Element {
         let fullscreen = doc.fullscreen_element();
         if fullscreen.as_deref() == Some(self) {
             doc.exit_fullscreen(cx);
+        }
+
+        // <https://w3c.github.io/pointerlock/#exitpointerlock-method>: the lock ends when its
+        // target is disconnected.
+        if doc.pointer_lock_element().as_deref() == Some(self) {
+            doc.exit_pointer_lock();
         }
 
         self.unregister_current_id_and_name_attribute(cx);

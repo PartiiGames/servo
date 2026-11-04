@@ -14,6 +14,7 @@ use js::rust::HandleObject;
 use keyboard_types::Modifiers;
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::match_domstring_ascii;
+use script_bindings::num::Finite;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use script_traits::{ConstellationInputEvent, MouseButtons};
 use style::Atom;
@@ -83,6 +84,10 @@ pub(crate) struct MouseEvent {
 
     #[no_trace]
     point_in_target: Cell<Option<Point2D<f32, CSSPixel>>>,
+
+    /// <https://w3c.github.io/pointerlock/#dom-mouseevent-movementx>
+    /// <https://w3c.github.io/pointerlock/#dom-mouseevent-movementy>
+    movement: Cell<(f64, f64)>,
 }
 
 impl MouseEvent {
@@ -96,7 +101,13 @@ impl MouseEvent {
             button: Cell::new(MouseButton::Primary),
             buttons: Cell::new(MouseButtons::empty()),
             point_in_target: Cell::new(None),
+            movement: Cell::new((0.0, 0.0)),
         }
+    }
+
+    /// Set `movementX/Y`: the pointer's motion since the previous `mousemove`, in CSS pixels.
+    pub(crate) fn set_movement(&self, movement: (f64, f64)) {
+        self.movement.set(movement);
     }
 
     pub(crate) fn new_uninitialized(cx: &mut JSContext, window: &Window) -> DomRoot<MouseEvent> {
@@ -384,6 +395,9 @@ impl MouseEvent {
         );
 
         pointer_event.upcast::<Event>().set_composed(composed);
+        pointer_event
+            .upcast::<MouseEvent>()
+            .set_movement(self.movement.get());
 
         pointer_event
     }
@@ -502,7 +516,18 @@ impl MouseEventMethods<crate::DomTypeHolder> for MouseEvent {
         event
             .upcast::<Event>()
             .set_composed(init.parent.parent.parent.composed);
+        event.set_movement((*init.movementX, *init.movementY));
         Ok(event)
+    }
+
+    /// <https://w3c.github.io/pointerlock/#dom-mouseevent-movementx>
+    fn MovementX(&self) -> Finite<f64> {
+        Finite::wrap(self.movement.get().0)
+    }
+
+    /// <https://w3c.github.io/pointerlock/#dom-mouseevent-movementy>
+    fn MovementY(&self) -> Finite<f64> {
+        Finite::wrap(self.movement.get().1)
     }
 
     /// <https://w3c.github.io/pointerevents/#dom-mouseevent-screenx>

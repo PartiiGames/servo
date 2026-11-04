@@ -29,11 +29,15 @@ use servo_base::generic_channel;
 use servo_config::pref;
 use servo_url::ServoUrl;
 
+use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
+    DocumentMethods, DocumentVisibilityState,
+};
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorMethods;
 #[cfg(feature = "gamepad")]
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionName;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::codegen::Bindings::XMLHttpRequestBinding::BodyInit;
+use crate::dom::bindings::codegen::UnionTypes::UnsignedLongOrUnsignedLongSequence;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -56,6 +60,7 @@ use crate::dom::navigatorinfo;
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::permissions::Permissions;
 use crate::dom::pluginarray::PluginArray;
+use crate::dom::serviceworker::notification::validate_and_normalize_vibration_pattern;
 use crate::dom::serviceworkercontainer::ServiceWorkerContainer;
 use crate::dom::servointernals::ServoInternals;
 use crate::dom::storagemanager::StorageManager;
@@ -141,6 +146,8 @@ pub(crate) struct Navigator {
     servo_internals: MutNullableDom<ServoInternals>,
     user_activation: MutNullableDom<UserActivation>,
     wake_lock: MutNullableDom<WakeLock>,
+    /// Bumped by every `vibrate()` call: rumble segments scheduled by an older call are dropped.
+    vibrate_generation: Cell<u32>,
 }
 
 impl Navigator {
@@ -174,6 +181,7 @@ impl Navigator {
             servo_internals: Default::default(),
             user_activation: Default::default(),
             wake_lock: Default::default(),
+            vibrate_generation: Cell::new(0),
         }
     }
 
@@ -417,6 +425,77 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-navigator-cookieenabled>
     fn CookieEnabled(&self) -> bool {
+        true
+    }
+
+    /// <https://w3c.github.io/vibration/#dom-navigator-vibrate>
+    ///
+    /// Desktop and the Deck have no vibration motor, so the pattern is played as dual rumble
+    /// on the first connected gamepad that has one: each "on" entry is a full-strength rumble
+    /// of that length, each "off" entry a pause. Without such a gamepad this does nothing and
+    /// still returns true, as on a phone with vibration turned off.
+    fn Vibrate(&self, pattern: UnsignedLongOrUnsignedLongSequence) -> bool {
+        // > If the document is hidden, return false.
+        let global = self.global();
+        let document = global.as_window().Document();
+        if document.VisibilityState() == DocumentVisibilityState::Hidden {
+            return false;
+        }
+        // > Let pattern be the result of validate and normalize; on error, return false.
+        let pattern = validate_and_normalize_vibration_pattern(&pattern);
+
+        // A new call cancels the previous pattern.
+        let generation = self.vibrate_generation.get().wrapping_add(1);
+        self.vibrate_generation.set(generation);
+
+        #[cfg(feature = "gamepad")]
+        {
+            let Some((index, gamepad)) = self
+                .gamepads
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, gamepad)| gamepad.get().map(|gamepad| (index, gamepad)))
+                .find(|(_, gamepad)| {
+                    gamepad.connected() && gamepad.vibration_actuator().supports_dual_rumble()
+                })
+            else {
+                return true;
+            };
+            // > If pattern is an empty list, or all its entries are 0, cancel the pattern.
+            if pattern.iter().step_by(2).all(|&on| on == 0) {
+                gamepad.vibration_actuator().stop_for_vibrate();
+                return true;
+            }
+            let mut offset: u64 = 0;
+            for (i, &duration) in pattern.iter().enumerate() {
+                if i % 2 == 0 && duration > 0 {
+                    if offset == 0 {
+                        gamepad.vibration_actuator().rumble_for_vibrate(duration);
+                    } else {
+                        global.run_steps_after_a_timeout(
+                            DOMString::from("navigator.vibrate"),
+                            offset as i64,
+                            move |_cx, global| {
+                                let window = global.as_window();
+                                let Some(navigator) = window.navigator_if_created() else {
+                                    return;
+                                };
+                                if navigator.vibrate_generation.get() != generation {
+                                    return;
+                                }
+                                if let Some(gamepad) = navigator.get_gamepad(index) {
+                                    gamepad.vibration_actuator().rumble_for_vibrate(duration);
+                                }
+                            },
+                        );
+                    }
+                }
+                offset += duration as u64;
+            }
+        }
+        #[cfg(not(feature = "gamepad"))]
+        let _ = (pattern, generation);
         true
     }
 

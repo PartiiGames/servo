@@ -10,13 +10,16 @@ use servo_base::generic_channel;
 
 use crate::dom::bindings::codegen::Bindings::ScreenBinding::ScreenMethods;
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::window::Window;
+use crate::dom::window::screenorientation::ScreenOrientation;
 
 #[dom_struct]
 pub(crate) struct Screen {
     reflector_: Reflector,
     window: Dom<Window>,
+    /// <https://w3c.github.io/screen-orientation/#dom-screen-orientation>
+    orientation: MutNullableDom<ScreenOrientation>,
 }
 
 impl Screen {
@@ -24,6 +27,14 @@ impl Screen {
         Screen {
             reflector_: Reflector::new(),
             window: Dom::from_ref(window),
+            orientation: Default::default(),
+        }
+    }
+
+    /// The window's viewport changed size: `screen.orientation` may have changed.
+    pub(crate) fn viewport_changed(&self, cx: &mut JSContext) {
+        if let Some(orientation) = self.orientation.get() {
+            orientation.viewport_changed(cx);
         }
     }
 
@@ -73,5 +84,11 @@ impl ScreenMethods<crate::DomTypeHolder> for Screen {
     /// <https://drafts.csswg.org/cssom-view/#dom-screen-pixeldepth>
     fn PixelDepth(&self) -> u32 {
         24
+    }
+
+    /// <https://w3c.github.io/screen-orientation/#dom-screen-orientation>
+    fn Orientation(&self, cx: &mut JSContext) -> DomRoot<ScreenOrientation> {
+        self.orientation
+            .or_init(|| ScreenOrientation::new(cx, &self.window))
     }
 }

@@ -262,6 +262,13 @@ pub struct MouseMoveEvent {
     // An internal flag used to avoid refreshing the cursor in response to move
     // events for touch devices since they are simulated in Servo using mouse events.
     pub is_compatibility_event_for_touch: bool,
+    /// The raw (unaccelerated where the platform offers it) motion of the pointing device
+    /// since the previous event, in device pixels. Embedders fill this in from raw device
+    /// motion (e.g. winit's `DeviceEvent::MouseMotion`), which keeps arriving while the
+    /// pointer is locked and the cursor does not move. When `None`, `MouseEvent.movementX/Y`
+    /// are computed from the change in `point` instead.
+    /// <https://w3c.github.io/pointerlock/#dom-mouseevent-movementx>
+    pub movement: Option<(f32, f32)>,
 }
 
 impl MouseMoveEvent {
@@ -269,6 +276,17 @@ impl MouseMoveEvent {
         Self {
             point,
             is_compatibility_event_for_touch: false,
+            movement: None,
+        }
+    }
+
+    /// A mouse move carrying raw device motion (in device pixels) since the previous event.
+    /// Use this while the pointer is locked: `point` is then the (unchanging) cursor position.
+    pub fn new_with_movement(point: WebViewPoint, movement: (f32, f32)) -> Self {
+        Self {
+            point,
+            is_compatibility_event_for_touch: false,
+            movement: Some(movement),
         }
     }
 
@@ -277,6 +295,7 @@ impl MouseMoveEvent {
         Self {
             point,
             is_compatibility_event_for_touch: true,
+            movement: None,
         }
     }
 }

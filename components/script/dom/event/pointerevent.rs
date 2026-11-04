@@ -20,6 +20,7 @@ use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethod
 use crate::dom::bindings::codegen::Bindings::PointerEventBinding::{
     PointerEventInit, PointerEventMethods,
 };
+use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
@@ -238,7 +239,7 @@ impl PointerEventMethods<crate::DomTypeHolder> for PointerEvent {
             scroll_offset.x as i32 + init.parent.clientX,
             scroll_offset.y as i32 + init.parent.clientY,
         );
-        PointerEvent::new_with_proto(
+        let event = PointerEvent::new_with_proto(
             cx,
             window,
             proto,
@@ -269,7 +270,11 @@ impl PointerEventMethods<crate::DomTypeHolder> for PointerEvent {
             init.isPrimary,
             init.coalescedEvents.clone(),
             init.predictedEvents.clone(),
-        )
+        );
+        event
+            .upcast::<MouseEvent>()
+            .set_movement((*init.parent.movementX, *init.parent.movementY));
+        event
     }
 
     /// <https://w3c.github.io/pointerevents/#dom-pointerevent-pointerid>

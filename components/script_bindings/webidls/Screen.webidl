@@ -12,3 +12,8 @@ interface Screen {
   readonly attribute unsigned long colorDepth;
   readonly attribute unsigned long pixelDepth;
 };
+
+// https://w3c.github.io/screen-orientation/#extensions-to-the-screen-interface
+partial interface Screen {
+  [SameObject, Pref="dom_screen_orientation_enabled"] readonly attribute ScreenOrientation orientation;
+};

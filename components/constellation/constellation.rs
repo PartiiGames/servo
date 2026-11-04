@@ -1419,6 +1419,9 @@ where
             EmbedderToConstellationMessage::ExitFullScreen(webview_id) => {
                 self.handle_exit_fullscreen_msg(webview_id);
             },
+            EmbedderToConstellationMessage::ExitPointerLock(webview_id) => {
+                self.handle_exit_pointer_lock_msg(webview_id);
+            },
             EmbedderToConstellationMessage::MediaSessionAction(action) => {
                 self.handle_media_session_action_msg(action);
             },
@@ -5835,6 +5838,21 @@ where
     fn handle_exit_fullscreen_msg(&mut self, webview_id: WebViewId) {
         let browsing_context_id = BrowsingContextId::from(webview_id);
         self.switch_fullscreen_mode(browsing_context_id);
+    }
+
+    /// The embedder released the pointer lock. Only one document can hold it, but the
+    /// constellation does not track which, so tell every fully active document in the webview;
+    /// those without the lock ignore it.
+    #[servo_tracing::instrument(skip_all)]
+    fn handle_exit_pointer_lock_msg(&mut self, webview_id: WebViewId) {
+        for browsing_context in self.fully_active_browsing_contexts_iter(webview_id) {
+            let Some(pipeline) = self.pipelines.get(&browsing_context.pipeline_id) else {
+                continue;
+            };
+            let _ = pipeline
+                .event_loop
+                .send(ScriptThreadMessage::ExitPointerLock(pipeline.id));
+        }
     }
 
     /// Get the current activity of a pipeline.

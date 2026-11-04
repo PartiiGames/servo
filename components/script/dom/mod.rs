@@ -261,6 +261,7 @@ pub(crate) use self::filesystem::*;
 pub(crate) mod form;
 pub(crate) use self::form::*;
 pub(crate) mod fullscreen;
+pub(crate) mod pointerlock;
 #[cfg(feature = "gamepad")]
 pub(crate) mod gamepad;
 #[cfg(feature = "gamepad")]

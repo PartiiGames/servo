@@ -656,7 +656,7 @@ fn create_notification(
 }
 
 /// <https://w3c.github.io/vibration/#dfn-validate-and-normalize>
-fn validate_and_normalize_vibration_pattern(
+pub(crate) fn validate_and_normalize_vibration_pattern(
     pattern: &UnsignedLongOrUnsignedLongSequence,
 ) -> Vec<u32> {
     // Step 1: If pattern is a list, proceed to the next step. Otherwise run the following substeps:

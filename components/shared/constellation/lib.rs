@@ -86,6 +86,8 @@ pub enum EmbedderToConstellationMessage {
     RefreshCursor(PipelineId),
     /// Request to exit from fullscreen mode
     ExitFullScreen(WebViewId),
+    /// The embedder released the pointer lock of this webview (Esc, focus loss, ...).
+    ExitPointerLock(WebViewId),
     /// Media session action.
     MediaSessionAction(MediaSessionActionType),
     /// Notify the Constellation that a WebView has been hidden. Hidden `WebView`s are throttled,

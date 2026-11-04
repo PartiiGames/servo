@@ -171,6 +171,9 @@ pub enum ScriptThreadMessage {
     ResizeInactive(PipelineId, ViewportDetails),
     /// Window switched from fullscreen mode.
     ExitFullScreen(PipelineId),
+    /// The embedder released the pointer lock (Esc, focus loss, ...): the document in this
+    /// pipeline must exit pointer lock if it holds it.
+    ExitPointerLock(PipelineId),
     /// Notifies the script that the document associated with this pipeline should 'unload'.
     UnloadDocument(PipelineId),
     /// Notifies the script that a pipeline should be closed.

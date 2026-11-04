@@ -627,6 +627,15 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
             self.document.fullscreen_element(),
         )
     }
+
+    /// <https://w3c.github.io/pointerlock/#dom-documentorshadowroot-pointerlockelement>
+    /// (retargeted the same way as `fullscreenElement`)
+    fn GetPointerLockElement(&self) -> Option<DomRoot<Element>> {
+        DocumentOrShadowRoot::get_fullscreen_element(
+            self.upcast::<Node>(),
+            self.document.pointer_lock_element(),
+        )
+    }
 }
 
 impl VirtualMethods for ShadowRoot {
