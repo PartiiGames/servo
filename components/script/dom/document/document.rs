@@ -101,7 +101,9 @@ use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
     DocumentMethods, DocumentReadyState, DocumentVisibilityState, ElementCreationOptions,
     NamedPropertyValue,
 };
-use crate::dom::bindings::codegen::Bindings::ElementBinding::ScrollLogicalPosition;
+use crate::dom::bindings::codegen::Bindings::DOMRectReadOnlyBinding::DOMRectReadOnlyMethods;
+use crate::dom::geometry::domrectreadonly::DOMRectReadOnly;
+use crate::dom::bindings::codegen::Bindings::ElementBinding::{ElementMethods, ScrollLogicalPosition};
 use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElement_Binding::HTMLIFrameElementMethods;
@@ -337,6 +339,21 @@ pub(crate) enum DeclarativeRefresh {
         from_meta_element: bool,
     },
     CreatedAfterLoad,
+}
+
+/// Partii: <https://drafts.csswg.org/css-scroll-anchoring/>, simplified. The anchor node of one
+/// scrolled box and where it was, so that a layout change above it can be undone by scrolling.
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+struct ScrollAnchor {
+    /// The scrolled box, `None` for the viewport.
+    scroller: Option<Dom<Element>>,
+    /// The anchor node.
+    anchor: Dom<Element>,
+    /// The anchor's border-box top minus the scrollport's top, in CSS px.
+    offset: f64,
+    /// The box's scroll offset (block axis) when the anchor was chosen.
+    scroll_top: f64,
 }
 
 #[derive(JSTraceable, MallocSizeOf, PartialEq)]
@@ -656,6 +673,10 @@ pub(crate) struct Document {
     /// > Each Document has an associated list of pending scroll events, which stores
     /// > pairs of (EventTarget, DOMString), initially empty.
     pending_scroll_events: DomRefCell<Vec<PendingScrollEvent>>,
+    /// Partii: scroll anchoring. The anchor of each scrolled box.
+    scroll_anchors: DomRefCell<Vec<ScrollAnchor>>,
+    /// Partii: scroll anchoring. Elements that have scrolled (scroll containers to anchor).
+    scrolled_elements: DomRefCell<Vec<Dom<Element>>>,
     /// Other reasons that a rendering update might be required for this [`Document`].
     rendering_update_reasons: Cell<RenderingUpdateReason>,
     /// Whether or not this [`Document`] is waiting on canvas image updates. If it is
@@ -1722,6 +1743,7 @@ impl Document {
                 continue;
             };
             let document = element.owner_document();
+            document.note_scrolled_element(element);
 
             // Step 1.2: If box belongs to a snap container, snapcontainer, run the
             // update scrollsnapchange targets steps for snapcontainer.
@@ -3523,6 +3545,171 @@ impl Document {
         }
     }
 
+    /// Partii: remember an element that scrolled, as a scroll container to anchor.
+    fn note_scrolled_element(&self, element: &Element) {
+        let mut scrolled = self.scrolled_elements.borrow_mut();
+        if !scrolled.iter().any(|known| &**known == element) {
+            scrolled.push(Dom::from_ref(element));
+        }
+    }
+
+    /// Partii: the scrollport's top in client coordinates and the scroll offset (block axis) of
+    /// a scrolled box (`None`: the viewport).
+    fn scrollport_top_and_offset(&self, cx: &mut JSContext, scroller: Option<&Element>) -> (f64, f64) {
+        match scroller {
+            None => (0.0, self.window.scroll_offset().y as f64),
+            Some(element) => {
+                let top = element
+                    .GetBoundingClientRect(cx)
+                    .upcast::<DOMRectReadOnly>()
+                    .Top();
+                let border = element.ClientTop(cx.no_gc()) as f64;
+                (top + border, element.ScrollTop())
+            },
+        }
+    }
+
+    /// Partii: choose the anchor node of a scrolled box: going down from `container`, the first
+    /// box at or below the scrollport's top edge, descending into a box that straddles it.
+    /// <https://drafts.csswg.org/css-scroll-anchoring/#anchor-node-selection>
+    fn select_scroll_anchor(
+        &self,
+        cx: &mut JSContext,
+        container: &Element,
+        port_top: f64,
+    ) -> Option<(DomRoot<Element>, f64)> {
+        let mut budget = 2000;
+        let mut current = DomRoot::from_ref(container);
+        loop {
+            let mut next = None;
+            for child in current.upcast::<Node>().children() {
+                let Some(element) = DomRoot::downcast::<Element>(child) else {
+                    continue;
+                };
+                budget -= 1;
+                if budget == 0 {
+                    return None;
+                }
+                let rect = element.GetBoundingClientRect(cx);
+                let rect = rect.upcast::<DOMRectReadOnly>();
+                if rect.Width() == 0.0 && rect.Height() == 0.0 {
+                    continue;
+                }
+                if rect.Bottom() <= port_top {
+                    continue;
+                }
+                if rect.Top() >= port_top {
+                    let top = rect.Top();
+                    return Some((element, top));
+                }
+                next = Some(element);
+                break;
+            }
+            match next {
+                Some(straddling) => current = straddling,
+                None if &*current == container => return None,
+                None => {
+                    let top = current
+                        .GetBoundingClientRect(cx)
+                        .upcast::<DOMRectReadOnly>()
+                        .Top();
+                    return Some((current, top));
+                },
+            }
+        }
+    }
+
+    /// Partii: scroll anchoring, run in "update the rendering" before the intersection
+    /// observer steps. For each scrolled box whose anchor moved while the box itself didn't
+    /// scroll, scroll by the difference (content above grew or shrank); then choose new anchors.
+    /// Simplified from <https://drafts.csswg.org/css-scroll-anchoring/>: block axis only, no
+    /// suppression triggers beyond "the box scrolled", no `overflow-anchor` (Stylo has it for
+    /// Gecko only).
+    pub(crate) fn update_scroll_anchoring(&self, cx: &mut JSContext) {
+        if !pref!(layout_scroll_anchoring_enabled) || !self.is_fully_active() {
+            return;
+        }
+        let previous: Vec<(Option<DomRoot<Element>>, DomRoot<Element>, f64, f64)> = self
+            .scroll_anchors
+            .take()
+            .into_iter()
+            .map(|anchor| {
+                (
+                    anchor.scroller.as_ref().map(|scroller| scroller.as_rooted()),
+                    anchor.anchor.as_rooted(),
+                    anchor.offset,
+                    anchor.scroll_top,
+                )
+            })
+            .collect();
+        for (scroller, anchor, offset, scroll_top) in previous {
+            if !anchor.is_connected() || scroller.as_ref().is_some_and(|s| !s.is_connected()) {
+                continue;
+            }
+            let (port_top, current_scroll_top) =
+                self.scrollport_top_and_offset(cx, scroller.as_deref());
+            if (current_scroll_top - scroll_top).abs() > 0.5 {
+                // The box scrolled since: that moved the anchor, nothing to undo.
+                continue;
+            }
+            let top = anchor
+                .GetBoundingClientRect(cx)
+                .upcast::<DOMRectReadOnly>()
+                .Top();
+            let delta = (top - port_top) - offset;
+            if delta.abs() < 1.0 {
+                continue;
+            }
+            match scroller.as_deref() {
+                None => {
+                    let x = self.window.scroll_offset().x;
+                    self.window.scroll(
+                        cx,
+                        x,
+                        (current_scroll_top + delta) as f32,
+                        ScrollBehavior::Instant,
+                    );
+                },
+                Some(element) => element.SetScrollTop(cx, current_scroll_top + delta),
+            }
+        }
+
+        // Choose anchors for the viewport and every scrolled element with a scroll offset.
+        self.scrolled_elements
+            .borrow_mut()
+            .retain(|element| element.is_connected());
+        let mut scrollers: Vec<Option<DomRoot<Element>>> = vec![None];
+        scrollers.extend(
+            self.scrolled_elements
+                .borrow()
+                .iter()
+                .map(|element| Some(element.as_rooted())),
+        );
+        let mut anchors = Vec::new();
+        for scroller in scrollers {
+            let (port_top, scroll_top) = self.scrollport_top_and_offset(cx, scroller.as_deref());
+            if scroll_top <= 0.0 {
+                continue;
+            }
+            let container = match &scroller {
+                Some(element) => element.clone(),
+                None => match self.GetDocumentElement() {
+                    Some(root) => root,
+                    None => continue,
+                },
+            };
+            if let Some((anchor, top)) = self.select_scroll_anchor(cx, &container, port_top) {
+                anchors.push(ScrollAnchor {
+                    scroller: scroller.as_deref().map(Dom::from_ref),
+                    anchor: Dom::from_ref(&*anchor),
+                    offset: top - port_top,
+                    scroll_top,
+                });
+            }
+        }
+        *self.scroll_anchors.borrow_mut() = anchors;
+    }
+
     /// Partii: set the container policy this document was loaded with (nested documents).
     pub(crate) fn set_container_policy(&self, policy: Option<ContainerPolicy>) {
         *self.container_policy.borrow_mut() = policy;
@@ -4241,6 +4428,8 @@ impl Document {
             adopted_stylesheets: Default::default(),
             adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
             pending_scroll_events: Default::default(),
+            scroll_anchors: Default::default(),
+            scrolled_elements: Default::default(),
             rendering_update_reasons: Default::default(),
             waiting_on_canvas_image_updates: Cell::new(false),
             root_removal_noted: Cell::new(true),

@@ -334,6 +334,9 @@ pub struct Preferences {
     /// Partii: `backdrop-filter` (vendored Stylo, third_party/PARTII.md).
     pub layout_css_backdrop_filter_enabled: bool,
     pub layout_css_ellipse_corners_enabled: bool,
+    /// Partii: scroll anchoring (CSS Scroll Anchoring, simplified): keep the content at the top
+    /// of a scrolled box still when content above it changes size.
+    pub layout_scroll_anchoring_enabled: bool,
     /// Partii: parse `:has()` (Stylo pref layout.css.has-selector.enabled). Layout restyles the
     /// whole document on change while any stylesheet uses `:has()` (no relative selector
     /// invalidation yet).
@@ -592,6 +595,7 @@ impl Preferences {
             layout_container_queries_enabled: false,
             layout_css_backdrop_filter_enabled: false,
             layout_css_ellipse_corners_enabled: false,
+            layout_scroll_anchoring_enabled: false,
             layout_css_has_selector_enabled: false,
             layout_css_progress_function_enabled: false,
             layout_flexbox_balance: false,

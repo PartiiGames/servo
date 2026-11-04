@@ -1228,6 +1228,9 @@ impl ScriptThread {
             // > passing in the relative high resolution time given now and
             // > doc's relevant global object as the timestamp. [INTERSECTIONOBSERVER]
             // TODO(stevennovaryo): The time attribute should be relative to the time origin of the global object
+            // Partii: scroll anchoring, after the layout changes this frame made and before
+            // intersection observers see the scroll positions.
+            document.update_scroll_anchoring(cx);
             document.update_intersection_observer_steps(cx, CrossProcessInstant::now());
 
             // See <https://github.com/whatwg/html/issues/12704>.
