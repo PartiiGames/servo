@@ -2789,6 +2789,7 @@ impl WebGLImpl {
                 active_uniform_blocks: vec![].into(),
                 transform_feedback_length: Default::default(),
                 transform_feedback_mode: Default::default(),
+                transform_feedback_varying_bytes: vec![].into(),
             };
         }
         let num_active_attribs =
@@ -2865,6 +2866,17 @@ impl WebGLImpl {
             gl.get_program_parameter_i32(program.glow(), gl::TRANSFORM_FEEDBACK_BUFFER_MODE)
         };
 
+        let transform_feedback_varying_bytes = (0..transform_feedback_length.max(0) as u32)
+            .map(|i| {
+                unsafe { gl.get_transform_feedback_varying(program.glow(), i) }
+                    .map(|varying| {
+                        varying.size.max(0) as u32 * transform_feedback_type_bytes(varying.tftype)
+                    })
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>()
+            .into();
+
         ProgramLinkInfo {
             linked: true,
             active_attribs,
@@ -2872,6 +2884,7 @@ impl WebGLImpl {
             active_uniform_blocks,
             transform_feedback_length,
             transform_feedback_mode,
+            transform_feedback_varying_bytes,
         }
     }
 
@@ -3596,5 +3609,21 @@ impl FramebufferRebindingInfo {
                 self.viewport[3],
             )
         };
+    }
+}
+
+/// Size in bytes of one element of a transform feedback varying type.
+fn transform_feedback_type_bytes(type_: u32) -> u32 {
+    match type_ {
+        gl::FLOAT | gl::INT | gl::UNSIGNED_INT => 4,
+        gl::FLOAT_VEC2 | gl::INT_VEC2 | gl::UNSIGNED_INT_VEC2 => 8,
+        gl::FLOAT_VEC3 | gl::INT_VEC3 | gl::UNSIGNED_INT_VEC3 => 12,
+        gl::FLOAT_VEC4 | gl::INT_VEC4 | gl::UNSIGNED_INT_VEC4 | gl::FLOAT_MAT2 => 16,
+        gl::FLOAT_MAT2x3 | gl::FLOAT_MAT3x2 => 24,
+        gl::FLOAT_MAT2x4 | gl::FLOAT_MAT4x2 => 32,
+        gl::FLOAT_MAT3 => 36,
+        gl::FLOAT_MAT3x4 | gl::FLOAT_MAT4x3 => 48,
+        gl::FLOAT_MAT4 => 64,
+        _ => 16,
     }
 }
