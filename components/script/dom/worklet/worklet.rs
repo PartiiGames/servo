@@ -59,7 +59,7 @@ use crate::modules::script_module::fetch_a_module_script_graph;
 use crate::realms::enter_auto_realm;
 use crate::runtime::script_runtime::{IntroductionType, Runtime, ScriptThreadEventCategory};
 use crate::tasks::task_source::TaskSourceName;
-use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
+use crate::url::ensure_blob_referenced_by_url_is_kept_alive_for_origin;
 
 // Magic numbers
 const WORKLET_THREAD_POOL_SIZE: u32 = 3;
@@ -872,7 +872,7 @@ pub(crate) fn fetch_and_invoke_a_worklet_script(
     let request_client = RequestClient {
         preloaded_resources: PreloadedResources::default(),
         policy_container,
-        origin: Origin::Origin(origin),
+        origin: Origin::Origin(origin.clone()),
         is_nested_browsing_context: global.is_nested_browsing_context(),
         insecure_requests_policy: global.insecure_requests_policy(),
         has_trustworthy_ancestor_origin: global.has_trustworthy_ancestor_origin(),
@@ -886,7 +886,13 @@ pub(crate) fn fetch_and_invoke_a_worklet_script(
     // therefore, we wrap the TrustedPromise in an Rc to make it cloneable and RefCell allows calling `reject_task` and `resolve_task`
     let promise_task = Rc::new(RefCell::new(Some(promise)));
     let rooted_global = DomRoot::from_ref(global);
-    let script_url = ensure_blob_referenced_by_url_is_kept_alive(global, script_url);
+    // A blob: module URL belongs to the outside settings (the document that called addModule),
+    // not to the worklet global, whose origin is opaque.
+    let script_url = ensure_blob_referenced_by_url_is_kept_alive_for_origin(
+        global,
+        origin.clone(),
+        script_url,
+    );
 
     // NOTE: We implement the rest of the steps in AddModule here
     // <https://html.spec.whatwg.org/multipage/#dom-worklet-addmodule>
