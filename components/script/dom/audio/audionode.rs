@@ -395,10 +395,15 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             )) if value > 2 => {
                 return Err(Error::NotSupported(None));
             },
-            EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelMergerNode) => {
+            // These are fixed: setting them to anything else throws, the same value does not.
+            // <https://webaudio.github.io/web-audio-api/#ChannelMergerNode>
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelMergerNode) if value != 1 => {
                 return Err(Error::InvalidState(None));
             },
-            EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelSplitterNode) => {
+            // <https://webaudio.github.io/web-audio-api/#ChannelSplitterNode>
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelSplitterNode)
+                if value != self.number_of_outputs =>
+            {
                 return Err(Error::InvalidState(None));
             },
             // <https://webaudio.github.io/web-audio-api/#dom-dynamicscompressornode-channelcount>
@@ -419,6 +424,10 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             return Err(Error::NotSupported(None));
         }
 
+        // Setting the current value changes nothing (and a splitter's engine refuses any change).
+        if value == self.channel_count.get() {
+            return Ok(());
+        }
         self.channel_count.set(value);
         self.message(AudioNodeMessage::SetChannelCount(value as u8));
         Ok(())
@@ -452,10 +461,9 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             )) if value == ChannelCountMode::Max => {
                 return Err(Error::NotSupported(None));
             },
-            EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelMergerNode) => {
-                return Err(Error::InvalidState(None));
-            },
-            EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelSplitterNode) => {
+            EventTargetTypeId::AudioNode(
+                AudioNodeTypeId::ChannelMergerNode | AudioNodeTypeId::ChannelSplitterNode,
+            ) if value != ChannelCountMode::Explicit => {
                 return Err(Error::InvalidState(None));
             },
             // <https://webaudio.github.io/web-audio-api/#dom-dynamicscompressornode-channelcountmode>
@@ -476,6 +484,9 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             _ => (),
         };
 
+        if value == self.channel_count_mode.get() {
+            return Ok(());
+        }
         self.channel_count_mode.set(value);
         self.message(AudioNodeMessage::SetChannelMode(value.convert()));
         Ok(())
@@ -494,11 +505,15 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
         }
 
         if let EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelSplitterNode) =
-            self.upcast::<EventTarget>().type_id()
+            self.upcast::<EventTarget>().type_id() &&
+            value != ChannelInterpretation::Discrete
         {
             return Err(Error::InvalidState(None));
         };
 
+        if value == self.channel_interpretation.get() {
+            return Ok(());
+        }
         self.channel_interpretation.set(value);
         self.message(AudioNodeMessage::SetChannelInterpretation(value.convert()));
         Ok(())
