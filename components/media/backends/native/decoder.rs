@@ -131,6 +131,17 @@ impl AudioDecoder for NativeAudioDecoder {
             Err(e) => return callbacks.error(e),
         };
         let out_rate = options.sample_rate.round() as u32;
+        // The resampled result must fit an AudioBuffer (length is an unsigned long). Reject
+        // before resampling: an 8 kHz file decoded into a 768 kHz context grows 96x.
+        let in_len = decoded.channels.first().map_or(0, |c| c.len()) as u64;
+        if out_rate > 0 &&
+            decoded.rate > 0 &&
+            in_len * out_rate as u64 / decoded.rate as u64 > u32::MAX as u64
+        {
+            return callbacks.error(AudioDecoderError::Backend(
+                "the resampled audio is longer than an AudioBuffer can be".to_owned(),
+            ));
+        }
         callbacks.ready(decoded.channels.len() as u32);
         for (i, ch) in decoded.channels.into_iter().enumerate() {
             let ch = if out_rate != decoded.rate && out_rate > 0 {
