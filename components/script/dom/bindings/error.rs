@@ -350,6 +350,23 @@ pub(crate) fn report_pending_exception(cx: &mut CurrentRealm) {
     }
 }
 
+/// Like [`report_pending_exception`], and also returns the error's (message, filename, line,
+/// column), for an event fired on another thread (AudioWorkletNode's processorerror).
+pub(crate) fn report_pending_exception_with_info(
+    cx: &mut CurrentRealm,
+) -> Option<(String, String, u32, u32)> {
+    rooted!(&in(cx) let mut value = UndefinedValue());
+    let error_info = error_info_from_pending_exception(cx, value.handle_mut())?;
+    let details = (
+        error_info.message.clone(),
+        error_info.filename.clone(),
+        error_info.lineno,
+        error_info.column,
+    );
+    GlobalScope::from_current_realm(cx).report_an_error(cx, error_info, value.handle());
+    Some(details)
+}
+
 fn error_info_from_pending_exception(
     cx: &mut JSContext,
     value: MutableHandleValue,

@@ -154,8 +154,16 @@ impl MessagePort {
             }
         }
 
-        // Step 5
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        // Step 5. Ports talk within one agent cluster (a window and its dedicated workers or its
+        // AudioWorklet), so a cross-origin isolated global may send SharedArrayBuffers and
+        // WebAssembly.Modules; such a clone is carried in-process (and fails cleanly with a
+        // DataCloneError if it ever had to cross a process).
+        let data = structuredclone::write_for_same_agent_cluster(
+            cx,
+            &self.global(),
+            message,
+            Some(transfer),
+        )?;
 
         if doomed {
             // TODO: The spec says to optionally report such a case to a dev console.
