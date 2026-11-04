@@ -29,8 +29,8 @@ use js::rust::{
     MutableHandleValue as SafeMutableHandleValue, Trace,
 };
 use js::typedarray::{
-    ArrayBufferU8, ArrayBufferViewU8, CreateWith, TypedArray, TypedArrayElement,
-    TypedArrayElementCreator,
+    ArrayBufferU8, ArrayBufferView, ArrayBufferViewU8, CreateWith, JSObjectStorage, TypedArray,
+    TypedArrayElement, TypedArrayElementCreator,
 };
 
 use crate::codegen::GenericUnionTypes::ArrayBufferViewOrArrayBuffer;
@@ -134,10 +134,66 @@ pub fn get_buffer_source_slice<'a>(
     no_gc: &'a NoGC,
 ) -> &'a [u8] {
     match source {
-        ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => view.as_slice_safe(no_gc),
-        ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => buffer.as_slice_safe(no_gc),
+        ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => {
+            let (data, len) = array_buffer_view_raw(&**view);
+            if data.is_null() {
+                return &[];
+            }
+            // SAFETY: as in `array_buffer_view_bytes`.
+            unsafe { std::slice::from_raw_parts(data, len) }
+        },
+        ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => {
+            buffer.as_slice_safe(no_gc).unwrap_or(&[])
+        },
     }
-    .unwrap_or(&[])
+}
+
+/// The data pointer and byte length of an ArrayBufferView, which may be backed by a
+/// SharedArrayBuffer. mozjs's `TypedArray::as_slice_safe`, `as_mut_slice_safe` and `len` assert
+/// that the buffer is not shared, so with SharedArrayBuffer exposed (this fork does) a page could
+/// panic the script thread by passing a shared view; read views through these helpers instead.
+/// As in every engine, another agent may write shared memory while it is being read.
+fn array_buffer_view_raw<S: JSObjectStorage>(
+    view: &TypedArray<ArrayBufferViewU8, S>,
+) -> (*mut u8, usize) {
+    let (mut len, mut shared, mut data) = (0usize, false, ptr::null_mut());
+    unsafe {
+        js::jsapi::GetArrayBufferViewLengthAndData(
+            view.underlying_object().as_raw(),
+            &mut len,
+            &mut shared,
+            &mut data,
+        );
+    }
+    (data, len)
+}
+
+/// The bytes of an ArrayBufferView, shared or not.
+pub fn array_buffer_view_bytes<'a>(view: &ArrayBufferView, _no_gc: &'a NoGC) -> &'a [u8] {
+    let (data, len) = array_buffer_view_raw(view);
+    if data.is_null() {
+        return &[];
+    }
+    // SAFETY: the view stays alive and attached while `_no_gc` lives (no JS can run).
+    unsafe { std::slice::from_raw_parts(data, len) }
+}
+
+/// The bytes of an ArrayBufferView, shared or not, for writing.
+pub fn array_buffer_view_bytes_mut<'a>(
+    view: &mut ArrayBufferView,
+    _no_gc: &'a NoGC,
+) -> &'a mut [u8] {
+    let (data, len) = array_buffer_view_raw(view);
+    if data.is_null() {
+        return &mut [];
+    }
+    // SAFETY: as above; `&mut view` keeps other Rust borrows of this view away.
+    unsafe { std::slice::from_raw_parts_mut(data, len) }
+}
+
+/// The byte length of an ArrayBufferView, shared or not.
+pub fn array_buffer_view_byte_len(view: &ArrayBufferView) -> usize {
+    array_buffer_view_raw(view).1
 }
 
 pub fn create_heap_buffer_source_with_length<T>(

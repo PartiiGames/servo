@@ -38,7 +38,10 @@ use webrender_api::ImageKey;
 use crate::canvas_context::{CanvasContext, HTMLCanvasElementOrOffscreenCanvas};
 #[cfg(feature = "webxr")]
 use crate::dom::RootedPromise;
-use crate::dom::bindings::buffer_source::{create_buffer_source, get_buffer_source_slice};
+use crate::dom::bindings::buffer_source::{
+    array_buffer_view_bytes, array_buffer_view_bytes_mut, create_buffer_source,
+    get_buffer_source_slice,
+};
 use crate::dom::bindings::codegen::Bindings::ANGLEInstancedArraysBinding::ANGLEInstancedArraysConstants;
 use crate::dom::bindings::codegen::Bindings::EXTBlendMinmaxBinding::EXTBlendMinmaxConstants;
 use crate::dom::bindings::codegen::Bindings::KHRParallelShaderCompileBinding::KHRParallelShaderCompileConstants;
@@ -2853,7 +2856,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         border: i32,
         data: CustomAutoRooterGuard<ArrayBufferView>,
     ) {
-        let data = data.as_slice_safe(no_gc).unwrap_or(&[]);
+        let data = array_buffer_view_bytes(&data, no_gc);
         self.compressed_tex_image_2d(
             target,
             level,
@@ -2878,7 +2881,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         format: u32,
         data: CustomAutoRooterGuard<ArrayBufferView>,
     ) {
-        let data = data.as_slice_safe(no_gc).unwrap_or(&[]);
+        let data = array_buffer_view_bytes(&data, no_gc);
         self.compressed_tex_sub_image_2d(
             target,
             level,
@@ -4030,7 +4033,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return
         );
 
-        let dest = pixels.as_mut_slice_safe(no_gc).unwrap_or(&mut []);
+        let dest = array_buffer_view_bytes_mut(pixels, no_gc);
         if dest.len() < required_dest_len as usize {
             return self.webgl_error(InvalidOperation);
         }
@@ -4698,7 +4701,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         let buff = match *pixels {
             None => GenericSharedMemory::from_byte(0, expected_byte_length as usize),
             Some(ref data) => {
-                GenericSharedMemory::from_bytes(data.as_slice_safe(no_gc).unwrap_or_default())
+                GenericSharedMemory::from_bytes(array_buffer_view_bytes(&data, no_gc))
             },
         };
 
@@ -4893,7 +4896,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             self,
             pixels
                 .as_ref()
-                .map(|p| GenericSharedMemory::from_bytes(p.as_slice_safe(no_gc).unwrap_or(&[])))
+                .map(|p| GenericSharedMemory::from_bytes(array_buffer_view_bytes(&p, no_gc)))
                 .ok_or(InvalidValue),
             return Ok(())
         );

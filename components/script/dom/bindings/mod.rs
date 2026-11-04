@@ -136,7 +136,8 @@
 
 pub(crate) mod buffer_source {
     pub(crate) use script_bindings::buffer_source::{
-        Constructor, HeapBufferSource, byte_size, create_array_buffer_with_size,
+        Constructor, HeapBufferSource, array_buffer_view_byte_len, array_buffer_view_bytes,
+        array_buffer_view_bytes_mut, byte_size, create_array_buffer_with_size,
         create_buffer_source, create_buffer_source_with_constructor,
         create_heap_buffer_source_with_length, get_buffer_source_copy, get_buffer_source_slice,
     };
