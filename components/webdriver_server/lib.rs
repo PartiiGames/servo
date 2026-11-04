@@ -145,7 +145,14 @@ pub fn start_server(
     thread::Builder::new()
         .name("WebDriverHttpServer".to_owned())
         .spawn(move || {
-            let address = SocketAddrV4::new("0.0.0.0".parse().unwrap(), port);
+            // Partii: loopback by default, so a WebDriver session is never reachable from other
+            // hosts (shared build/test machines); SERVO_WEBDRIVER_BIND_ADDRESS=0.0.0.0 restores
+            // listening on every interface.
+            let bind_address = std::env::var("SERVO_WEBDRIVER_BIND_ADDRESS")
+                .ok()
+                .and_then(|address| address.parse().ok())
+                .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
+            let address = SocketAddrV4::new(bind_address, port);
             match webdriver::server::start(
                 SocketAddr::V4(address),
                 vec![],

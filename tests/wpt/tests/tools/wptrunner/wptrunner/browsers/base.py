@@ -2,6 +2,7 @@ import enum
 import errno
 import os
 import platform
+import random
 import socket
 import time
 import traceback
@@ -52,7 +53,27 @@ def certificate_domain_list(list_of_domains: List[str],
 
 
 def get_free_port() -> int:
-    """Get a random unbound port"""
+    """Get a random unbound port.
+
+    Partii: with WPT_FREE_PORT_RANGE=LOW-HIGH (inclusive) in the environment, the port comes from
+    that range instead (shared machines that allow a job only a block of loopback ports).
+    """
+    port_range = os.environ.get("WPT_FREE_PORT_RANGE")
+    if port_range:
+        low, high = (int(part) for part in port_range.split("-"))
+        candidates = list(range(low, high + 1))
+        random.shuffle(candidates)
+        for candidate in candidates:
+            s = socket.socket()
+            try:
+                s.bind(("127.0.0.1", candidate))
+            except OSError:
+                continue
+            else:
+                return candidate
+            finally:
+                s.close()
+        raise OSError(f"no free port in WPT_FREE_PORT_RANGE={port_range}")
     while True:
         s = socket.socket()
         try:

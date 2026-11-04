@@ -1,3 +1,5 @@
+import os
+import random
 import socket
 from typing import AnyStr, Dict, List, TypeVar
 
@@ -160,6 +162,20 @@ def is_bad_port(port: int) -> bool:
 
 def get_port(host: str = '') -> int:
     host = host or '127.0.0.1'
+    # Partii: with WPT_FREE_PORT_RANGE=LOW-HIGH (inclusive), take the port from that range (shared
+    # machines that allow a job only a block of loopback ports). Also used for the stash server.
+    port_range = os.environ.get("WPT_FREE_PORT_RANGE")
+    if port_range:
+        low, high = (int(part) for part in port_range.split("-"))
+        candidates = [p for p in range(low, high + 1) if not is_bad_port(p)]
+        random.shuffle(candidates)
+        for candidate in candidates:
+            try:
+                _open_socket(host, candidate).close()
+            except OSError:
+                continue
+            return candidate
+        raise OSError(f"no free port in WPT_FREE_PORT_RANGE={port_range}")
     port = 0
     while True:
         free_socket = _open_socket(host, 0)
