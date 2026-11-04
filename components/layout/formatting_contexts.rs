@@ -25,7 +25,7 @@ use crate::replaced::ReplacedContents;
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
 };
-use crate::style_ext::{AspectRatio, Display, DisplayInside, LayoutStyle};
+use crate::style_ext::{AspectRatio, ComputedValuesExt, Display, DisplayInside, LayoutStyle};
 use crate::table::Table;
 use crate::taffy::TaffyContainer;
 use crate::{
@@ -546,15 +546,31 @@ impl IndependentFormattingContext {
         preferred_aspect_ratio: Option<AspectRatio>,
         lazy_block_size: &LazySize,
     ) -> IndependentFormattingContextLayoutResult {
-        self.layout_and_is_cached(
-            layout_context,
-            positioning_context,
-            containing_block_for_children,
-            containing_block,
-            preferred_aspect_ratio,
-            lazy_block_size,
-        )
-        .0
+        let mut result = self
+            .layout_and_is_cached(
+                layout_context,
+                positioning_context,
+                containing_block_for_children,
+                containing_block,
+                preferred_aspect_ratio,
+                lazy_block_size,
+            )
+            .0;
+        // Partii: a non-replaced box with a preferred aspect ratio is, by content, as tall as the
+        // ratio makes it from its inline size, or taller if its content needs more
+        // (`min-block-size: auto`). Callers use the content block size only for an automatic
+        // block size, so every path (in flow, flex, grid, abspos) gets the ratio from here.
+        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-automatic>
+        if let Some(ratio) = preferred_aspect_ratio {
+            if !self.is_replaced() {
+                let ratio_block_size = ratio.compute_dependent_size(
+                    Direction::Block,
+                    containing_block_for_children.size.inline,
+                );
+                result.content_block_size.max_assign(ratio_block_size);
+            }
+        }
+        result
     }
 
     #[inline]
@@ -579,8 +595,10 @@ impl IndependentFormattingContext {
             IndependentFormattingContextContents::Replaced(replaced, _) => {
                 replaced.preferred_aspect_ratio(self.style(), padding_border_sums)
             },
-            // TODO: support preferred aspect ratios on non-replaced boxes.
-            _ => None,
+            // Partii: non-replaced boxes have no natural ratio, so `aspect-ratio: <ratio>` (or
+            // `auto <ratio>`) is their preferred aspect ratio.
+            // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>
+            _ => self.style().preferred_aspect_ratio(None, padding_border_sums),
         }
     }
 

@@ -178,6 +178,7 @@ impl SameFormattingContextBlock {
             depends_on_block_constraints,
             available_block_size,
             justify_self,
+            aspect_ratio_block_size,
             ..
         } = solve_containing_block_padding_and_border_for_in_flow_box(
             containing_block,
@@ -351,7 +352,11 @@ impl SameFormattingContextBlock {
             Size::FitContent,
             Au::zero,
             available_block_size,
-            || content_block_size.into(),
+            // Partii: with an aspect ratio, the ratio's block size, but never below the content.
+            || match aspect_ratio_block_size {
+                Some(ratio_size) => content_block_size.max(ratio_size).into(),
+                None => content_block_size.into(),
+            },
             false, /* is_table */
         );
 
