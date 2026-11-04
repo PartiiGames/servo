@@ -78,6 +78,10 @@ pub fn set(preferences: Preferences) {
         "layout.css.backdrop-filter.enabled",
         preferences.layout_css_backdrop_filter_enabled
     );
+    stylo_static_prefs::set_pref!(
+        "layout.css.has-selector.enabled",
+        preferences.layout_css_has_selector_enabled
+    );
 
     *PREFERENCES.write().unwrap() = preferences;
 
@@ -330,6 +334,10 @@ pub struct Preferences {
     /// Partii: `backdrop-filter` (vendored Stylo, third_party/PARTII.md).
     pub layout_css_backdrop_filter_enabled: bool,
     pub layout_css_ellipse_corners_enabled: bool,
+    /// Partii: parse `:has()` (Stylo pref layout.css.has-selector.enabled). Layout restyles the
+    /// whole document on change while any stylesheet uses `:has()` (no relative selector
+    /// invalidation yet).
+    pub layout_css_has_selector_enabled: bool,
     pub layout_css_progress_function_enabled: bool,
     pub layout_style_sharing_cache_enabled: bool,
     pub layout_threads: i64,
@@ -584,6 +592,7 @@ impl Preferences {
             layout_container_queries_enabled: false,
             layout_css_backdrop_filter_enabled: false,
             layout_css_ellipse_corners_enabled: false,
+            layout_css_has_selector_enabled: false,
             layout_css_progress_function_enabled: false,
             layout_flexbox_balance: false,
             layout_grid_enabled: true,

@@ -1253,6 +1253,19 @@ impl LayoutThread {
             .invalidation_set
             .process_style(dangerous_root_element, Some(&snapshot_map));
 
+        // Partii: `:has()` invalidation, conservatively. Stylo's relative selector invalidator is
+        // not wired into Servo, so a change below a `:has()` subject would leave it stale. While
+        // any stylesheet uses `:has()`, restyle the whole document whenever anything is restyled.
+        let restyle_whole_document = pref!(layout_css_has_selector_enabled) &&
+            self.stylist
+                .iter_origins()
+                .any(|(data, _)| data.relative_invalidation_map_attributes().used);
+        if restyle_whole_document {
+            if let Some(mut data) = dangerous_root_element.mutate_data() {
+                data.hint.insert(RestyleHint::restyle_subtree());
+            }
+        }
+
         if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node {
             // Need to manually force layout to build a new display list regardless of whether the box tree
             // changed or not.
@@ -1290,11 +1303,15 @@ impl LayoutThread {
         {
             let _span = profile_traits::trace_span!("Styling").entered();
 
-            let original_dirty_root = unsafe {
-                ServoLayoutNode::new(&restyle.dirty_root.unwrap())
-                    .as_element()
-                    .unwrap()
-                    .dangerous_style_element()
+            let original_dirty_root = if restyle_whole_document {
+                dangerous_root_element
+            } else {
+                unsafe {
+                    ServoLayoutNode::new(&restyle.dirty_root.unwrap())
+                        .as_element()
+                        .unwrap()
+                        .dangerous_style_element()
+                }
             };
 
             recalc_style_traversal = RecalcStyle::new(&layout_context);
