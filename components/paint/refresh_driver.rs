@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{RecvTimeoutError, Sender};
 use embedder_traits::{EventLoopWaker, RefreshDriver};
@@ -196,6 +196,11 @@ enum TimerThreadMessage {
 pub(crate) struct TimerRefreshDriver {
     sender: Sender<TimerThreadMessage>,
     join_handle: Option<JoinHandle<()>>,
+    /// Partii: the start time of the latest frame asked for. The next frame starts one period
+    /// after it (or at once, if that time has passed), so frames sit on a fixed grid instead of
+    /// starting a fixed delay after the previous paint began (upstream: 1/120 s after each
+    /// request, so a frame took its work time plus 8.3 ms, and an idle page ran at ~110 Hz).
+    next_frame_start: Cell<Option<Instant>>,
 }
 
 impl Default for TimerRefreshDriver {
@@ -227,8 +232,15 @@ impl Default for TimerRefreshDriver {
         Self {
             sender,
             join_handle: Some(join_handle),
+            next_frame_start: Cell::new(None),
         }
     }
+}
+
+/// Partii: one frame at `shell_refresh_rate_hz` (default 60).
+pub(crate) fn frame_period() -> Duration {
+    let hz = servo_config::pref!(shell_refresh_rate_hz).clamp(1, 1000);
+    Duration::from_nanos(1_000_000_000 / hz as u64)
 }
 
 impl TimerRefreshDriver {
@@ -244,8 +256,16 @@ impl TimerRefreshDriver {
 
 impl RefreshDriver for TimerRefreshDriver {
     fn observe_next_frame(&self, new_start_frame_callback: Box<dyn Fn() + Send + 'static>) {
-        const FRAME_DURATION: Duration = Duration::from_millis(1000 / 120);
-        self.queue_timer(FRAME_DURATION, new_start_frame_callback);
+        let now = Instant::now();
+        let start = match self.next_frame_start.get() {
+            // A frame is already due: this request joins it.
+            Some(start) if start > now => start,
+            // The next slot on the grid, or now if we're behind (a slow frame).
+            Some(start) => (start + frame_period()).max(now),
+            None => now,
+        };
+        self.next_frame_start.set(Some(start));
+        self.queue_timer(start - now, new_start_frame_callback);
     }
 }
 

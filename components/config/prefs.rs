@@ -433,6 +433,11 @@ pub struct Preferences {
     pub session_history_max_length: i64,
     /// The background color of shell's viewport. This will be used by OpenGL's `glClearColor`.
     pub shell_background_color_rgba: [f64; 4],
+    /// Partii: the frame rate of the built-in (timer) refresh driver, used when the rendering
+    /// context has no vsync-driven one (headless, and windows today). Frames start on a fixed
+    /// grid of this rate, as a display's vsync would; a slow frame starts the next one at once.
+    /// The fallback rAF tick for animation frames that build no display list uses it too.
+    pub shell_refresh_rate_hz: i64,
     pub webgl_testing_context_creation_error: bool,
     /// Maximum number of workers for the main thread pool
     pub thread_pool_workers_max: u64,
@@ -649,6 +654,7 @@ impl Preferences {
             perf_thread_boost_enabled: true,
             session_history_max_length: 20,
             shell_background_color_rgba: [1.0, 1.0, 1.0, 1.0],
+            shell_refresh_rate_hz: 60,
             log_filter: String::new(),
             thread_pool_workers_max: 4,
             thread_pool_async_runtime_workers_max: 6,
