@@ -67,6 +67,31 @@ pub(crate) trait TextControlElement {
         true // TODO: Return true if the action can have any effect.
     }
 
+    /// `beforeinput` for a composition step, fired synchronously just before the control
+    /// applies it. Not cancelable: <https://w3c.github.io/input-events/#interface-InputEvent-Attributes>
+    /// (insertCompositionText). `data` is the composition's text.
+    fn fire_composition_beforeinput(&self, cx: &mut JSContext, data: DOMString, is_composing: bool) {
+        let element = self.as_element();
+        let window = element.owner_window();
+        let event = InputEvent::new(
+            cx,
+            &window,
+            None,
+            atom!("beforeinput"),
+            true,
+            false,
+            Some(&window),
+            0,
+            Some(data),
+            is_composing,
+            InputEventType::InsertCompositionText.as_str().into(),
+        );
+        let event = event.upcast::<Event>();
+        event.set_trusted(true);
+        event.set_composed(true);
+        event.fire(cx, element.upcast());
+    }
+
     /// <https://w3c.github.io/uievents/#event-type-input>
     fn queue_input_event(
         &self,

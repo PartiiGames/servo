@@ -483,7 +483,7 @@ impl Preferences {
             dom_canvas_text_enabled: true,
             dom_canvas_backend: String::new(),
             dom_canvas_msg_buffer_size: 16,
-            dom_composition_event_enabled: false,
+            dom_composition_event_enabled: true,
             dom_cookiestore_enabled: false,
             dom_credential_management_enabled: false,
             dom_cross_origin_isolated_always: false,

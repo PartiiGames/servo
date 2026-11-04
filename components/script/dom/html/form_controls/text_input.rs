@@ -627,7 +627,16 @@ impl<T: ClipboardProvider> TextInput<T> {
     pub(crate) fn handle_compositionupdate(&mut self, event: &CompositionEvent) -> KeyReaction {
         let insertion = event.data().str();
         if insertion.is_empty() {
-            return KeyReaction::Nothing;
+            // The IME cleared its preedit (the user deleted it, or is about to cancel or commit):
+            // remove the preedit text, which is the selection.
+            if !self.delete_selection() {
+                return KeyReaction::Nothing;
+            }
+            return KeyReaction::DispatchInput(
+                Some(String::new()),
+                IsComposing::Composing,
+                InputEventType::InsertCompositionText,
+            );
         }
 
         let start = self.selection_start_offset();
