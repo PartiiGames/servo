@@ -6,7 +6,7 @@
 [Exposed=Window, Pref="dom_screen_orientation_enabled"]
 interface ScreenOrientation : EventTarget {
   Promise<undefined> lock(OrientationLockType orientation);
-  undefined unlock();
+  [Throws] undefined unlock();
   readonly attribute OrientationType type;
   readonly attribute unsigned short angle;
   attribute EventHandler onchange;

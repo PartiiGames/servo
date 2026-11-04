@@ -27,7 +27,7 @@ use crate::dom::bindings::codegen::Bindings::ScreenOrientationBinding::{
     OrientationLockType, OrientationType, ScreenOrientationMethods,
 };
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
-use crate::dom::bindings::error::Error;
+use crate::dom::bindings::error::{Error, ErrorResult};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::eventtarget::EventTarget;
@@ -124,7 +124,26 @@ impl ScreenOrientationMethods<crate::DomTypeHolder> for ScreenOrientation {
     }
 
     /// <https://w3c.github.io/screen-orientation/#dom-screenorientation-unlock>
-    fn Unlock(&self) {}
+    ///
+    /// Nothing is ever locked on desktop, so after the spec's checks this does nothing.
+    fn Unlock(&self) -> ErrorResult {
+        let document = self.window.Document();
+        // > If document is not fully active, throw an "InvalidStateError" DOMException.
+        if !document.is_fully_active() {
+            return Err(Error::InvalidState(Some("The document is not fully active".into())));
+        }
+        // > If document has the sandboxed orientation lock browsing context flag set, or its
+        // > visibility state is "hidden", throw a "SecurityError" DOMException.
+        if document.has_active_sandboxing_flag(
+            SandboxingFlagSet::SANDBOXED_ORIENTATION_LOCK_BROWSING_CONTEXT_FLAG,
+        ) || document.VisibilityState() == DocumentVisibilityState::Hidden
+        {
+            return Err(Error::Security(Some(
+                "This document may not unlock the orientation".into(),
+            )));
+        }
+        Ok(())
+    }
 
     /// <https://w3c.github.io/screen-orientation/#dom-screenorientation-type>
     fn Type(&self) -> OrientationType {

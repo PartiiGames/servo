@@ -272,6 +272,10 @@ pub struct ScriptThread {
 
     /// <https://html.spec.whatwg.org/multipage/#last-render-opportunity-time>
     last_render_opportunity_time: Cell<Option<Instant>>,
+    /// The deadline of the last idle period (requestIdleCallback): the next one starts after it.
+    idle_period_end: Cell<Option<Instant>>,
+    /// A wake-up timer is scheduled for this time, to start the next idle period.
+    idle_wake_at: Cell<Option<Instant>>,
     /// State that is common to `WebView`s to be shared with all of their `Pipeline`s. Each
     /// is stored as a `Weak` and pruned lazily so that there does not need to be any
     /// management when `WebView`s are closed.
@@ -944,6 +948,8 @@ impl ScriptThread {
                     webview_states: Default::default(),
                     documents: DomRefCell::new(DocumentCollection::default()),
                     last_render_opportunity_time: Default::default(),
+                    idle_period_end: Default::default(),
+                    idle_wake_at: Default::default(),
                     window_proxies: Default::default(),
                     incomplete_loads: DomRefCell::new(vec![]),
                     incomplete_parser_contexts: IncompleteParserContexts(RefCell::new(vec![])),
@@ -1401,6 +1407,9 @@ impl ScriptThread {
                 ran |= window.run_idle_period(cx, deadline);
             }
         }
+        if ran {
+            self.idle_period_end.set(Some(deadline));
+        }
         ran
     }
 
@@ -1417,6 +1426,20 @@ impl ScriptThread {
         while self.has_idle_callbacks() {
             if let Some(event) = self.receivers.try_recv(&self.task_queue, &fully_active) {
                 ready_event = Some(event);
+                break;
+            }
+            // Callbacks requested during an idle period run in the next one, which starts
+            // after this one's deadline: wake up then rather than spin.
+            if let Some(end) = self.idle_period_end.get() &&
+                Instant::now() < end
+            {
+                if self.idle_wake_at.get() != Some(end) {
+                    self.idle_wake_at.set(Some(end));
+                    self.schedule_timer(TimerEventRequest {
+                        callback: Box::new(|| {}),
+                        duration: end - Instant::now(),
+                    });
+                }
                 break;
             }
             if !self.run_an_idle_period(cx) {

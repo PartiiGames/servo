@@ -13,7 +13,6 @@
 //! (`WebView::exit_pointer_lock`); each of those tells the embedder with
 //! `EmbedderMsg::ReleasePointerLock`.
 
-use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use embedder_traits::{AllowOrDeny, EmbedderMsg, PointerLockOptions as EmbedderPointerLockOptions};
 use js::context::JSContext;
 use js::realm::CurrentRealm;
@@ -32,24 +31,6 @@ use crate::dom::node::NodeTraits;
 use crate::dom::promise::{Promise, RootedPromise};
 
 impl Document {
-    /// Whether this document may use pointer lock at all.
-    ///
-    /// This is the hook point for frame permissions: the sandbox flag is checked here, and
-    /// the permissions policy (`<iframe allow="pointer-lock">`, from the w7 stream) plugs in
-    /// below. Top-level documents are always allowed.
-    /// <https://w3c.github.io/pointerlock/#dom-element-requestpointerlock> (step 3)
-    pub(crate) fn allowed_to_use_pointer_lock(&self) -> bool {
-        if self.has_active_sandboxing_flag(
-            SandboxingFlagSet::SANDBOXED_POINTER_LOCK_BROWSING_CONTEXT_FLAG,
-        ) {
-            return false;
-        }
-        // TODO(w7-ui): once the permissions policy lands, also return false when the
-        // "pointer-lock" feature is not enabled for this document, e.g.
-        // `self.is_allowed_to_use_feature(PermissionsPolicyFeature::PointerLock)`.
-        true
-    }
-
     /// The element that holds the pointer lock in this document, if any.
     pub(crate) fn pointer_lock_element(&self) -> Option<DomRoot<Element>> {
         self.pointer_lock_state().0.get()
@@ -111,6 +92,8 @@ impl Document {
         // > If this's node document's active sandboxing flag set has the sandboxed pointer
         // > lock browsing context flag set (or the frame may not use pointer lock),
         // > reject with a "SecurityError" DOMException.
+        // Document::allowed_to_use_pointer_lock (w7) checks the sandbox flag and the frame's
+        // `allow="pointer-lock"` / `sandbox="allow-pointer-lock"`.
         if !self.allowed_to_use_pointer_lock() {
             self.fail_pointer_lock_request(
                 cx,
