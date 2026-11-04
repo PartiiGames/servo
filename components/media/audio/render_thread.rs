@@ -17,6 +17,9 @@ use crate::constant_source_node::ConstantSourceNode;
 use crate::context::{AudioContextOptions, ProcessingState, StateChangeResult};
 use crate::gain_node::GainNode;
 use crate::graph::{AudioGraph, InputPort, NodeId, OutputPort, PortId};
+use crate::convolver_node::ConvolverNode;
+use crate::delay_node::DelayNode;
+use crate::dynamics_compressor_node::DynamicsCompressorNode;
 use crate::iir_filter_node::IIRFilterNode;
 use crate::media_element_source_node::MediaElementSourceNode;
 use crate::media_stream_destination_node::MediaStreamDestinationNode;
@@ -247,6 +250,11 @@ impl AudioRenderThread {
             AudioNodeInit::WaveShaperNode(options) => Box::new(WaveShaperNode::new(options, ch)),
             AudioNodeInit::MediaElementSourceNode => Box::new(MediaElementSourceNode::new(ch)),
             AudioNodeInit::IIRFilterNode(options) => Box::new(IIRFilterNode::new(options, ch)),
+            AudioNodeInit::ConvolverNode(options) => Box::new(ConvolverNode::new(options, ch)),
+            AudioNodeInit::DelayNode(options) => Box::new(DelayNode::new(options, ch)),
+            AudioNodeInit::DynamicsCompressionNode(options) => {
+                Box::new(DynamicsCompressorNode::new(options, ch))
+            },
             _ => unimplemented!(),
         };
         let id = self.graph.add_node(node);

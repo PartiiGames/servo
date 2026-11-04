@@ -22,6 +22,12 @@ pub enum ParamType {
     Up(ParamDir),
     Orientation(ParamDir),
     Offset,
+    Threshold,
+    Knee,
+    Ratio,
+    Attack,
+    Release,
+    DelayTime,
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, MallocSizeOf)]

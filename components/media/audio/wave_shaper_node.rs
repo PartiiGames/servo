@@ -2,30 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+//! <https://webaudio.github.io/web-audio-api/#WaveShaperNode>
+
 use malloc_size_of_derive::MallocSizeOf;
-use speexdsp_resampler::State as SpeexResamplerState;
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
 use crate::block::{Chunk, FRAMES_PER_BLOCK_USIZE};
+use crate::oversampler::Oversampler;
 
-#[derive(Clone, Debug, PartialEq, MallocSizeOf)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, MallocSizeOf)]
 pub enum OverSampleType {
     None,
     Double,
     Quadruple,
 }
 
-#[derive(Clone, Debug, PartialEq, MallocSizeOf)]
-enum TailtimeBlocks {
-    Zero,
-    One,
-    Two,
-}
-
-const OVERSAMPLING_QUALITY: usize = 0;
-
 impl OverSampleType {
-    fn value(&self) -> usize {
+    fn factor(&self) -> usize {
         match self {
             OverSampleType::None => 1,
             OverSampleType::Double => 2,
@@ -53,54 +46,86 @@ impl Default for WaveShaperNodeOptions {
 
 #[derive(Clone, Debug, MallocSizeOf)]
 pub enum WaveShaperNodeMessage {
+    /// The DOM side enforces `[[curve set]]` and the minimum length; the render thread just
+    /// takes the new internal copy (or `None` for the identity).
     SetCurve(WaveShaperCurve),
+    SetOversample(OverSampleType),
 }
+
+/// Blocks to keep processing after the input goes silent, so the oversampling filters drain.
+/// Their latency is about 24 frames, well within one block; two blocks is generous.
+const OVERSAMPLE_TAIL_BLOCKS: u8 = 2;
 
 #[derive(AudioNodeCommon, MallocSizeOf)]
 pub(crate) struct WaveShaperNode {
-    curve_set: bool,
     curve: WaveShaperCurve,
-    #[allow(dead_code)]
     oversample: OverSampleType,
     channel_info: ChannelInfo,
-    #[ignore_malloc_size_of = "External Type"]
-    upsampler: Option<SpeexResamplerState>,
-    #[ignore_malloc_size_of = "External Type"]
-    downsampler: Option<SpeexResamplerState>,
-    tailtime_blocks_left: TailtimeBlocks,
+    /// One per channel; empty unless oversampling.
+    #[ignore_malloc_size_of = "filter state"]
+    oversamplers: Vec<Oversampler>,
+    /// Oversampled scratch buffer.
+    scratch: Vec<f32>,
+    tail_blocks_left: u8,
 }
 
 impl WaveShaperNode {
     pub fn new(options: WaveShaperNodeOptions, channel_info: ChannelInfo) -> Self {
-        if let Some(vec) = &options.curve {
-            assert!(
-                vec.len() > 1,
-                "WaveShaperNode curve must have length of 2 or more"
-            )
+        if let Some(curve) = &options.curve {
+            debug_assert!(curve.len() > 1, "the DOM rejects curves shorter than 2");
         }
-
         Self {
-            curve_set: options.curve.is_some(),
-            curve: options.curve,
+            curve: options.curve.filter(|c| c.len() > 1),
             oversample: options.oversample,
             channel_info,
-            upsampler: None,
-            downsampler: None,
-            tailtime_blocks_left: TailtimeBlocks::Zero,
+            oversamplers: Vec::new(),
+            scratch: Vec::new(),
+            tail_blocks_left: 0,
         }
     }
 
     fn handle_waveshaper_message(&mut self, message: WaveShaperNodeMessage, _sample_rate: f32) {
         match message {
-            WaveShaperNodeMessage::SetCurve(new_curve) => {
-                if self.curve_set && new_curve.is_some() {
-                    panic!("InvalidStateError: cant set curve if it was already set");
+            WaveShaperNodeMessage::SetCurve(curve) => self.curve = curve.filter(|c| c.len() > 1),
+            WaveShaperNodeMessage::SetOversample(oversample) => {
+                if oversample != self.oversample {
+                    self.oversample = oversample;
+                    // New filters for the new factor; the old state belongs to another rate.
+                    self.oversamplers.clear();
                 }
-                self.curve_set = new_curve.is_some();
-                self.curve = new_curve;
             },
         }
     }
+}
+
+/// Apply the curve to one sample, as in
+/// <https://webaudio.github.io/web-audio-api/#dom-waveshapernode-curve>:
+///
+/// > v = (N - 1) / 2 * (x + 1), k = floor(v), f = v - k
+/// > y = c_0 if v < 0; c_(N-1) if v >= N - 1; (1 - f) c_k + f c_(k+1) otherwise.
+///
+/// The index is computed in f64 so long curves keep their resolution.
+#[inline]
+pub(crate) fn shape(curve: &[f32], x: f32) -> f32 {
+    let n = curve.len();
+    let v = (n - 1) as f64 / 2. * (x as f64 + 1.);
+    if v < 0. {
+        curve[0]
+    } else if v >= (n - 1) as f64 {
+        curve[n - 1]
+    } else if v.is_nan() {
+        // Not covered by the algorithm; a NaN input stays NaN.
+        f32::NAN
+    } else {
+        let k = v.floor();
+        let f = v - k;
+        let k = k as usize;
+        ((1. - f) * curve[k] as f64 + f * curve[k + 1] as f64) as f32
+    }
+}
+
+fn apply_curve(buf: &mut [f32], curve: &[f32]) {
+    buf.iter_mut().for_each(|s| *s = shape(curve, *s));
 }
 
 impl AudioNodeEngine for WaveShaperNode {
@@ -108,151 +133,217 @@ impl AudioNodeEngine for WaveShaperNode {
         AudioNodeType::WaveShaperNode
     }
 
-    fn process(&mut self, mut inputs: Chunk, info: &BlockInfo) -> Chunk {
+    fn process(&mut self, mut inputs: Chunk, _info: &BlockInfo) -> Chunk {
         debug_assert!(inputs.len() == 1);
 
-        if self.curve.is_none() {
+        // > Initially the curve attribute is null, which means that the WaveShaperNode will
+        // > pass its input to its output without modification.
+        let Some(curve) = self.curve.as_ref() else {
+            self.oversamplers.clear();
+            self.tail_blocks_left = 0;
             return inputs;
-        }
+        };
 
-        let curve = &self.curve.as_ref().expect("Just checked for is_none()");
-
+        let factor = self.oversample.factor();
         if inputs.blocks[0].is_silence() {
-            if WaveShaperNode::silence_produces_nonsilent_output(curve) {
-                inputs.blocks[0].explicit_silence();
-                self.tailtime_blocks_left = TailtimeBlocks::Two;
-            } else if self.tailtime_blocks_left != TailtimeBlocks::Zero {
-                inputs.blocks[0].explicit_silence();
-
-                self.tailtime_blocks_left = match self.tailtime_blocks_left {
-                    TailtimeBlocks::Zero => TailtimeBlocks::Zero,
-                    TailtimeBlocks::One => TailtimeBlocks::Zero,
-                    TailtimeBlocks::Two => TailtimeBlocks::One,
-                }
-            } else {
+            // > The use of a curve that produces a non-zero output value for zero input value
+            // > will cause this node to produce a DC signal even if there are no inputs
+            // > connected to this node.
+            let dc = shape(curve, 0.) != 0.;
+            if !dc && self.tail_blocks_left == 0 {
                 return inputs;
             }
-        } else {
-            self.tailtime_blocks_left = TailtimeBlocks::Two;
+            self.tail_blocks_left = self.tail_blocks_left.saturating_sub(1);
+            inputs.blocks[0].explicit_silence();
+        } else if factor > 1 {
+            self.tail_blocks_left = OVERSAMPLE_TAIL_BLOCKS;
         }
 
         let block = &mut inputs.blocks[0];
-        let channels = block.chan_count();
-
-        if self.oversample != OverSampleType::None {
-            let rate: usize = info.sample_rate as usize;
-            let sampling_factor = self.oversample.value();
-
-            if self.upsampler.is_none() {
-                self.upsampler = Some(
-                    SpeexResamplerState::new(
-                        channels as usize,
-                        rate,
-                        rate * sampling_factor,
-                        OVERSAMPLING_QUALITY,
-                    )
-                    .expect("Couldnt create upsampler"),
-                );
-            };
-
-            if self.downsampler.is_none() {
-                self.downsampler = Some(
-                    SpeexResamplerState::new(
-                        channels as usize,
-                        rate * sampling_factor,
-                        rate,
-                        OVERSAMPLING_QUALITY,
-                    )
-                    .expect("Couldnt create downsampler"),
-                );
-            };
-
-            let upsampler = self.upsampler.as_mut().unwrap();
-            let downsampler = self.downsampler.as_mut().unwrap();
-
-            let mut oversampled_buffer: Vec<f32> =
-                vec![0.; FRAMES_PER_BLOCK_USIZE * sampling_factor];
-
-            for chan in 0..channels {
-                let out_len = WaveShaperNode::resample(
-                    upsampler,
-                    chan,
-                    block.data_chan(chan),
-                    &mut oversampled_buffer,
-                );
-
-                debug_assert!(
-                    out_len == 128 * sampling_factor,
-                    "Expected {} samples in output after upsampling, got: {}",
-                    128 * sampling_factor,
-                    out_len
-                );
-
-                WaveShaperNode::apply_curve(&mut oversampled_buffer, curve);
-
-                let out_len = WaveShaperNode::resample(
-                    downsampler,
-                    chan,
-                    &oversampled_buffer,
-                    block.data_chan_mut(chan),
-                );
-
-                debug_assert!(
-                    out_len == 128,
-                    "Expected 128 samples in output after downsampling, got {}",
-                    out_len
-                );
-            }
-        } else {
-            WaveShaperNode::apply_curve(block.data_mut(), curve);
+        if factor == 1 {
+            // Also covers a "repeat" block: the curve is applied once to the shared channel.
+            apply_curve(block.data_mut(), curve);
+            return inputs;
         }
 
+        // Oversampled: each channel keeps its own filter state.
+        block.explicit_repeat();
+        let channels = block.chan_count() as usize;
+        if self.oversamplers.len() != channels ||
+            self.oversamplers.first().is_some_and(|o| o.factor() != factor)
+        {
+            self.oversamplers.resize_with(channels, || Oversampler::new(factor));
+        }
+        self.scratch.resize(FRAMES_PER_BLOCK_USIZE * factor, 0.);
+        for chan in 0..channels {
+            let data = block.data_chan_mut(chan as u8);
+            let os = &mut self.oversamplers[chan];
+            os.upsample(data, &mut self.scratch);
+            apply_curve(&mut self.scratch, curve);
+            os.downsample(&self.scratch, data);
+        }
         inputs
     }
 
     make_message_handler!(WaveShaperNode: handle_waveshaper_message);
 }
 
-impl WaveShaperNode {
-    fn silence_produces_nonsilent_output(curve: &[f32]) -> bool {
-        let len = curve.len();
-        let len_halved = ((len - 1) as f32) / 2.;
-        let curve_index: f32 = len_halved;
-        let index_lo = curve_index as usize;
-        let index_hi = index_lo + 1;
-        let interp_factor: f32 = curve_index - index_lo as f32;
-        let shaped_val = (1. - interp_factor) * curve[index_lo] + interp_factor * curve[index_hi];
-        shaped_val == 0.0
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::{Block, Tick};
+
+    fn info() -> BlockInfo {
+        BlockInfo {
+            sample_rate: 48000.,
+            frame: Tick(0),
+            time: 0.,
+        }
     }
 
-    fn apply_curve(buf: &mut [f32], curve: &[f32]) {
-        let len = curve.len();
-        let len_halved = ((len - 1) as f32) / 2.;
-        buf.iter_mut().for_each(|sample| {
-            let curve_index: f32 = len_halved * (*sample + 1.);
+    fn run(node: &mut WaveShaperNode, block: Block) -> Block {
+        let mut chunk = Chunk::default();
+        chunk.blocks.push(block);
+        let mut out = node.process(chunk, &info());
+        out.blocks.remove(0)
+    }
 
-            if curve_index <= 0. {
-                *sample = curve[0];
-            } else if curve_index >= (len - 1) as f32 {
-                *sample = curve[len - 1];
+    fn node(curve: Option<Vec<f32>>, oversample: OverSampleType) -> WaveShaperNode {
+        WaveShaperNode::new(
+            WaveShaperNodeOptions { curve, oversample },
+            ChannelInfo::default(),
+        )
+    }
+
+    #[test]
+    fn curve_maps_minus_one_zero_and_one_exactly() {
+        let c = [-0.25, 0.5, 0.75];
+        assert_eq!(shape(&c, -1.), -0.25);
+        assert_eq!(shape(&c, 0.), 0.5);
+        assert_eq!(shape(&c, 1.), 0.75);
+    }
+
+    #[test]
+    fn curve_interpolates_linearly() {
+        // N = 5: v = 2 (x + 1). x = 0.25 -> v = 2.5 -> halfway between c2 and c3.
+        let c = [0., 1., 2., 4., 8.];
+        assert_eq!(shape(&c, 0.25), 3.);
+        // x = -0.875 -> v = 0.25 -> 0.75 c0 + 0.25 c1.
+        assert_eq!(shape(&c, -0.875), 0.25);
+    }
+
+    #[test]
+    fn even_length_curve_interpolates_between_centre_values_at_zero() {
+        let c = [0., 1., 3., 4.];
+        // v = 1.5 * (0 + 1) = 1.5 -> between c1 and c2.
+        assert_eq!(shape(&c, 0.), 2.);
+    }
+
+    #[test]
+    fn out_of_range_inputs_clamp_to_the_ends() {
+        let c = [0., 1., 0.];
+        assert_eq!(shape(&c, -1.1), 0.);
+        assert_eq!(shape(&c, 7.), 0.);
+        assert_eq!(shape(&c, f32::NEG_INFINITY), 0.);
+        assert_eq!(shape(&c, f32::INFINITY), 0.);
+    }
+
+    #[test]
+    fn matches_the_wpt_limits_ramp() {
+        // waveshaper-limits.html: curve [0, 1, 0], 23 frames from -1 - scale to 1 + scale.
+        let frames = 23;
+        let scale = 1. / ((frames - 1) as f32 / 2. - 1.);
+        let c = [0., 1., 0.];
+        for k in 0..frames {
+            let x = k as f32 * scale + (-1. - scale);
+            let expected = if x <= -1. || x >= 1. {
+                0.
             } else {
-                let index_lo = curve_index as usize;
-                let index_hi = index_lo + 1;
-                let interp_factor: f32 = curve_index - index_lo as f32;
-                *sample = (1. - interp_factor) * curve[index_lo] + interp_factor * curve[index_hi];
-            }
-        });
+                1. - x.abs()
+            };
+            assert!((shape(&c, x) - expected).abs() <= 1e-6, "x = {x}");
+        }
     }
 
-    fn resample(
-        st: &mut SpeexResamplerState,
-        chan: u8,
-        input: &[f32],
-        output: &mut [f32],
-    ) -> usize {
-        let (_in_len, out_len) = st
-            .process_float(chan as usize, input, output)
-            .expect("Resampling failed");
-        out_len
+    #[test]
+    fn null_curve_passes_input_through() {
+        let mut n = node(None, OverSampleType::Quadruple);
+        let input = Block::for_vec((0..128).map(|i| i as f32 / 128.).collect());
+        let out = run(&mut n, input.clone());
+        assert_eq!(out.data_chan(0), input.data_chan(0));
+    }
+
+    #[test]
+    fn silent_input_with_nonzero_curve_centre_gives_dc() {
+        for os in [OverSampleType::None, OverSampleType::Double, OverSampleType::Quadruple] {
+            let mut n = node(Some(vec![0.5, 0.5, 0.5]), os);
+            let mut last = Block::default();
+            for _ in 0..8 {
+                last = run(&mut n, Block::default());
+            }
+            assert!(!last.is_silence(), "{os:?}");
+            for v in last.data_chan(0) {
+                assert!((v - 0.5).abs() < 1e-6, "{os:?}: {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn silent_input_with_zero_curve_centre_stays_silent() {
+        let mut n = node(Some(vec![-1., 0., 1.]), OverSampleType::None);
+        assert!(run(&mut n, Block::default()).is_silence());
+    }
+
+    #[test]
+    fn oversampled_tail_then_silence() {
+        let mut n = node(Some(vec![-1., 0., 1.]), OverSampleType::Double);
+        let loud = Block::for_vec(vec![0.5; 256]); // two channels
+        run(&mut n, loud);
+        // The filters drain for a couple of blocks, then the node goes back to silence.
+        assert!(!run(&mut n, Block::default()).is_silence());
+        assert!(!run(&mut n, Block::default()).is_silence());
+        assert!(run(&mut n, Block::default()).is_silence());
+    }
+
+    #[test]
+    fn oversampling_follows_channel_count_changes() {
+        let mut n = node(Some(vec![-1., 0., 1.]), OverSampleType::Quadruple);
+        let out = run(&mut n, Block::for_vec(vec![0.25; 128]));
+        assert_eq!(out.chan_count(), 1);
+        let out = run(&mut n, Block::for_vec(vec![0.25; 128 * 2]));
+        assert_eq!(out.chan_count(), 2);
+        let out = run(&mut n, Block::for_vec(vec![0.25; 128 * 6]));
+        assert_eq!(out.chan_count(), 6);
+    }
+
+    #[test]
+    fn identity_curve_oversampled_is_a_delayed_copy() {
+        for os in [OverSampleType::Double, OverSampleType::Quadruple] {
+            let mut n = node(Some(vec![-1., 0., 1.]), os);
+            let mut out = Vec::new();
+            for _ in 0..8 {
+                out.extend_from_slice(run(&mut n, Block::for_vec(vec![0.3; 128])).data_chan(0));
+            }
+            for v in &out[256..] {
+                assert!((v - 0.3).abs() < 1e-5, "{os:?}: {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn set_oversample_message_switches_factor() {
+        let mut n = node(Some(vec![-1., 0., 1.]), OverSampleType::None);
+        run(&mut n, Block::for_vec(vec![0.3; 128]));
+        n.handle_waveshaper_message(WaveShaperNodeMessage::SetOversample(OverSampleType::Double), 48000.);
+        assert_eq!(n.oversample, OverSampleType::Double);
+        run(&mut n, Block::for_vec(vec![0.3; 128]));
+        assert_eq!(n.oversamplers.len(), 1);
+        assert_eq!(n.oversamplers[0].factor(), 2);
+        n.handle_waveshaper_message(
+            WaveShaperNodeMessage::SetOversample(OverSampleType::Quadruple),
+            48000.,
+        );
+        run(&mut n, Block::for_vec(vec![0.3; 128]));
+        assert_eq!(n.oversamplers[0].factor(), 4);
     }
 }

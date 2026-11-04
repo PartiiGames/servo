@@ -15,6 +15,9 @@ use crate::block::{Block, Chunk, Tick};
 use crate::buffer_source_node::{AudioBufferSourceNodeMessage, AudioBufferSourceNodeOptions};
 use crate::channel_node::ChannelNodeOptions;
 use crate::constant_source_node::ConstantSourceNodeOptions;
+use crate::convolver_node::{ConvolverNodeMessage, ConvolverNodeOptions};
+use crate::delay_node::{DelayNode, DelayNodeOptions};
+use crate::dynamics_compressor_node::DynamicsCompressorNodeOptions;
 use crate::gain_node::GainNodeOptions;
 use crate::iir_filter_node::IIRFilterNodeOptions;
 use crate::media_element_source_node::MediaElementSourceNodeMessage;
@@ -34,9 +37,9 @@ pub enum AudioNodeInit {
     ChannelMergerNode(ChannelNodeOptions),
     ChannelSplitterNode,
     ConstantSourceNode(ConstantSourceNodeOptions),
-    ConvolverNode,
-    DelayNode,
-    DynamicsCompressionNode,
+    ConvolverNode(ConvolverNodeOptions),
+    DelayNode(DelayNodeOptions),
+    DynamicsCompressionNode(DynamicsCompressorNodeOptions),
     GainNode(GainNodeOptions),
     IIRFilterNode(IIRFilterNodeOptions),
     MediaElementSourceNode,
@@ -232,6 +235,12 @@ pub(crate) trait AudioNodeEngine: Send + AudioNodeCommon {
     fn set_listenerdata(&mut self, _: Block) {
         panic!("can't accept listener connections")
     }
+
+    /// The DelayNode, which the graph splits into a reader and a writer when it is part of a
+    /// cycle (<https://webaudio.github.io/web-audio-api/#rendering-loop>, step 4.2.6).
+    fn as_delay_node(&mut self) -> Option<&mut DelayNode> {
+        None
+    }
 }
 
 #[derive(MallocSizeOf)]
@@ -239,6 +248,7 @@ pub enum AudioNodeMessage {
     AudioBufferSourceNode(AudioBufferSourceNodeMessage),
     AudioScheduledSourceNode(AudioScheduledSourceNodeMessage),
     BiquadFilterNode(BiquadFilterNodeMessage),
+    ConvolverNode(ConvolverNodeMessage),
     GetParamValue(ParamType, Sender<f32>),
     MediaElementSourceNode(MediaElementSourceNodeMessage),
     OscillatorNode(OscillatorNodeMessage),

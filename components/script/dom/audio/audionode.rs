@@ -318,6 +318,14 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelSplitterNode) => {
                 return Err(Error::InvalidState(None));
             },
+            // <https://webaudio.github.io/web-audio-api/#dom-dynamicscompressornode-channelcount>
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::DynamicsCompressorNode) if value > 2 => {
+                return Err(Error::NotSupported(None));
+            },
+            // <https://webaudio.github.io/web-audio-api/#dom-convolvernode-channelcount>
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::ConvolverNode) if value > 2 => {
+                return Err(Error::NotSupported(None));
+            },
             // XXX We do not support any of the other AudioNodes with
             // constraints yet. Add more cases here as we add support
             // for new AudioNodes.
@@ -366,6 +374,18 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             },
             EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelSplitterNode) => {
                 return Err(Error::InvalidState(None));
+            },
+            // <https://webaudio.github.io/web-audio-api/#dom-dynamicscompressornode-channelcountmode>
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::DynamicsCompressorNode)
+                if value == ChannelCountMode::Max =>
+            {
+                return Err(Error::NotSupported(None));
+            },
+            // <https://webaudio.github.io/web-audio-api/#dom-convolvernode-channelcountmode>
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::ConvolverNode)
+                if value == ChannelCountMode::Max =>
+            {
+                return Err(Error::NotSupported(None));
             },
             // XXX We do not support any of the other AudioNodes with
             // constraints yet. Add more cases here as we add support

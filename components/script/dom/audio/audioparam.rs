@@ -136,6 +136,13 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
         {
             return Err(Error::InvalidState(None));
         }
+        // > DynamicsCompressorNode: [all AudioParams have] automation rate constraints
+        // <https://webaudio.github.io/web-audio-api/#audioparam-automation-rate-constraints>
+        if automation_rate == AutomationRate::A_rate &&
+            self.node_type == AudioNodeType::DynamicsCompressionNode
+        {
+            return Err(Error::InvalidState(None));
+        }
 
         self.automation_rate.set(automation_rate);
         self.message_node(AudioNodeMessage::SetParamRate(

@@ -36,11 +36,15 @@ use crate::dom::audio::biquadfilternode::BiquadFilterNode;
 use crate::dom::audio::channelmergernode::ChannelMergerNode;
 use crate::dom::audio::channelsplitternode::ChannelSplitterNode;
 use crate::dom::audio::constantsourcenode::ConstantSourceNode;
+use crate::dom::audio::convolvernode::ConvolverNode;
+use crate::dom::audio::delaynode::DelayNode;
+use crate::dom::audio::dynamicscompressornode::DynamicsCompressorNode;
 use crate::dom::audio::gainnode::GainNode;
 use crate::dom::audio::iirfilternode::IIRFilterNode;
 use crate::dom::audio::oscillatornode::OscillatorNode;
 use crate::dom::audio::pannernode::PannerNode;
 use crate::dom::audio::stereopannernode::StereoPannerNode;
+use crate::dom::audio::waveshapernode::WaveShaperNode;
 use crate::dom::bindings::buffer_source::HeapBufferSource;
 use crate::dom::bindings::callback::{ExceptionHandling, RootedCallback, TracedCallback};
 use crate::dom::bindings::codegen::Bindings::AnalyserNodeBinding::AnalyserOptions;
@@ -55,6 +59,9 @@ use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::BiquadFilt
 use crate::dom::bindings::codegen::Bindings::ChannelMergerNodeBinding::ChannelMergerOptions;
 use crate::dom::bindings::codegen::Bindings::ChannelSplitterNodeBinding::ChannelSplitterOptions;
 use crate::dom::bindings::codegen::Bindings::ConstantSourceNodeBinding::ConstantSourceOptions;
+use crate::dom::bindings::codegen::Bindings::ConvolverNodeBinding::ConvolverOptions;
+use crate::dom::bindings::codegen::Bindings::DelayNodeBinding::DelayOptions;
+use crate::dom::bindings::codegen::Bindings::DynamicsCompressorNodeBinding::DynamicsCompressorOptions;
 use crate::dom::bindings::codegen::Bindings::GainNodeBinding::GainOptions;
 use crate::dom::bindings::codegen::Bindings::IIRFilterNodeBinding::IIRFilterOptions;
 use crate::dom::bindings::codegen::Bindings::OscillatorNodeBinding::OscillatorOptions;
@@ -63,6 +70,7 @@ use crate::dom::bindings::codegen::Bindings::PeriodicWaveBinding::{
     PeriodicWaveConstraints, PeriodicWaveOptions,
 };
 use crate::dom::bindings::codegen::Bindings::StereoPannerNodeBinding::StereoPannerOptions;
+use crate::dom::bindings::codegen::Bindings::WaveShaperNodeBinding::WaveShaperOptions;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -408,6 +416,50 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
             self.global().as_window(),
             self,
             &BiquadFilterOptions::empty(),
+        )
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createconvolver>
+    fn CreateConvolver(&self, cx: &mut JSContext) -> Fallible<DomRoot<ConvolverNode>> {
+        ConvolverNode::new(
+            cx,
+            self.global().as_window(),
+            self,
+            &ConvolverOptions::empty(),
+        )
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createdelay>
+    fn CreateDelay(
+        &self,
+        cx: &mut JSContext,
+        max_delay_time: Finite<f64>,
+    ) -> Fallible<DomRoot<DelayNode>> {
+        let mut options = DelayOptions::empty();
+        options.maxDelayTime = max_delay_time;
+        DelayNode::new(cx, self.global().as_window(), self, &options)
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createwaveshaper>
+    fn CreateWaveShaper(&self, cx: &mut JSContext) -> Fallible<DomRoot<WaveShaperNode>> {
+        WaveShaperNode::new(
+            cx,
+            self.global().as_window(),
+            self,
+            &WaveShaperOptions::empty(),
+        )
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createdynamicscompressor>
+    fn CreateDynamicsCompressor(
+        &self,
+        cx: &mut JSContext,
+    ) -> Fallible<DomRoot<DynamicsCompressorNode>> {
+        DynamicsCompressorNode::new(
+            cx,
+            self.global().as_window(),
+            self,
+            &DynamicsCompressorOptions::empty(),
         )
     }
 

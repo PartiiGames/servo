@@ -11,11 +11,13 @@ use petgraph::Direction;
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::DefaultIx;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
-use petgraph::visit::{DfsPostOrder, EdgeRef, Reversed};
+use petgraph::visit::{EdgeFiltered, EdgeRef};
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
-use crate::audio_node::{AudioNodeEngine, BlockInfo, ChannelCountMode, ChannelInterpretation};
+use crate::audio_node::{
+    AudioNodeEngine, AudioNodeType, BlockInfo, ChannelCountMode, ChannelInterpretation,
+};
 use crate::block::{Block, Chunk};
 use crate::destination_node::DestinationNode;
 use crate::listener::AudioListenerNode;
@@ -368,172 +370,72 @@ impl AudioGraph {
     /// <https://webaudio.github.io/web-audio-api/#rendering-loop>
     pub fn process(&mut self, info: &BlockInfo) -> Chunk {
         // Step 4.2. Order the AudioNodes of the BaseAudioContext to be processed.
-        let cycle_nodes = self.detect_nodes_in_cycles();
+        let (cycle_breakers, cycle_nodes) = self.detect_cycles();
 
-        // DFS post order: Children are processed before their parent,
-        // which is exactly what we need since the parent depends on the
-        // children's output
-        //
-        // This will only visit each node once
-        let reversed = Reversed(&self.graph);
-
-        let mut blocks: SmallVec<[SmallVec<[Block; 1]>; 1]> = SmallVec::new();
-        let mut output_counts: SmallVec<[u32; 1]> = SmallVec::new();
-
-        let mut visit = DfsPostOrder::empty(reversed);
-
-        for dest in &self.dests {
-            visit.move_to(dest.0);
-
-            while let Some(ix) = visit.next(reversed) {
-                let mut curr = self.graph[ix].node.borrow_mut();
-
-                if cycle_nodes.contains(&ix) {
-                    // Step 4.2.7. If nodes contains cycles, mute all the AudioNodes
-                    // that are part of this cycle, and remove them from nodes.
-                    let chunk = curr.as_mut().mute_node();
-                    if curr.output_count() == 0 {
-                        // Step 4.4.5. If this AudioNode is a destination node, record
-                        // the input of this AudioNode.
-                        curr.process(chunk, info);
-                    } else {
-                        // Step 4.4.6. Else, process the input buffer, and make
-                        // available for reading the resulting buffer.
-                        self.fill_node_cache_with_silence(ix, curr.output_count());
-                    }
-                    continue;
-                }
-
-                let mut chunk = Chunk::default();
-                chunk
-                    .blocks
-                    .resize(curr.input_count() as usize, Default::default());
-
-                // if we have inputs, collect all the computed blocks
-                // and construct a Chunk
-
-                // set up scratch space to store all the blocks
-                blocks.clear();
-                blocks.resize(curr.input_count() as usize, Default::default());
-
-                let mode = curr.channel_count_mode();
-                let count = curr.channel_count();
-                let interpretation = curr.channel_interpretation();
-
-                // all edges to this node are from its dependencies
-                for edge in self.graph.edges_directed(ix, Direction::Incoming) {
-                    let edge = edge.weight();
-                    for connection in &edge.connections {
-                        let mut block = connection
-                            .cache
-                            .borrow_mut()
-                            .take()
-                            .expect("Cache should have been filled from traversal");
-
-                        match connection.input_idx {
-                            PortIndex::Port(idx) => {
-                                blocks[idx as usize].push(block);
-                            },
-                            PortIndex::Param(param) => {
-                                // param inputs are downmixed to mono
-                                // https://webaudio.github.io/web-audio-api/#dom-audionode-connect-destinationparam-output
-                                block.mix(1, ChannelInterpretation::Speakers);
-                                curr.get_param(param).add_block(block)
-                            },
-                            PortIndex::Listener(_) => curr.set_listenerdata(block),
-                        }
-                    }
-                }
-
-                for (i, mut blocks) in blocks.drain(..).enumerate() {
-                    if blocks.is_empty() {
-                        if mode == ChannelCountMode::Explicit {
-                            // It's silence, but mix it anyway
-                            chunk.blocks[i].mix(count, interpretation);
-                        }
-                    } else if blocks.len() == 1 {
-                        chunk.blocks[i] = blocks.pop().expect("`blocks` had length 1");
-                        match mode {
-                            ChannelCountMode::Explicit => {
-                                chunk.blocks[i].mix(count, interpretation);
-                            },
-                            ChannelCountMode::ClampedMax => {
-                                if chunk.blocks[i].chan_count() > count {
-                                    chunk.blocks[i].mix(count, interpretation);
-                                }
-                            },
-                            // It's one channel, it maxes itself
-                            ChannelCountMode::Max => (),
-                        }
-                    } else {
-                        let mix_count = match mode {
-                            ChannelCountMode::Explicit => count,
-                            _ => {
-                                let mut max = 0; // max channel count
-                                for block in &blocks {
-                                    max = cmp::max(max, block.chan_count());
-                                }
-                                if mode == ChannelCountMode::ClampedMax {
-                                    max = cmp::min(max, count);
-                                }
-                                max
-                            },
-                        };
-                        let block = blocks.into_iter().fold(Block::default(), |acc, mut block| {
-                            block.mix(mix_count, interpretation);
-                            acc.sum(block)
-                        });
-                        chunk.blocks[i] = block;
-                    }
-                }
-
-                // actually run the node engine
-                let mut out = curr.process(chunk, info);
-
-                assert_eq!(out.len(), curr.output_count() as usize);
-                if curr.output_count() == 0 {
-                    continue;
-                }
-
-                // Count how many output connections fan out from each port
-                // This is so that we don't have to needlessly clone audio buffers
-                //
-                // If this is inefficient, we can instead maintain this data
-                // cached on the node
-                output_counts.clear();
-                output_counts.resize(curr.output_count() as usize, 0);
-                for edge in self.graph.edges(ix) {
-                    let edge = edge.weight();
-                    for conn in &edge.connections {
-                        if let PortIndex::Port(idx) = conn.output_idx {
-                            output_counts[idx as usize] += 1;
-                        } else {
-                            unreachable!()
-                        }
-                    }
-                }
-
-                // all the edges from this node go to nodes which depend on it,
-                // i.e. the nodes it outputs to. Store the blocks for retrieval.
-                for edge in self.graph.edges(ix) {
-                    let edge = edge.weight();
-                    for conn in &edge.connections {
-                        if let PortIndex::Port(idx) = conn.output_idx {
-                            output_counts[idx as usize] -= 1;
-                            // if there are no consumers left after this, take the data
-                            let block = if output_counts[idx as usize] == 0 {
-                                out[conn.output_idx].take()
-                            } else {
-                                out[conn.output_idx].clone()
-                            };
-                            *conn.cache.borrow_mut() = Some(block);
-                        } else {
-                            unreachable!()
-                        }
-                    }
-                }
+        // Post order: a node comes after every node it reads from, except that the inputs of
+        // a cycle-breaking DelayNode are not followed from it: its DelayReader half has no
+        // inputs. Its DelayWriter half is a sink, so its inputs are extra roots, visited after
+        // the destinations.
+        let mut roots: SmallVec<[NodeIndex<DefaultIx>; 4]> =
+            self.dests.iter().map(|d| d.0).collect();
+        for breaker in &cycle_breakers {
+            for edge in self.graph.edges_directed(*breaker, Direction::Incoming) {
+                roots.push(edge.source());
             }
         }
+        let order = self.processing_order(&roots, &cycle_breakers);
+
+        for ix in order {
+            let mut curr = self.graph[ix].node.borrow_mut();
+
+            if cycle_nodes.contains(&ix) {
+                // Step 4.2.7. If nodes contains cycles, mute all the AudioNodes
+                // that are part of this cycle, and remove them from nodes.
+                let chunk = curr.as_mut().mute_node();
+                if curr.output_count() == 0 {
+                    // Step 4.4.5. If this AudioNode is a destination node, record
+                    // the input of this AudioNode.
+                    curr.process(chunk, info);
+                } else {
+                    // Step 4.4.6. Else, process the input buffer, and make
+                    // available for reading the resulting buffer.
+                    self.fill_node_cache_with_silence(ix, curr.output_count());
+                }
+                continue;
+            }
+
+            if cycle_breakers.contains(&ix) {
+                // Step 4.2.6: the DelayReader. Its output comes only from frames written in
+                // earlier render quanta.
+                let out = curr
+                    .as_delay_node()
+                    .expect("cycle breakers are DelayNodes")
+                    .process_reader(info);
+                self.distribute_outputs(ix, out);
+                continue;
+            }
+
+            let chunk = self.gather_inputs(ix, &mut curr);
+
+            // actually run the node engine
+            let out = curr.process(chunk, info);
+
+            assert_eq!(out.len(), curr.output_count() as usize);
+            if curr.output_count() == 0 {
+                continue;
+            }
+            self.distribute_outputs(ix, out);
+        }
+
+        // The DelayWriters: every node that feeds a cycle breaker has run by now.
+        for ix in &cycle_breakers {
+            let mut curr = self.graph[*ix].node.borrow_mut();
+            let chunk = self.gather_inputs(*ix, &mut curr);
+            curr.as_delay_node()
+                .expect("cycle breakers are DelayNodes")
+                .process_writer(chunk, info);
+        }
+
         // The destination node stores its output on itself, extract it.
         self.graph[self.dest_id.0]
             .node
@@ -542,60 +444,245 @@ impl AudioGraph {
             .expect("Destination node should have data cached")
     }
 
+    /// Depth-first post order from `roots` over the edges into each node (its inputs), not
+    /// following the inputs of `cut` nodes. Each node appears once.
+    fn processing_order(
+        &self,
+        roots: &[NodeIndex<DefaultIx>],
+        cut: &FxHashSet<NodeIndex<DefaultIx>>,
+    ) -> Vec<NodeIndex<DefaultIx>> {
+        let mut order = Vec::with_capacity(self.graph.node_count());
+        let mut seen: FxHashSet<NodeIndex<DefaultIx>> = FxHashSet::default();
+        // (node, inputs already pushed)
+        let mut stack: Vec<(NodeIndex<DefaultIx>, bool)> = Vec::new();
+        for root in roots {
+            stack.push((*root, false));
+            while let Some((ix, expanded)) = stack.pop() {
+                if expanded {
+                    order.push(ix);
+                    continue;
+                }
+                if !seen.insert(ix) {
+                    continue;
+                }
+                stack.push((ix, true));
+                if cut.contains(&ix) {
+                    continue;
+                }
+                for edge in self.graph.edges_directed(ix, Direction::Incoming) {
+                    if !seen.contains(&edge.source()) {
+                        stack.push((edge.source(), false));
+                    }
+                }
+            }
+        }
+        order
+    }
+
+    /// Collect, mix and sum the blocks connected to each input of `ix` into a chunk, and hand
+    /// AudioParam and listener inputs to the node.
+    fn gather_inputs(
+        &self,
+        ix: NodeIndex<DefaultIx>,
+        curr: &mut RefMut<'_, Box<dyn AudioNodeEngine>>,
+    ) -> Chunk {
+        let mut chunk = Chunk::default();
+        chunk
+            .blocks
+            .resize(curr.input_count() as usize, Default::default());
+
+        // if we have inputs, collect all the computed blocks
+        // and construct a Chunk
+
+        // set up scratch space to store all the blocks
+        let mut blocks: SmallVec<[SmallVec<[Block; 1]>; 1]> = SmallVec::new();
+        blocks.resize(curr.input_count() as usize, Default::default());
+
+        let mode = curr.channel_count_mode();
+        let count = curr.channel_count();
+        let interpretation = curr.channel_interpretation();
+
+        // all edges to this node are from its dependencies
+        for edge in self.graph.edges_directed(ix, Direction::Incoming) {
+            let edge = edge.weight();
+            for connection in &edge.connections {
+                let mut block = connection
+                    .cache
+                    .borrow_mut()
+                    .take()
+                    .expect("Cache should have been filled from traversal");
+
+                match connection.input_idx {
+                    PortIndex::Port(idx) => {
+                        blocks[idx as usize].push(block);
+                    },
+                    PortIndex::Param(param) => {
+                        // param inputs are downmixed to mono
+                        // https://webaudio.github.io/web-audio-api/#dom-audionode-connect-destinationparam-output
+                        block.mix(1, ChannelInterpretation::Speakers);
+                        curr.get_param(param).add_block(block)
+                    },
+                    PortIndex::Listener(_) => curr.set_listenerdata(block),
+                }
+            }
+        }
+
+        for (i, mut blocks) in blocks.drain(..).enumerate() {
+            if blocks.is_empty() {
+                if mode == ChannelCountMode::Explicit {
+                    // It's silence, but mix it anyway
+                    chunk.blocks[i].mix(count, interpretation);
+                }
+            } else if blocks.len() == 1 {
+                chunk.blocks[i] = blocks.pop().expect("`blocks` had length 1");
+                match mode {
+                    ChannelCountMode::Explicit => {
+                        chunk.blocks[i].mix(count, interpretation);
+                    },
+                    ChannelCountMode::ClampedMax => {
+                        if chunk.blocks[i].chan_count() > count {
+                            chunk.blocks[i].mix(count, interpretation);
+                        }
+                    },
+                    // It's one channel, it maxes itself
+                    ChannelCountMode::Max => (),
+                }
+            } else {
+                let mix_count = match mode {
+                    ChannelCountMode::Explicit => count,
+                    _ => {
+                        let mut max = 0; // max channel count
+                        for block in &blocks {
+                            max = cmp::max(max, block.chan_count());
+                        }
+                        if mode == ChannelCountMode::ClampedMax {
+                            max = cmp::min(max, count);
+                        }
+                        max
+                    },
+                };
+                let block = blocks.into_iter().fold(Block::default(), |acc, mut block| {
+                    block.mix(mix_count, interpretation);
+                    acc.sum(block)
+                });
+                chunk.blocks[i] = block;
+            }
+        }
+        chunk
+    }
+
+    /// Make the output blocks of `ix` available for reading by the nodes it connects to.
+    fn distribute_outputs(&self, ix: NodeIndex<DefaultIx>, mut out: Chunk) {
+        // Count how many output connections fan out from each port
+        // This is so that we don't have to needlessly clone audio buffers
+        let mut output_counts: SmallVec<[u32; 1]> = SmallVec::new();
+        output_counts.resize(out.len(), 0);
+        for edge in self.graph.edges(ix) {
+            let edge = edge.weight();
+            for conn in &edge.connections {
+                if let PortIndex::Port(idx) = conn.output_idx {
+                    output_counts[idx as usize] += 1;
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+
+        // all the edges from this node go to nodes which depend on it,
+        // i.e. the nodes it outputs to. Store the blocks for retrieval.
+        for edge in self.graph.edges(ix) {
+            let edge = edge.weight();
+            for conn in &edge.connections {
+                if let PortIndex::Port(idx) = conn.output_idx {
+                    output_counts[idx as usize] -= 1;
+                    // if there are no consumers left after this, take the data
+                    let block = if output_counts[idx as usize] == 0 {
+                        out[conn.output_idx].take()
+                    } else {
+                        out[conn.output_idx].clone()
+                    };
+                    *conn.cache.borrow_mut() = Some(block);
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+    }
+
     /// Obtain a mutable reference to a node
     pub(crate) fn node_mut(&self, ix: NodeId) -> RefMut<'_, Box<dyn AudioNodeEngine>> {
         self.graph[ix.0].node.borrow_mut()
     }
 
-    /// Detect cycles in this graph and return the indices of their nodes.
+    /// Steps 4.2.4 to 4.2.7 of <https://webaudio.github.io/web-audio-api/#rendering-loop>:
+    /// returns the cycle breakers (DelayNodes that are part of a cycle) and the nodes of the
+    /// cycles that remain once the breakers are split, which must be muted.
     ///
-    /// This covers the cycle-related part of step 4.2. Tarjan's algorithm finds
-    /// the cycles, and [`Self::process`] mutes the affected nodes as required by
-    /// step 4.2.7.
-    ///
-    /// The outer render-loop steps, including returning `render_result`, are
-    /// outside this method because [`Self::process`] returns audio data.
-    ///
-    /// <https://webaudio.github.io/web-audio-api/#rendering-loop>
-    ///
-    /// > 4. Process a render quantum.
-    /// >    2. Order the AudioNodes of the BaseAudioContext to be processed.
-    /// >       4. Let cycle breakers be an empty set of DelayNodes. It will contain all the
-    /// >          DelayNodes that are part of a cycle.
-    /// >       5. For each AudioNode node in nodes:
-    /// >          1. If node is a DelayNode that is part of a cycle, add it to cycle breakers
-    /// >             and remove it from nodes.
-    /// >       6. For each DelayNode delay in cycle breakers:
-    /// >          1. Let delayWriter and delayReader respectively be a DelayWriter and a
-    /// >             DelayReader, for delay. Add delayWriter and delayReader to nodes. Disconnect
-    /// >             delay from all its input and outputs.
-    /// >             Note: This breaks the cycle: if a DelayNode is in a cycle, its two ends can be
-    /// >             considered separately, because delay lines cannot be smaller than one render
-    /// >             quantum when in a cycle.
-    /// >       7. If nodes contains cycles, mute all the AudioNodes that are part of this cycle, and
-    /// >          remove them from nodes.
-    ///
-    /// TODO: Implement steps 4.2.4–4.2.6 for cyclic `DelayNode`s by replacing
-    /// each with a `DelayWriter` and `DelayReader`.
-    fn detect_nodes_in_cycles(&self) -> FxHashSet<NodeIndex<DefaultIx>> {
-        let mut cycle_nodes = FxHashSet::default();
+    /// > 4. Let cycle breakers be an empty set of DelayNodes. It will contain all the
+    /// >    DelayNodes that are part of a cycle.
+    /// > 5. For each AudioNode node in nodes:
+    /// >    1. If node is a DelayNode that is part of a cycle, add it to cycle breakers
+    /// >       and remove it from nodes.
+    /// > 6. For each DelayNode delay in cycle breakers:
+    /// >    1. Let delayWriter and delayReader respectively be a DelayWriter and a
+    /// >       DelayReader, for delay. Add delayWriter and delayReader to nodes.
+    /// >       Disconnect delay from all its input and outputs.
+    /// >       Note: This breaks the cycle: if a DelayNode is in a cycle, its two ends can be
+    /// >       considered separately, because delay lines cannot be smaller than one render
+    /// >       quantum when in a cycle.
+    /// > 7. If nodes contains cycles, mute all the AudioNodes that are part of this cycle, and
+    /// >    remove them from nodes.
+    #[allow(clippy::type_complexity)]
+    fn detect_cycles(
+        &self,
+    ) -> (
+        FxHashSet<NodeIndex<DefaultIx>>,
+        FxHashSet<NodeIndex<DefaultIx>>,
+    ) {
+        let mut breakers = FxHashSet::default();
+        let mut any_cycle = false;
         for component in tarjan_scc(&self.graph) {
-            // Tarjan's algorithm groups the graph into strongly connected components.
-            // A component with multiple nodes is a cycle; a single-node component is a
-            // cycle only when the node has an edge to itself.
+            if self.is_cycle(&component) {
+                any_cycle = true;
+                for ix in component {
+                    if self.graph[ix].node.borrow().node_type() == AudioNodeType::DelayNode {
+                        breakers.insert(ix);
+                    }
+                }
+            }
+        }
+        let mut cycle_nodes = FxHashSet::default();
+        if !any_cycle {
+            return (breakers, cycle_nodes);
+        }
+        // The cycles left once the breakers' inputs are cut.
+        let cut = EdgeFiltered::from_fn(&self.graph, |edge| !breakers.contains(&edge.target()));
+        for component in tarjan_scc(&cut) {
             let is_cycle = component.len() > 1 ||
                 component.first().is_some_and(|node_index| {
-                    self.graph
-                        .edges(*node_index)
-                        .any(|edge| edge.target() == *node_index)
+                    self.graph.edges(*node_index).any(|edge| {
+                        edge.target() == *node_index && !breakers.contains(node_index)
+                    })
                 });
             if is_cycle {
                 cycle_nodes.extend(component);
             }
         }
-        cycle_nodes
+        // Breakers inside a muted cycle are muted with it.
+        breakers.retain(|ix| !cycle_nodes.contains(ix));
+        (breakers, cycle_nodes)
     }
 
+    /// A strongly connected component with several nodes is a cycle; a single node is a cycle
+    /// only when it connects to itself.
+    fn is_cycle(&self, component: &[NodeIndex<DefaultIx>]) -> bool {
+        component.len() > 1 ||
+            component.first().is_some_and(|node_index| {
+                self.graph
+                    .edges(*node_index)
+                    .any(|edge| edge.target() == *node_index)
+            })
+    }
     /// <https://webaudio.github.io/web-audio-api/#available-for-reading>
     ///
     /// Making a buffer available for reading from an AudioNode means putting
@@ -644,5 +731,134 @@ impl Connection {
             output_idx,
             cache: RefCell::new(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio_node::{AudioNodeType, ChannelInfo};
+    use crate::block::{FRAMES_PER_BLOCK_USIZE, Tick};
+    use crate::delay_node::{DelayNode, DelayNodeOptions};
+    use crate::gain_node::{GainNode, GainNodeOptions};
+
+    /// A source that plays one unit impulse at frame 0 of the first block.
+    #[derive(AudioNodeCommon)]
+    struct Impulse {
+        channel_info: ChannelInfo,
+        done: bool,
+    }
+
+    impl AudioNodeEngine for Impulse {
+        fn node_type(&self) -> AudioNodeType {
+            AudioNodeType::ConstantSourceNode
+        }
+        fn input_count(&self) -> u32 {
+            0
+        }
+        fn process(&mut self, _: Chunk, _: &BlockInfo) -> Chunk {
+            let mut chunk = Chunk::default();
+            if self.done {
+                chunk.blocks.push(Block::default());
+            } else {
+                let mut v = vec![0.; FRAMES_PER_BLOCK_USIZE];
+                v[0] = 1.;
+                chunk.blocks.push(Block::for_vec(v));
+                self.done = true;
+            }
+            chunk
+        }
+    }
+
+    fn impulse() -> Box<dyn AudioNodeEngine> {
+        Box::new(Impulse {
+            channel_info: ChannelInfo::default(),
+            done: false,
+        })
+    }
+
+    fn render(graph: &mut AudioGraph, blocks: u64) -> Vec<f32> {
+        let mut out = Vec::new();
+        for n in 0..blocks {
+            let info = BlockInfo {
+                sample_rate: 48000.,
+                frame: Tick(n * FRAMES_PER_BLOCK_USIZE as u64),
+                time: 0.,
+            };
+            let chunk = graph.process(&info);
+            let block = &chunk.blocks[0];
+            if block.is_silence() {
+                out.extend(std::iter::repeat_n(0., FRAMES_PER_BLOCK_USIZE));
+            } else {
+                out.extend_from_slice(block.data_chan(0));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn feedback_delay_cycle_echoes_each_render_quantum() {
+        let mut graph = AudioGraph::new(2);
+        let src = graph.add_node(impulse());
+        // A delay of 0 inside a cycle is clamped to one render quantum.
+        let delay = graph.add_node(Box::new(DelayNode::new(
+            DelayNodeOptions::default(),
+            ChannelInfo::default(),
+        )));
+        let feedback = graph.add_node(Box::new(GainNode::new(
+            GainNodeOptions { gain: 0.5 },
+            ChannelInfo::default(),
+        )));
+        let dest = graph.dest_id();
+        graph.add_edge(src.output(0), delay.input(0));
+        graph.add_edge(delay.output(0), feedback.input(0));
+        graph.add_edge(feedback.output(0), delay.input(0));
+        graph.add_edge(delay.output(0), dest.input(0));
+
+        let out = render(&mut graph, 5);
+        assert_eq!(out[0], 0.);
+        assert_eq!(out[128], 1.);
+        assert_eq!(out[256], 0.5);
+        assert_eq!(out[384], 0.25);
+        let nonzero = out.iter().filter(|v| **v != 0.).count();
+        assert_eq!(nonzero, 4, "{:?}", out.iter().enumerate().filter(|(_, v)| **v != 0.).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cycle_without_delay_is_muted() {
+        let mut graph = AudioGraph::new(2);
+        let src = graph.add_node(impulse());
+        let a = graph.add_node(Box::new(GainNode::new(
+            GainNodeOptions { gain: 1. },
+            ChannelInfo::default(),
+        )));
+        let b = graph.add_node(Box::new(GainNode::new(
+            GainNodeOptions { gain: 0.5 },
+            ChannelInfo::default(),
+        )));
+        let dest = graph.dest_id();
+        graph.add_edge(src.output(0), a.input(0));
+        graph.add_edge(a.output(0), b.input(0));
+        graph.add_edge(b.output(0), a.input(0));
+        graph.add_edge(a.output(0), dest.input(0));
+        assert!(render(&mut graph, 2).iter().all(|v| *v == 0.));
+    }
+
+    #[test]
+    fn delay_outside_a_cycle_is_a_plain_node() {
+        let mut graph = AudioGraph::new(2);
+        let src = graph.add_node(impulse());
+        let delay = graph.add_node(Box::new(DelayNode::new(
+            DelayNodeOptions {
+                max_delay_time: 1.,
+                delay_time: 5. / 48000.,
+            },
+            ChannelInfo::default(),
+        )));
+        let dest = graph.dest_id();
+        graph.add_edge(src.output(0), delay.input(0));
+        graph.add_edge(delay.output(0), dest.input(0));
+        let out = render(&mut graph, 1);
+        assert!((out[5] - 1.).abs() < 1e-6);
     }
 }
