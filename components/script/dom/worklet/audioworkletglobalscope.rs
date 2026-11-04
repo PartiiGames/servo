@@ -407,7 +407,11 @@ impl AudioWorkletGlobalScope {
         rooted!(&in(cx) let instance_obj = instance.to_object());
         rooted!(&in(cx) let mut process = UndefinedValue());
         rooted!(&in(cx) let mut rval = UndefinedValue());
-        let ok = script_bindings::settings_stack::run_a_script::<crate::DomTypeHolder, _, _>(
+        // The outer callback entry keeps the settings stack non-empty, so run_a_script's
+        // "clean up after running script" doesn't do a microtask checkpoint after each processor;
+        // the checkpoint comes once per render quantum (on_render_quantum_end).
+        let ok = script_bindings::settings_stack::run_a_callback::<crate::DomTypeHolder, _>(global, || {
+          script_bindings::settings_stack::run_a_script::<crate::DomTypeHolder, _, _>(
             cx,
             global,
             |cx| {
@@ -435,7 +439,8 @@ impl AudioWorkletGlobalScope {
                     ) && !JS_IsExceptionPending(cx)
                 }
             },
-        );
+          )
+        });
         if !ok {
             report_pending_exception(cx);
             self.fail(id);
@@ -844,12 +849,15 @@ fn ensure_host(init: HostInit) {
     }
     // <https://webaudio.github.io/web-audio-api/#rendering-loop>: perform a microtask checkpoint
     // after the render quantum (only if a processor ran, so idle contexts pay nothing).
-    on_render_quantum_end(Box::new(|| {
-        if PROCESSED_THIS_QUANTUM.with(|p| p.replace(false)) {
-            with_host(|cx, global| {
+    // Between quanta, currentFrame/currentTime are the context's (the next quantum's start).
+    on_render_quantum_end(Box::new(|info| {
+        let processed = PROCESSED_THIS_QUANTUM.with(|p| p.replace(false));
+        with_host(|cx, global| {
+            global.set_time(info);
+            if processed {
                 global.upcast::<WorkletGlobalScope>().perform_a_microtask_checkpoint(cx)
-            });
-        }
+            }
+        });
     }));
     let mut gc_policy = IdleGc::new();
     on_render_thread_idle(Box::new(move || gc_policy.run()));

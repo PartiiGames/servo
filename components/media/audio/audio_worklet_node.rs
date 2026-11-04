@@ -150,6 +150,13 @@ impl AudioWorkletNode {
     }
 }
 
+fn block_is_inactive(block: &Block) -> bool {
+    if block.is_silence() {
+        return true;
+    }
+    (0..block.chan_count()).all(|c| block.data_chan(c).iter().all(|v| *v == 0.))
+}
+
 impl AudioNodeEngine for AudioWorkletNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::AudioWorkletNode
@@ -170,8 +177,10 @@ impl AudioNodeEngine for AudioWorkletNode {
         // timelines stay in step with the context's time.
         self.compute_params(info);
 
-        let inputs_silent = inputs.blocks.iter().all(|b| b.is_silence());
-        if !self.keep_alive && inputs_silent {
+        // Servo doesn't track which nodes are "actively processing", so an input counts as
+        // inactive when its block is silence or all zeros (a stopped source sends explicit
+        // zeros). Only used when process() last returned false.
+        if !self.keep_alive && inputs.blocks.iter().all(block_is_inactive) {
             return outputs;
         }
 
