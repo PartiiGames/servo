@@ -8,6 +8,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use servo_media_streams::{MediaSocket, MediaStreamId};
 
 use crate::analyser_node::AnalyserNode;
+use crate::audio_worklet_node::AudioWorkletNode;
 use crate::audio_node::{AudioNodeEngine, AudioNodeInit, AudioNodeMessage, BlockInfo, ChannelInfo};
 use crate::biquad_filter_node::BiquadFilterNode;
 use crate::block::{Chunk, FRAMES_PER_BLOCK, Tick};
@@ -32,6 +33,30 @@ use crate::stereo_panner::StereoPannerNode;
 use crate::wave_shaper_node::WaveShaperNode;
 use crate::{AudioBackend, AudioStreamReader};
 
+/// A closure the embedder runs on the render thread (AudioWorklet: script tasks, module loading).
+pub type RenderThreadTask = Box<dyn FnOnce() + Send + 'static>;
+
+thread_local! {
+    static EXIT_HOOKS: std::cell::RefCell<Vec<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Register `hook` to run on the current render thread when its event loop ends (the context
+/// closed), before the thread exits. Call it from a [`RenderThreadTask`]. The AudioWorklet uses it
+/// to tear its JS runtime down in order rather than leaving it to thread-local destructors.
+pub fn on_render_thread_exit(hook: Box<dyn FnOnce()>) {
+    EXIT_HOOKS.with(|hooks| hooks.borrow_mut().push(hook));
+}
+
+fn run_exit_hooks() {
+    loop {
+        let hook = EXIT_HOOKS.with(|hooks| hooks.borrow_mut().pop());
+        match hook {
+            Some(hook) => hook(),
+            None => break,
+        }
+    }
+}
+
 pub type SinkEosCallback = Box<dyn Fn(Box<dyn AsRef<[f32]>>) + Send + Sync + 'static>;
 
 #[derive(MallocSizeOf)]
@@ -55,6 +80,9 @@ pub enum AudioRenderThreadMsg {
     SetSinkEosCallback(#[ignore_malloc_size_of = "Fn"] SinkEosCallback),
 
     SetMute(bool),
+
+    /// Run an embedder task on the render thread, between render quanta.
+    RunTask(#[ignore_malloc_size_of = "Fn"] RenderThreadTask),
 }
 
 pub enum Sink {
@@ -201,6 +229,9 @@ impl AudioRenderThread {
         };
 
         thread.event_loop(event_queue);
+        // Embedder state (the AudioWorklet's processors, global and JS runtime) goes before the
+        // graph, which may still hold processor handles.
+        run_exit_hooks();
     }
 
     make_render_thread_state_change!(resume, Running, play);
@@ -254,6 +285,17 @@ impl AudioRenderThread {
             AudioNodeInit::DelayNode(options) => Box::new(DelayNode::new(options, ch)),
             AudioNodeInit::DynamicsCompressionNode(options) => {
                 Box::new(DynamicsCompressorNode::new(options, ch))
+            },
+            AudioNodeInit::AudioWorkletNode(options) => {
+                // The processor is constructed now, on this thread, as the spec requires (its
+                // constructor may run before the context renders anything).
+                let mut node = AudioWorkletNode::new(options, ch);
+                node.construct(&BlockInfo {
+                    sample_rate: self.sample_rate,
+                    frame: self.current_frame,
+                    time: self.current_time,
+                });
+                Box::new(node)
             },
             _ => unimplemented!(),
         };
@@ -343,6 +385,7 @@ impl AudioRenderThread {
                 AudioRenderThreadMsg::SetMute(val) => {
                     context.set_mute(val);
                 },
+                AudioRenderThreadMsg::RunTask(task) => task(),
             };
 
             break_loop

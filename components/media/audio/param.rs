@@ -28,6 +28,8 @@ pub enum ParamType {
     Attack,
     Release,
     DelayTime,
+    /// The n-th `parameterDescriptors` entry of an AudioWorkletNode.
+    Worklet(u16),
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, MallocSizeOf)]
