@@ -28,3 +28,4 @@ pub(crate) mod svgtextelement;
 pub(crate) mod svgtextpositioningelement;
 pub(crate) mod svgtspanelement;
 pub(crate) mod svguseelement;
+pub(crate) mod svggeometry;
