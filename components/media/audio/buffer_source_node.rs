@@ -197,7 +197,10 @@ impl AudioNodeEngine for AudioBufferSourceNode {
             let loop_start = self.loop_start.unwrap_or(0.);
             let loop_end = self.loop_end.unwrap_or(0.);
 
-            if loop_start >= 0. && loop_end > loop_start {
+            // A negative loopStart is clamped to the buffer start; a loopEnd at or
+            // before it falls back to looping the whole buffer.
+            let loop_start = loop_start.max(0.);
+            if loop_end > loop_start {
                 actual_loop_start = loop_start * (buffer.sample_rate as f64);
                 actual_loop_end = loop_end * (buffer.sample_rate as f64);
             }
@@ -230,9 +233,10 @@ impl AudioNodeEngine for AudioBufferSourceNode {
                 if forward && self.buffer_pos >= actual_loop_end {
                     self.buffer_pos = actual_loop_start;
                 }
-                // https://github.com/WebAudio/web-audio-api/issues/2031
+                // https://github.com/WebAudio/web-audio-api/issues/2031: playing
+                // backwards from before the loop starts at loopStart.
                 if !forward && self.buffer_pos < actual_loop_start {
-                    self.buffer_pos = actual_loop_end;
+                    self.buffer_pos = actual_loop_start;
                 }
             }
 
@@ -337,8 +341,20 @@ impl AudioNodeEngine for AudioBufferSourceNode {
                         } else if !forward && pos < actual_loop_start {
                             pos += actual_loop_end - actual_loop_start;
                         }
-                    } else if pos < 0. || pos >= buffer.len() as f64 {
-                        break;
+                    }
+
+                    if pos < 0. || pos >= buffer.len() as f64 {
+                        // Past the end in the direction of travel: done. Before
+                        // the buffer (e.g. a backwards start at the duration):
+                        // silence until playback reaches it.
+                        let leaving = if forward { pos >= 0. } else { pos < 0. };
+                        if !self.loop_enabled && leaving {
+                            break;
+                        }
+                        *sample = 0.;
+                        pos += buffer_offset_per_tick;
+                        duration -= buffer_offset_per_tick.abs();
+                        continue;
                     }
 
                     *sample = buffer.interpolate(chan, pos);
