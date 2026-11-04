@@ -6195,11 +6195,16 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return self.base.webgl_error(InvalidOperation);
         }
 
-        // Colour blits need matching component types (normalized, float, signed or unsigned
-        // integer); GL itself rejects format mismatches out of multisampled buffers.
+        // Colour blits need matching component types (GL ES 3.0 4.3.3): fixed-point and float
+        // mix freely, signed and unsigned integer only with themselves. GL itself rejects format
+        // mismatches out of multisampled buffers.
+        let blit_class = |format| match color_component_class(format) {
+            1 => 0,
+            class => class,
+        };
         if bits.intersects(BlitFrameBufferFlags::COLOR) &&
             let (Some(src), Some(dst)) = (src_color, dst_color) &&
-            color_component_class(src) != color_component_class(dst)
+            blit_class(src) != blit_class(dst)
         {
             return self.base.webgl_error(InvalidOperation);
         }
@@ -6210,17 +6215,15 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return self.base.webgl_error(InvalidOperation);
         }
 
-        let src_width = src_x1.checked_sub(src_x0);
-        let dst_width = dst_x1.checked_sub(dst_x0);
-        let src_height = src_y1.checked_sub(src_y0);
-        let dst_height = dst_y1.checked_sub(dst_y0);
-
-        if src_width.is_none() ||
-            dst_width.is_none() ||
-            src_height.is_none() ||
-            dst_height.is_none()
+        // A width or height (or its magnitude) that overflows a GLint is INVALID_VALUE, as in
+        // ANGLE; the driver's own arithmetic would overflow.
+        let extent = |a: i32, b: i32| b.checked_sub(a).and_then(i32::checked_abs);
+        if extent(src_x0, src_x1).is_none() ||
+            extent(dst_x0, dst_x1).is_none() ||
+            extent(src_y0, src_y1).is_none() ||
+            extent(dst_y0, dst_y1).is_none()
         {
-            return self.base.webgl_error(InvalidOperation);
+            return self.base.webgl_error(InvalidValue);
         }
 
         self.base.send_command(WebGLCommand::BlitFrameBuffer(

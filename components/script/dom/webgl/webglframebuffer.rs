@@ -42,7 +42,8 @@ pub(crate) enum CompleteForRendering {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum AttachedImage {
     Renderbuffer(WebGLRenderbufferId),
-    Texture(WebGLTextureId, i32),
+    /// Texture, level, and cube map face target or layer (0 for 2D textures).
+    Texture(WebGLTextureId, i32, i32),
 }
 
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
@@ -52,6 +53,8 @@ enum WebGLFramebufferAttachment {
     Texture {
         texture: Dom<WebGLTexture>,
         level: i32,
+        /// The cube map face (its TEXTURE_CUBE_MAP_* target) or the layer; 0 for 2D textures.
+        face_or_layer: i32,
     },
 }
 
@@ -298,7 +301,7 @@ impl WebGLFramebuffer {
                 rb.internal_format(),
                 constants::RGBA32F | constants::RGBA16F | constants::RGB16F
             ),
-            Some(WebGLFramebufferAttachment::Texture { texture, level }) => texture
+            Some(WebGLFramebufferAttachment::Texture { texture, level, .. }) => texture
                 .image_info_at_face(0, *level as u32)
                 .and_then(|info| info.data_type())
                 .is_some_and(|data_type| {
@@ -309,7 +312,6 @@ impl WebGLFramebuffer {
     }
 
     /// What image is attached at `attachment`, to tell when a blit reads and writes the same one.
-    /// Layers of 3D and array textures aren't tracked, so those report None.
     pub(crate) fn attached_image(&self, attachment: u32) -> Option<AttachedImage> {
         let binding = self.attachment_binding(attachment)?;
         let binding = binding.borrow();
@@ -317,12 +319,11 @@ impl WebGLFramebuffer {
             WebGLFramebufferAttachment::Renderbuffer(rb) => {
                 Some(AttachedImage::Renderbuffer(rb.id()))
             },
-            WebGLFramebufferAttachment::Texture { texture, level } => match texture.target() {
-                Some(constants::TEXTURE_2D) | Some(constants::TEXTURE_CUBE_MAP) => {
-                    Some(AttachedImage::Texture(texture.id(), *level))
-                },
-                _ => None,
-            },
+            WebGLFramebufferAttachment::Texture {
+                texture,
+                level,
+                face_or_layer,
+            } => Some(AttachedImage::Texture(texture.id(), *level, *face_or_layer)),
         }
     }
 
@@ -335,6 +336,7 @@ impl WebGLFramebuffer {
                 Some(WebGLFramebufferAttachment::Texture {
                     texture: ref attached,
                     level,
+                    ..
                 }) if attached.id() == texture.id() => Some(level),
                 _ => None,
             })
@@ -378,6 +380,7 @@ impl WebGLFramebuffer {
             Some(WebGLFramebufferAttachment::Texture {
                 texture: att_tex,
                 level,
+                ..
             }) => match att_tex.image_info_at_face(0, *level as u32) {
                 Some(_)
                     if self.webgl_version == WebGLVersion::WebGL2 &&
@@ -791,7 +794,9 @@ impl WebGLFramebuffer {
                         Some(rb.id()),
                     ));
                 },
-                WebGLFramebufferAttachment::Texture { ref texture, level } => {
+                WebGLFramebufferAttachment::Texture {
+                    ref texture, level, ..
+                } => {
                     texture.attach_to_framebuffer(self);
                     webgl_object.send_command(WebGLCommand::FramebufferTexture2D(
                         self.target.get().unwrap(),
@@ -834,7 +839,7 @@ impl WebGLFramebuffer {
         let binding = binding.borrow();
         match binding.as_ref()? {
             WebGLFramebufferAttachment::Renderbuffer(rb) => Some(rb.internal_format()),
-            WebGLFramebufferAttachment::Texture { texture, level } => texture
+            WebGLFramebufferAttachment::Texture { texture, level, .. } => texture
                 .image_info_at_face(0, *level as u32)
                 .map(|info| info.internal_format().as_gl_constant()),
         }
@@ -914,6 +919,11 @@ impl WebGLFramebuffer {
                 *binding.borrow_mut() = Some(WebGLFramebufferAttachment::Texture {
                     texture: Dom::from_ref(texture),
                     level,
+                    face_or_layer: if textarget == constants::TEXTURE_2D {
+                        0
+                    } else {
+                        textarget as i32
+                    },
                 });
                 texture.attach_to_framebuffer(self);
 
@@ -981,6 +991,7 @@ impl WebGLFramebuffer {
                 *binding.borrow_mut() = Some(WebGLFramebufferAttachment::Texture {
                     texture: Dom::from_ref(texture),
                     level,
+                    face_or_layer: layer,
                 });
                 texture.attach_to_framebuffer(self);
 
