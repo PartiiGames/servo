@@ -8,7 +8,8 @@
 //! - [`invalidate_for_snapshots`]: during a restyle, for every element whose attributes, classes,
 //!   id or state changed (the snapshot table), find the `:has()` anchors that may change and give
 //!   them a restyle hint, setting dirty-descendant bits up to the root so that a traversal from
-//!   the root reaches them.
+//!   the root reaches them. Elements without style data (inside display: none, or a <select>'s
+//!   options) are included: layout keeps their snapshots for this.
 //! - [`invalidate_for_insertion`] / [`invalidate_for_removal`]: called by script around DOM
 //!   mutations (layout never sees removals); they return the elements script must mark dirty.
 

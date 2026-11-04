@@ -2084,6 +2084,13 @@ impl SnapshotSetter<'_> {
                 .map(|data| data.element_data.borrow_mut())
             else {
                 element.unset_snapshot_flags();
+                // Partii: still matters to `:has()` (a display: none descendant, or an <option> of
+                // a <select>, can match one): keep its snapshot so that `:has()` invalidation
+                // sees exactly what changed (the style traversal never reaches it).
+                if let Some(s) = restyle.snapshot {
+                    element.set_has_snapshot();
+                    snapshot_map.insert(element.as_node().opaque(), s);
+                }
                 continue;
             };
 
