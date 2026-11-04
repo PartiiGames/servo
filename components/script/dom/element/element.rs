@@ -1198,6 +1198,14 @@ impl<'dom> LayoutDom<'dom, Element> {
     /// intrinsic width in characters.
     /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-a-text-entry-widget>
     /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-domain-specific-widgets>
+    /// Partii: a textarea's `rows`, its intrinsic height in lines (1em each, as before).
+    pub(crate) fn textarea_rows_for_layout(self) -> Option<u32> {
+        match self.downcast::<HTMLTextAreaElement>()?.get_rows() {
+            0 => None,
+            rows => Some(rows),
+        }
+    }
+
     pub(crate) fn text_input_size_for_layout(self) -> Option<u32> {
         // A textarea's `cols` (no scrollbar width yet: see
         // <https://html.spec.whatwg.org/multipage/#textarea-effective-width>).
@@ -1497,23 +1505,8 @@ impl<'dom> LayoutDom<'dom, Element> {
         // Partii: a textarea's `cols` is its intrinsic width (see
         // `text_input_size_for_layout`), not a `width` hint, so it stretches like other boxes.
 
-        let rows = self
-            .downcast::<HTMLTextAreaElement>()
-            .map(LayoutDom::get_rows);
-        if let Some(rows) = rows {
-            let rows = rows as i32;
-            if rows > 0 {
-                // TODO(mttr) This should take scrollbar size into consideration.
-                //
-                // https://html.spec.whatwg.org/multipage/#textarea-effective-height
-                let value = specified::NoCalcLength::from_em(rows as CSSFloat);
-                push(PropertyDeclaration::Height(
-                    specified::Size::LengthPercentage(NonNegative(
-                        specified::LengthPercentage::Length(value),
-                    )),
-                ));
-            }
-        }
+        // Partii: a textarea's `rows` is its intrinsic block size (see
+        // `textarea_rows_for_layout`), not a `height` hint, so it stretches in flex and grid.
 
         if let Some(table) = self.downcast::<HTMLTableElement>() {
             if let Some(cellspacing) = table.get_cellspacing() {

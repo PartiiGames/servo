@@ -331,6 +331,13 @@ impl<'dom> LayoutNode<'dom> for ServoLayoutNode<'dom> {
         self.node.is_root_of_user_agent_widget()
     }
 
+    fn textarea_rows(&self) -> Option<u32> {
+        if !self.pseudo_element_chain.is_empty() {
+            return None;
+        }
+        self.node.downcast::<Element>()?.textarea_rows_for_layout()
+    }
+
     fn text_input_size(&self) -> Option<u32> {
         if !self.pseudo_element_chain.is_empty() {
             return None;
