@@ -287,7 +287,13 @@ impl VertexArrayObject {
                 }
             }
         }
-        if has_active_attrib && !has_divisor_0 {
+        // ANGLE_instanced_arrays: at least one active attribute must have divisor 0. WebGL 2 has
+        // no such rule (every attribute may be instanced).
+        let is_webgl1 = self
+            .context
+            .root()
+            .is_some_and(|context| context.webgl_version() == WebGLVersion::WebGL1);
+        if is_webgl1 && has_active_attrib && !has_divisor_0 {
             return Err(WebGLError::InvalidOperation);
         }
         Ok(())
