@@ -1270,7 +1270,7 @@ impl WebGLImpl {
             },
             WebGLCommand::ReadPixels(rect, format, pixel_type, ref sender) => {
                 let len = bytes_per_type(pixel_type) *
-                    components_per_format(format) *
+                    read_components(format) *
                     rect.size.area() as usize;
                 let mut pixels = vec![0; len];
                 unsafe {
@@ -3131,6 +3131,18 @@ fn prepare_pixels(
     }
 
     pixels
+}
+
+/// Components per pixel of a readPixels format. glow's components_per_format panics on the
+/// *_INTEGER formats, which WebGL 2 reads integer framebuffers with.
+fn read_components(format: u32) -> usize {
+    match format {
+        gl::RED_INTEGER | gl::GREEN_INTEGER | gl::BLUE_INTEGER => 1,
+        gl::RG_INTEGER => 2,
+        gl::RGB_INTEGER => 3,
+        gl::RGBA_INTEGER => 4,
+        _ => components_per_format(format),
+    }
 }
 
 /// RED_BITS ... STENCIL_BITS of the bound draw framebuffer, from its attachments.
