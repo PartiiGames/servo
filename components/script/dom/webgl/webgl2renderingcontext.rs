@@ -63,7 +63,9 @@ use crate::dom::webgl::validations::tex_image_3d::{
 };
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglbuffer::WebGLBuffer;
-use crate::dom::webgl::webglframebuffer::{WebGLFramebuffer, WebGLFramebufferAttachmentRoot};
+use crate::dom::webgl::webglframebuffer::{
+    CompleteForRendering, WebGLFramebuffer, WebGLFramebufferAttachmentRoot,
+};
 use crate::dom::webgl::webglprogram::WebGLProgram;
 use crate::dom::webgl::webglquery::WebGLQuery;
 use crate::dom::webgl::webglrenderbuffer::WebGLRenderbuffer;
@@ -5658,6 +5660,15 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
         let src_fb = self.base.get_read_framebuffer_slot().get();
         let dst_fb = self.base.get_draw_framebuffer_slot().get();
+
+        // Zero-initialize the destination's attachments now if they haven't been yet (WebGL
+        // initializes lazily, on first use). Otherwise the first draw or read after the blit
+        // does it and wipes what the blit wrote: an MSAA resolve read back as zeros.
+        if let Some(ref fb) = dst_fb &&
+            let CompleteForRendering::Incomplete = fb.check_status_for_rendering()
+        {
+            return self.base.webgl_error(InvalidFramebufferOperation);
+        }
 
         let get_default_formats = || -> WebGLResult<(Option<u32>, Option<u32>, Option<u32>)> {
             // All attempts to blit to an antialiased back buffer should fail.
