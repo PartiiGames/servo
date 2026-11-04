@@ -317,7 +317,18 @@ pub enum WebGLCommand {
     Enable(u32),
     Disable(u32),
     CompileShader(WebGLShaderId, String),
-    CopyTexImage2D(u32, i32, u32, i32, i32, i32, i32, i32),
+    /// copyTexImage2D; `read_size` is the read framebuffer's size, for the WebGL rule that
+    /// pixels outside it are zero.
+    CopyTexImage2D {
+        target: u32,
+        level: i32,
+        internal_format: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        read_size: (i32, i32),
+    },
     CopyTexSubImage2D(u32, i32, i32, i32, i32, i32, i32, i32),
     CreateBuffer(GenericSender<Option<WebGLBufferId>>),
     CreateFramebuffer(GenericSender<Option<WebGLFramebufferId>>),
