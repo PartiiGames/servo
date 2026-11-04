@@ -770,6 +770,35 @@ impl WebGLRenderingContext {
                     y_axis_treatment,
                 )
             },
+            // An OffscreenCanvas with a 2D, bitmaprenderer or WebGL context (e.g. text drawn
+            // off-screen for a texture), as in every other engine.
+            TexImageSource::OffscreenCanvas(canvas) => {
+                if !canvas.origin_is_clean() {
+                    return Err(Error::Security(None));
+                }
+
+                let Some(snapshot) = canvas.get_image_data() else {
+                    return Ok(None);
+                };
+
+                let snapshot = snapshot.to_shared();
+                let size = snapshot.size().cast();
+                let format = match snapshot.format() {
+                    SnapshotPixelFormat::RGBA => PixelFormat::RGBA8,
+                    SnapshotPixelFormat::BGRA => PixelFormat::BGRA8,
+                };
+
+                let (alpha_treatment, y_axis_treatment) =
+                    self.get_current_unpack_state(snapshot.alpha_mode().alpha());
+
+                TexPixels::new(
+                    snapshot.shared_memory(),
+                    size,
+                    format,
+                    alpha_treatment,
+                    y_axis_treatment,
+                )
+            },
             TexImageSource::HTMLVideoElement(video) => {
                 if !video.origin_is_clean() {
                     return Err(Error::Security(None));

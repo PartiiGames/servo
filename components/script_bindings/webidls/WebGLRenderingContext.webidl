@@ -30,7 +30,8 @@ typedef (ImageBitmap or
          ImageData or
          HTMLImageElement or
          HTMLCanvasElement or
-         HTMLVideoElement) TexImageSource;
+         HTMLVideoElement or
+         OffscreenCanvas) TexImageSource;
 
 typedef (/*[AllowShared]*/ Float32Array or sequence<GLfloat>) Float32List;
 typedef (/*[AllowShared]*/ Int32Array or sequence<GLint>) Int32List;
