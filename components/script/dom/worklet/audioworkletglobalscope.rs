@@ -58,9 +58,12 @@ use crate::dom::bindings::codegen::Bindings::AudioWorkletGlobalScopeBinding::{
 use crate::dom::bindings::codegen::Bindings::AudioWorkletProcessorBinding::AudioParamDescriptor;
 use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestCredentials;
 use crate::dom::bindings::conversions::{get_property, get_property_jsval};
-use crate::dom::bindings::error::{Error, Fallible, report_pending_exception};
+use crate::dom::bindings::error::{
+    Error, Fallible, report_pending_exception, report_pending_exception_with_info,
+};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::structuredclone;
@@ -150,6 +153,7 @@ impl AudioWorkletGlobalScope {
         closing: Arc<AtomicBool>,
         sample_rate: f32,
         context: Trusted<BaseAudioContext>,
+        cross_origin_isolated: bool,
     ) -> DomRoot<AudioWorkletGlobalScope> {
         debug!("Creating audio worklet global scope for pipeline {}.", pipeline_id);
         let global = Box::new(AudioWorkletGlobalScope {
@@ -170,10 +174,15 @@ impl AudioWorkletGlobalScope {
             port: Default::default(),
             context,
         });
+        // The worklet is in its window's agent cluster: same cross-origin isolation (so a port
+        // can carry SharedArrayBuffers and WebAssembly.Modules both ways).
+        global
+            .upcast::<GlobalScope>()
+            .set_cross_origin_isolated_capability(cross_origin_isolated);
         let scope = AudioWorkletGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
             cx,
             &global.origin(),
-            servo_config::pref!(dom_cross_origin_isolated_always),
+            cross_origin_isolated,
             global,
         );
         let mut realm = enter_auto_realm(cx, &*scope);
@@ -235,6 +244,12 @@ impl AudioWorkletGlobalScope {
         };
 
         // Step 3-4. Deserialize the options; the node's port comes back as the one transfer.
+        // Platform objects that AudioWorkletGlobalScope doesn't expose (a Blob, an ImageBitmap...)
+        // can't be deserialized here: that is a processor error.
+        if has_objects_unexposed_in_audio_worklet(&options) {
+            self.processor_error(node);
+            return;
+        }
         rooted!(&in(cx) let mut options_value = UndefinedValue());
         let ports = match structuredclone::read(cx, global, options, options_value.handle_mut()) {
             Ok(ports) => ports,
@@ -262,8 +277,8 @@ impl AudioWorkletGlobalScope {
         );
         self.pending_processor_port.set(None);
         if !ok || instance.get().is_null() {
-            report_pending_exception(cx);
-            self.processor_error(node);
+            let details = report_pending_exception_with_info(cx);
+            self.processor_error_with(node, details);
             return;
         }
 
@@ -442,8 +457,8 @@ impl AudioWorkletGlobalScope {
           )
         });
         if !ok {
-            report_pending_exception(cx);
-            self.fail(id);
+            let details = report_pending_exception_with_info(cx);
+            self.fail_with(id, details);
             return false;
         }
 
@@ -463,6 +478,10 @@ impl AudioWorkletGlobalScope {
     }
 
     fn fail(&self, id: u64) {
+        self.fail_with(id, None);
+    }
+
+    fn fail_with(&self, id: u64, details: Option<(String, String, u32, u32)>) {
         let node = {
             let processors = self.processors.borrow();
             let Some(state) = processors.get(&id) else {
@@ -471,16 +490,21 @@ impl AudioWorkletGlobalScope {
             state.dead.set(true);
             state.node.clone()
         };
-        self.processor_error(node);
+        self.processor_error_with(node, details);
     }
 
     /// Queue a task to fire `processorerror` at the node.
     /// <https://webaudio.github.io/web-audio-api/#dom-audioworkletnode-onprocessorerror>
     fn processor_error(&self, node: NodeSlot) {
+        self.processor_error_with(node, None);
+    }
+
+    /// The same, with the exception's (message, filename, line, column) for the ErrorEvent.
+    fn processor_error_with(&self, node: NodeSlot, details: Option<(String, String, u32, u32)>) {
         self.queue_main_thread_task(task!(audio_worklet_processor_error: move |cx| {
             let node = node.lock().unwrap().clone();
             if let Some(node) = node {
-                node.root().fire_processor_error(cx);
+                node.root().fire_processor_error(cx, details);
             }
         }));
     }
@@ -581,6 +605,24 @@ fn reshape_arrays(
     }
     build(cx, input_channels, &mut state.input_arrays, &state.inputs)?;
     build(cx, output_channels, &mut state.output_arrays, &state.outputs)
+}
+
+/// Whether serialized data holds platform objects that aren't exposed in AudioWorkletGlobalScope
+/// (MessagePort, DOMException and the streams are; Blob, File, geometry, image and canvas types,
+/// CryptoKey aren't).
+fn has_objects_unexposed_in_audio_worklet(data: &StructuredSerializedData) -> bool {
+    data.blobs.is_some() ||
+        data.files.is_some() ||
+        data.file_lists.is_some() ||
+        data.points.is_some() ||
+        data.rects.is_some() ||
+        data.quads.is_some() ||
+        data.matrices.is_some() ||
+        data.image_bitmaps.is_some() ||
+        data.transferred_image_bitmaps.is_some() ||
+        data.offscreen_canvases.is_some() ||
+        data.image_data.is_some() ||
+        data.crypto_keys.is_some()
 }
 
 /// Whether a Float32Array we handed out has lost its buffer (been transferred).
@@ -789,6 +831,7 @@ struct HostInit {
     sender: RenderTaskSender,
     worklet_id: WorkletId,
     global_port: Option<StructuredSerializedData>,
+    cross_origin_isolated: bool,
 }
 
 #[expect(unsafe_code)]
@@ -815,6 +858,7 @@ fn ensure_host(init: HostInit) {
         closing.clone(),
         init.sample_rate,
         init.context,
+        init.cross_origin_isolated,
     );
     // AudioWorkletGlobalScope.port: the transferred end of AudioWorklet.port, in place before
     // any module runs.
@@ -987,6 +1031,8 @@ pub(crate) struct AudioWorkletThreadPool {
     /// AudioWorklet.port's partner, serialized for transfer; taken by the first addModule().
     #[no_trace]
     global_port: RefCell<Option<StructuredSerializedData>>,
+    /// The window's cross-origin isolated capability, inherited by the worklet global.
+    cross_origin_isolated: bool,
 }
 
 impl AudioWorkletThreadPool {
@@ -997,6 +1043,7 @@ impl AudioWorkletThreadPool {
     ) -> AudioWorkletThreadPool {
         AudioWorkletThreadPool {
             global_port: RefCell::new(global_port),
+            cross_origin_isolated: context.global().cross_origin_isolated_capability(),
             sender: context.audio_context_impl().lock().unwrap().render_task_sender(),
             init,
             sample_rate: *context.SampleRate(),
@@ -1034,6 +1081,7 @@ impl WorkletThreadPool for AudioWorkletThreadPool {
             sender: self.sender.clone(),
             worklet_id,
             global_port: self.global_port.borrow_mut().take(),
+            cross_origin_isolated: self.cross_origin_isolated,
         };
         let promise = TrustedPromise::from(promise);
         let script_thread_sender = self.init.to_script_thread_sender.clone();

@@ -111,7 +111,14 @@ impl AudioWorkletNode {
         rooted!(&in(cx) let options_value = ObjectValue(options_obj.get()));
         let mut transfer = CustomAutoRooter::new(vec![port2.reflector().get_jsobject().get()]);
         let transfer = transfer.root(unsafe { cx.raw_cx() });
-        let serialized = structuredclone::write(cx, options_value.handle(), Some(transfer))?;
+        // Same agent cluster: processorOptions may carry SharedArrayBuffers (ring buffers) and
+        // WebAssembly.Modules when the page is cross-origin isolated.
+        let serialized = structuredclone::write_for_same_agent_cluster(
+            cx,
+            global,
+            options_value.handle(),
+            Some(transfer),
+        )?;
 
         // Params: initial values from parameterData.
         let param_options: Vec<AudioWorkletParamOptions> = descriptors
@@ -205,7 +212,14 @@ impl AudioWorkletNode {
     /// Fire `processorerror` (the processor's constructor or `process()` threw): an ErrorEvent.
     /// The exception itself lives in the worklet's realm on the render thread, so `error` is null;
     /// its message went to the console there.
-    pub(crate) fn fire_processor_error(&self, cx: &mut JSContext) {
+    pub(crate) fn fire_processor_error(
+        &self,
+        cx: &mut JSContext,
+        details: Option<(String, String, u32, u32)>,
+    ) {
+        let (message, filename, lineno, colno) = details.unwrap_or_else(|| {
+            ("AudioWorkletProcessor error".to_owned(), String::new(), 0, 0)
+        });
         rooted!(&in(cx) let error = js::jsval::NullValue());
         let global = self.global();
         let event = ErrorEvent::new(
@@ -214,10 +228,10 @@ impl AudioWorkletNode {
             Atom::from("processorerror"),
             EventBubbles::DoesNotBubble,
             EventCancelable::NotCancelable,
-            DOMString::from("AudioWorkletProcessor threw an exception"),
-            DOMString::new(),
-            0,
-            0,
+            DOMString::from(message),
+            DOMString::from(filename),
+            lineno,
+            colno,
             error.handle(),
         );
         event.upcast::<Event>().fire(cx, self.upcast::<EventTarget>());
