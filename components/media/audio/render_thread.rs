@@ -77,22 +77,24 @@ fn run_idle_hooks() {
 }
 
 thread_local! {
-    static QUANTUM_END_HOOKS: std::cell::RefCell<Vec<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static QUANTUM_END_HOOKS: std::cell::RefCell<Vec<Box<dyn FnMut(&BlockInfo)>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Register `hook` to run on the current render thread after every rendered quantum (the
-/// AudioWorklet's microtask checkpoint: between render quanta, not between processors).
-pub fn on_render_quantum_end(hook: Box<dyn FnMut()>) {
+/// Register `hook` to run on the current render thread after every rendered quantum, with the
+/// context's time now (the start of the next quantum). The AudioWorklet updates its global's
+/// currentFrame/currentTime and does its microtask checkpoint there (between render quanta, not
+/// between processors).
+pub fn on_render_quantum_end(hook: Box<dyn FnMut(&BlockInfo)>) {
     QUANTUM_END_HOOKS.with(|hooks| hooks.borrow_mut().push(hook));
 }
 
-fn run_quantum_end_hooks() {
+fn run_quantum_end_hooks(info: &BlockInfo) {
     let mut hooks = QUANTUM_END_HOOKS.with(|hooks| std::mem::take(&mut *hooks.borrow_mut()));
     if hooks.is_empty() {
         return;
     }
     for hook in hooks.iter_mut() {
-        hook();
+        hook(info);
     }
     QUANTUM_END_HOOKS.with(|h| {
         let mut h = h.borrow_mut();
@@ -506,7 +508,6 @@ impl AudioRenderThread {
                 // render quantum.
                 let started = stats.enabled().then(std::time::Instant::now);
                 let data = self.process();
-                run_quantum_end_hooks();
                 if let Some(started) = started {
                     stats.record(started.elapsed(), self.sink.underrun_stats());
                 }
@@ -514,6 +515,11 @@ impl AudioRenderThread {
                     // increment current frame by the render quantum size.
                     self.current_frame += FRAMES_PER_BLOCK;
                     self.current_time = self.current_frame / self.sample_rate as f64;
+                    run_quantum_end_hooks(&BlockInfo {
+                        sample_rate: self.sample_rate,
+                        frame: self.current_frame,
+                        time: self.current_time,
+                    });
                 } else {
                     eprintln!("Could not push data to audio sink");
                 }
