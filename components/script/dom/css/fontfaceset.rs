@@ -101,10 +101,20 @@ impl FontFaceSet {
 
     /// Fulfill the font ready promise, returning true if it was not already fulfilled beforehand.
     pub(crate) fn fulfill_ready_promise_if_needed(&self, cx: &mut JSContext) -> bool {
-        let promise = self.promise.borrow();
-        if promise.is_fulfilled() {
+        if self.promise.borrow().is_fulfilled() {
             return false;
         }
+        // No web fonts are loading any more: CSS-connected faces are done.
+        let entries: Vec<DomRoot<FontFace>> = self
+            .set_entries
+            .borrow()
+            .iter()
+            .map(|face| face.as_rooted())
+            .collect();
+        for face in entries {
+            face.settle_css_connected_load(cx);
+        }
+        let promise = self.promise.borrow();
         promise.resolve_native(cx, self);
         true
     }

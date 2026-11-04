@@ -381,6 +381,18 @@ impl FontFace {
         ))
     }
 
+    /// Partii: a CSS-connected face is loaded by layout's font context, which only reports that
+    /// some web font finished. When no web fonts are left loading, settle this face: status
+    /// "loaded" and its [[FontStatusPromise]] fulfilled. (A failed load can't be told apart here
+    /// yet, so it is reported as loaded too.)
+    pub(crate) fn settle_css_connected_load(&self, cx: &mut JSContext) {
+        if !self.is_css_connected() || self.status.get() != FontFaceLoadStatus::Loading {
+            return;
+        }
+        self.status.set(FontFaceLoadStatus::Loaded);
+        self.font_status_promise.resolve_native(cx, &self);
+    }
+
     /// Mark this font face as *not* [css-connected].
     ///
     /// [css-connected]: https://drafts.csswg.org/css-font-loading/#css-connected
