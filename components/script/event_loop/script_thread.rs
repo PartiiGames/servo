@@ -285,6 +285,13 @@ pub struct ScriptThread {
 
     /// <https://html.spec.whatwg.org/multipage/#last-render-opportunity-time>
     last_render_opportunity_time: Cell<Option<Instant>>,
+
+    /// Partii: when animation frame callbacks last ran. Two sources start rendering updates
+    /// (the renderer's frame ticks and this thread's own timer for rAF that builds no display
+    /// list); on a page whose workers drive the painting both run, so rAF ran up to twice a
+    /// frame (gl-worker: 79.5 fps on a 60 Hz grid). Callbacks wait while it is less than half a
+    /// frame since they last ran.
+    last_animation_frame_callbacks_time: Cell<Option<Instant>>,
     /// The deadline of the last idle period (requestIdleCallback): the next one starts after it.
     idle_period_end: Cell<Option<Instant>>,
     /// A wake-up timer is scheduled for this time, to start the next idle period.
@@ -967,6 +974,7 @@ impl ScriptThread {
                     webview_states: Default::default(),
                     documents: DomRefCell::new(DocumentCollection::default()),
                     last_render_opportunity_time: Default::default(),
+                    last_animation_frame_callbacks_time: Default::default(),
                     idle_period_end: Default::default(),
                     idle_wake_at: Default::default(),
                     window_proxies: Default::default(),
@@ -1102,8 +1110,13 @@ impl ScriptThread {
     ///
     /// Returns true if any reflows produced a new display list.
     pub(crate) fn update_the_rendering(&self, cx: &mut js::context::JSContext) -> bool {
-        self.last_render_opportunity_time.set(Some(Instant::now()));
+        let now = Instant::now();
+        self.last_render_opportunity_time.set(Some(now));
         self.cancel_scheduled_update_the_rendering();
+        let animation_frame_due = self
+            .last_animation_frame_callbacks_time
+            .get()
+            .is_none_or(|last| now.saturating_duration_since(last) >= frame_period() / 2);
         self.needs_rendering_update.store(false, Ordering::Relaxed);
 
         if !self.can_continue_running_inner() {
@@ -1222,7 +1235,12 @@ impl ScriptThread {
                 // > 14. For each doc of docs, run the animation frame callbacks for doc, passing
                 // > in the relative high resolution time given frameTimestamp and doc's
                 // > relevant global object as the timestamp.
-                document.run_the_animation_frame_callbacks(cx);
+                if animation_frame_due {
+                    if document.has_active_request_animation_frame_callbacks() {
+                        self.last_animation_frame_callbacks_time.set(Some(now));
+                    }
+                    document.run_the_animation_frame_callbacks(cx);
+                }
             }
 
             // Run the resize observer steps.
@@ -1343,7 +1361,7 @@ impl ScriptThread {
             // run at the display's rate. The renderer's tick comes first whenever this
             // iteration built a display list (the early return above), so this only paces rAF
             // that produced no frame.
-            Duration::from_nanos(1_000_000_000 / pref!(shell_refresh_rate_hz).clamp(1, 1000) as u64)
+            frame_period()
         } else {
             // 20 milliseconds (50 FPS) is used here in order to allow any renderer-based
             // animation ticks to arrive first.
@@ -4935,4 +4953,9 @@ fn obtain_a_browsing_context(
     // Step 15. Return newBrowsingContext.
     // TODO
     Some(browsing_context)
+}
+
+/// Partii: one display frame at `shell_refresh_rate_hz` (default 60).
+fn frame_period() -> Duration {
+    Duration::from_nanos(1_000_000_000 / pref!(shell_refresh_rate_hz).clamp(1, 1000) as u64)
 }
