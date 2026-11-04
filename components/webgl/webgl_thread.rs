@@ -681,6 +681,18 @@ impl WebGLThread {
         };
         debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
 
+        // WebGL 2.0 §5.18: primitive restart with the fixed index (the type's maximum value) is
+        // always on, and the enum is not a valid capability for content. Desktop GL has it from
+        // 4.3 or ARB_ES3_compatibility (Mesa exposes it on any core version); GLES 3 has it off.
+        if webgl_version == WebGLVersion::WebGL2 {
+            unsafe {
+                gl.enable(gl::PRIMITIVE_RESTART_FIXED_INDEX);
+                let error = gl.get_error();
+                if error != gl::NO_ERROR {
+                    warn!("PRIMITIVE_RESTART_FIXED_INDEX is unsupported ({error:#x})");
+                }
+            }
+        }
         let state = GLState {
             _gl_version: gl_version,
             _webgl_version: webgl_version,
