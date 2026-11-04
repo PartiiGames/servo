@@ -11,7 +11,7 @@ interface HTMLIFrameElement : HTMLElement {
   [CEReactions, SetterThrows] attribute (TrustedHTML or DOMString) srcdoc;
   [CEReactions] attribute DOMString name;
   [SameObject, PutForwards=value] readonly attribute DOMTokenList sandbox;
-  // [CEReactions, Reflect] attribute DOMString allow;
+  [CEReactions] attribute DOMString allow;
   [CEReactions] attribute boolean allowFullscreen;
   [CEReactions] attribute DOMString width;
   [CEReactions] attribute DOMString height;

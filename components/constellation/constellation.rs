@@ -159,6 +159,7 @@ use servo_canvas_traits::canvas::{CanvasId, CanvasMsg};
 use servo_config::{opts, pref};
 use servo_constellation_traits::{
     AuxiliaryWebViewCreationRequest, AuxiliaryWebViewCreationResponse, ConstellationInterest,
+    ContainerPolicy,
     EmbedderToConstellationMessage, HistoryTraversalSource, IFrameLoadInfo, IFrameLoadInfoWithData,
     IFrameSizeMsg, LoadData, LogEntry, MessagePortMsg, NavigationHistoryBehavior, PaintMetricEvent,
     PortMessageTask, PortTransferInfo, RemoteFocusOperation, SWManagerSenders,
@@ -421,6 +422,10 @@ pub struct Constellation<STF, SWF> {
 
     /// The set of all the browsing contexts in the browser.
     browsing_contexts: FxHashMap<BrowsingContextId, BrowsingContext>,
+
+    /// Partii: the container policy (`<iframe allow>`) of each nested browsing context, as its
+    /// embedder last sent it, so navigations started inside the frame keep it.
+    container_policies: FxHashMap<BrowsingContextId, ContainerPolicy>,
 
     /// A user agent holds a a set of browsing context groups.
     ///
@@ -698,6 +703,7 @@ where
                     pipelines: Default::default(),
                     worker_animation_frame_providers: Default::default(),
                     browsing_contexts: Default::default(),
+                    container_policies: Default::default(),
                     next_pipeline_namespace_id: Cell::new(FIRST_CONTENT_PIPELINE_NAMESPACE_ID),
                     time_profiler_chan: state.time_profiler_chan,
                     mem_profiler_chan: state.mem_profiler_chan.clone(),
@@ -1006,13 +1012,33 @@ where
         // here, because it will be send on an ipc channel,
         // and ipc channels take onership of their data.
         // https://github.com/servo/ipc-channel/issues/138
-        load_data: LoadData,
+        mut load_data: LoadData,
         is_private: bool,
         target_snapshot_params: TargetSnapshotParams,
         name: Option<String>,
     ) {
         if self.shutting_down {
             return;
+        }
+
+        // Partii: a nested document always gets its frame's container policy. Loads from the
+        // embedder carry it (and update it); navigations from inside the frame inherit it.
+        if parent_pipeline_id.is_some() {
+            match &load_data.container_policy {
+                Some(policy) => {
+                    self.container_policies
+                        .insert(browsing_context_id, policy.clone());
+                },
+                None => {
+                    load_data.container_policy = Some(
+                        self.container_policies
+                            .get(&browsing_context_id)
+                            .cloned()
+                            // Unknown frame: the strictest policy (nothing allowed).
+                            .unwrap_or_default(),
+                    );
+                },
+            }
         }
 
         debug!("Creating new pipeline ({new_pipeline_id:?}) in {browsing_context_id}");
@@ -5966,6 +5992,7 @@ where
         exit_mode: ExitPipelineMode,
     ) -> Option<BrowsingContext> {
         debug!("{}: Closing", browsing_context_id);
+        self.container_policies.remove(&browsing_context_id);
 
         self.close_browsing_context_children(
             webview_id,

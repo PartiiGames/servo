@@ -70,7 +70,8 @@ use servo_base::id::{LCPCandidateID, PipelineId, WebViewId};
 use servo_base::{Epoch, generic_channel};
 use servo_config::pref;
 use servo_constellation_traits::{
-    NavigationHistoryBehavior, PaintMetricEvent, ScriptToConstellationMessage,
+    ContainerPolicy, NavigationHistoryBehavior, PaintMetricEvent, PolicyFeature,
+    ScriptToConstellationMessage,
 };
 use servo_media::{ClientContextId, ServoMedia};
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
@@ -678,6 +679,11 @@ pub(crate) struct Document {
     #[no_trace]
     /// <https://html.spec.whatwg.org/multipage/#active-sandboxing-flag-set>,
     active_sandboxing_flag_set: Cell<SandboxingFlagSet>,
+    /// Partii: the container policy (`<iframe allow>`) this nested document was loaded with;
+    /// `None` for a top-level document.
+    #[no_trace]
+    #[ignore_malloc_size_of = "small; three allowlists"]
+    container_policy: DomRefCell<Option<ContainerPolicy>>,
     #[no_trace]
     /// The [`SandboxingFlagSet`] use to create the browsing context for this [`Document`].
     /// These are cached here as they cannot always be retrieved readily if the owner of
@@ -3495,7 +3501,7 @@ impl Document {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#allowed-to-use>
-    pub(crate) fn allowed_to_use_feature(&self, _feature: PermissionName) -> bool {
+    pub(crate) fn allowed_to_use_feature(&self, feature: PermissionName) -> bool {
         // Step 1. If document's browsing context is null, then return false.
         if !self.has_browsing_context {
             return false;
@@ -3509,9 +3515,61 @@ impl Document {
         // Step 3. If the result of running is feature enabled in document for origin on
         // feature, document, and document's origin is "Enabled", then return true.
         // Step 4. Return false.
-        // TODO: All features are currently enabled for `Document`s because we do not
-        // implement the Permissions Policy specification.
-        true
+        // Partii: only the policy-controlled features in `PolicyFeature` are enforced; the
+        // rest stay enabled.
+        match feature {
+            PermissionName::Gamepad => self.is_feature_enabled(PolicyFeature::Gamepad),
+            _ => true,
+        }
+    }
+
+    /// Partii: set the container policy this document was loaded with (nested documents).
+    pub(crate) fn set_container_policy(&self, policy: Option<ContainerPolicy>) {
+        *self.container_policy.borrow_mut() = policy;
+    }
+
+    /// <https://w3c.github.io/webappsec-permissions-policy/#is-feature-enabled>, for this
+    /// document's own origin, for the features this fork enforces. A top-level document has
+    /// them all; a nested one has what its `<iframe allow>` grants its origin. A nested document
+    /// that came without a container policy (one script made in-process, such as an iframe's
+    /// initial about:blank) gets the default allowlist 'self' against its parent.
+    pub(crate) fn is_feature_enabled(&self, feature: PolicyFeature) -> bool {
+        if let Some(policy) = self.container_policy.borrow().as_ref() {
+            return policy
+                .allowlist(feature)
+                .matches(self.origin().immutable(), &self.url());
+        }
+        if self.window.is_top_level() {
+            return true;
+        }
+        match self.window.GetFrameElement() {
+            Some(frame_element) => {
+                let parent = frame_element.owner_document();
+                parent.is_feature_enabled(feature) &&
+                    parent.origin().same_origin(&self.origin())
+            },
+            None => false,
+        }
+    }
+
+    /// Partii: the check point for pointer lock (requestPointerLock; the w5-input stream calls
+    /// it). A frame must declare pointer lock, either way a page can:
+    /// - `<iframe allow="pointer-lock">` (Chromium's policy name), or
+    /// - `<iframe sandbox="... allow-pointer-lock">` (the standard switch; the launcher's game
+    ///   frames use this one),
+    ///
+    /// and a sandbox without `allow-pointer-lock` always forbids it. Top-level documents and
+    /// same-origin frames get the default allowlist 'self'.
+    pub(crate) fn allowed_to_use_pointer_lock(&self) -> bool {
+        if !self.has_browsing_context || !self.is_fully_active() {
+            return false;
+        }
+        let sandbox = self.active_sandboxing_flag_set();
+        if sandbox.contains(SandboxingFlagSet::SANDBOXED_POINTER_LOCK_BROWSING_CONTEXT_FLAG) {
+            return false;
+        }
+        let sandboxed_with_allow_pointer_lock = !self.window.is_top_level() && !sandbox.is_empty();
+        self.is_feature_enabled(PolicyFeature::PointerLock) || sandboxed_with_allow_pointer_lock
     }
 
     /// Add an [`IntersectionObserver`] to the [`Document`], to be processed in the [`Document`]'s event loop.
@@ -4187,6 +4245,7 @@ impl Document {
             current_rendering_epoch: Default::default(),
             custom_element_reaction_stack,
             active_sandboxing_flag_set: Cell::new(creation_sandboxing_flag_set),
+            container_policy: Default::default(),
             creation_sandboxing_flag_set: Cell::new(creation_sandboxing_flag_set),
             favicon: RefCell::new(None),
             websockets: DOMTracker::new(),

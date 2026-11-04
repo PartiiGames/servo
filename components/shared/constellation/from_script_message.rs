@@ -144,6 +144,10 @@ pub struct LoadData {
 
     /// If this request is for the initial about:blank document.
     pub is_initial_about_blank: bool,
+    /// Partii: the container policy (`<iframe allow>`) for a nested browsing context's
+    /// document. `None` for top-level loads; the constellation fills it in for navigations
+    /// inside a frame from the policy it keeps for that browsing context.
+    pub container_policy: Option<crate::ContainerPolicy>,
 }
 
 impl LoadData {
@@ -184,6 +188,7 @@ impl LoadData {
             creation_sandboxing_flag_set,
             container_document_encoding: None,
             is_initial_about_blank: false,
+            container_policy: None,
         }
     }
 

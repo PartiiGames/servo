@@ -22,10 +22,10 @@ use script_bindings::cell::DomRefCell;
 use script_traits::{NewPipelineInfo, UpdatePipelineIdReason};
 use servo_base::id::{BrowsingContextId, PipelineId, WebViewId};
 use servo_constellation_traits::{
-    IFrameLoadInfo, IFrameLoadInfoWithData, LoadData, LoadOrigin, NavigationHistoryBehavior,
-    ScriptToConstellationMessage, TargetSnapshotParams,
+    Allowlist, ContainerPolicy, IFrameLoadInfo, IFrameLoadInfoWithData, LoadData, LoadOrigin,
+    NavigationHistoryBehavior, PolicyFeature, ScriptToConstellationMessage, TargetSnapshotParams,
 };
-use servo_url::ServoUrl;
+use servo_url::{ImmutableOrigin, ServoUrl};
 use style::attr::{AttrValue, LengthOrPercentageOrAuto};
 use stylo_atoms::Atom;
 
@@ -178,6 +178,10 @@ impl HTMLIFrameElement {
         target_snapshot_params: TargetSnapshotParams,
     ) {
         let document = self.owner_document();
+
+        // Partii: the container policy for the document this navigation creates, from this
+        // element's allow / allowfullscreen attributes as they are now.
+        load_data.container_policy = Some(self.container_policy(&load_data.url));
 
         {
             let load_blocker = &self.load_blocker;
@@ -817,6 +821,45 @@ impl HTMLIFrameElement {
         }
     }
 
+    /// Partii: <https://w3c.github.io/webappsec-permissions-policy/#container-policy> for the
+    /// features this fork enforces (`PolicyFeature`), for a navigation of this frame to `url`.
+    /// A feature the embedding document may not use is never granted; a feature the `allow`
+    /// attribute declares gets its allowlist; `allowfullscreen` means `fullscreen *`; anything
+    /// else gets the default allowlist 'self' (the embedding document's origin).
+    fn container_policy(&self, url: &ServoUrl) -> ContainerPolicy {
+        let document = self.owner_document();
+        let self_origin = document.origin().immutable().clone();
+        // 'src': the origin of the URL the frame is navigated to (srcdoc and about:blank
+        // documents share the embedder's origin).
+        let src_origin = match url.origin() {
+            origin if origin.is_tuple() => origin,
+            _ => self_origin.clone(),
+        };
+        let allow = self
+            .upcast::<Element>()
+            .get_string_attribute(&local_name!("allow"));
+        let declared = parse_allow_attribute(&allow.to_string(), &self_origin, &src_origin);
+        let allowfullscreen = self
+            .upcast::<Element>()
+            .has_attribute(&local_name!("allowfullscreen"));
+
+        let mut policy = ContainerPolicy::default();
+        for feature in PolicyFeature::ALL {
+            *policy.allowlist_mut(feature) = if !document.is_feature_enabled(feature) {
+                Allowlist::None
+            } else if let Some((_, allowlist)) =
+                declared.iter().find(|(declared, _)| *declared == feature)
+            {
+                allowlist.clone()
+            } else if feature == PolicyFeature::Fullscreen && allowfullscreen {
+                Allowlist::All
+            } else {
+                Allowlist::Origins(vec![self_origin.clone()])
+            };
+        }
+        policy
+    }
+
     /// Parse the `sandbox` attribute value given the [`Attr`]. This sets the `sandboxing_flag_set`
     /// property or clears it is the value isn't specified. Notably, an unspecified sandboxing
     /// attribute (no sandboxing) is different from an empty one (full sandboxing).
@@ -1054,6 +1097,11 @@ impl HTMLIFrameElementMethods<crate::DomTypeHolder> for HTMLIFrameElement {
     // https://html.spec.whatwg.org/multipage/#other-elements,-attributes-and-apis:attr-iframe-frameborder
     make_setter!(SetFrameBorder, "frameborder");
 
+    // <https://html.spec.whatwg.org/multipage/#dom-iframe-allow>
+    make_getter!(Allow, "allow");
+    // <https://html.spec.whatwg.org/multipage/#dom-iframe-allow>
+    make_setter!(SetAllow, "allow");
+
     // https://html.spec.whatwg.org/multipage/#dom-iframe-name
     // A child browsing context checks the name of its iframe only at the time
     // it is created; subsequent name sets have no special effect.
@@ -1286,4 +1334,58 @@ fn snapshot_self(iframe: &HTMLIFrameElement) -> TargetSnapshotParams {
             iframe.upcast(),
         )),
     }
+}
+
+/// Partii: parse an `<iframe allow>` attribute (a serialized permissions policy) for the features
+/// in [`PolicyFeature`]: `feature [allowlist...]` directives separated by `;`. An allowlist is
+/// `*`, `'self'`, `'src'`, `'none'` or origins; none given means `'src'`. Unknown features and
+/// repeated declarations are ignored.
+/// <https://w3c.github.io/webappsec-permissions-policy/#algo-parse-policy-directive>
+fn parse_allow_attribute(
+    value: &str,
+    self_origin: &ImmutableOrigin,
+    src_origin: &ImmutableOrigin,
+) -> Vec<(PolicyFeature, Allowlist)> {
+    let mut declared: Vec<(PolicyFeature, Allowlist)> = Vec::new();
+    for directive in value.split(';') {
+        let mut tokens = directive.split_ascii_whitespace();
+        let Some(feature) = tokens.next().and_then(PolicyFeature::from_name) else {
+            continue;
+        };
+        if declared.iter().any(|(existing, _)| *existing == feature) {
+            continue;
+        }
+        let values: Vec<&str> = tokens.collect();
+        let allowlist = if values.is_empty() {
+            Allowlist::Origins(vec![src_origin.clone()])
+        } else {
+            let mut all = false;
+            let mut origins = Vec::new();
+            for value in values {
+                match value.to_ascii_lowercase().as_str() {
+                    "*" => all = true,
+                    "'self'" => origins.push(self_origin.clone()),
+                    "'src'" => origins.push(src_origin.clone()),
+                    "'none'" => {},
+                    _ => {
+                        if let Ok(url) = ServoUrl::parse(value) {
+                            let origin = url.origin();
+                            if origin.is_tuple() {
+                                origins.push(origin);
+                            }
+                        }
+                    },
+                }
+            }
+            if all {
+                Allowlist::All
+            } else if origins.is_empty() {
+                Allowlist::None
+            } else {
+                Allowlist::Origins(origins)
+            }
+        };
+        declared.push((feature, allowlist));
+    }
+    declared
 }

@@ -7,12 +7,12 @@ use html5ever::{local_name, ns};
 use js::context::JSContext;
 use js::realm::CurrentRealm;
 use servo_config::pref;
+use servo_constellation_traits::PolicyFeature;
 
 use crate::dom::RootedPromise;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::GetRootNodeOptions;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::Node_Binding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::ShadowRootMethods;
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
@@ -207,16 +207,10 @@ impl Document {
             // Step 1
             None => false,
             Some(_) => {
-                // Step 2
-                let window = self.window();
-                if window.is_top_level() {
-                    true
-                } else {
-                    // Step 3
-                    window
-                        .GetFrameElement()
-                        .is_some_and(|el| el.has_attribute(&local_name!("allowfullscreen")))
-                }
+                // Step 2-3. Partii: the "fullscreen" policy-controlled feature, from the
+                // frame's container policy (<iframe allow="fullscreen"> or allowfullscreen).
+                // This also works for cross-process (cross-origin) frames.
+                self.is_feature_enabled(PolicyFeature::Fullscreen)
             },
         }
     }

@@ -9,6 +9,7 @@
 //! on other parts of Servo.
 
 mod from_script_message;
+mod permissions_policy;
 mod structured_data;
 
 use std::collections::VecDeque;
@@ -24,6 +25,7 @@ use embedder_traits::{
     ViewportDetails, WebDriverCommandMsg,
 };
 pub use from_script_message::*;
+pub use permissions_policy::*;
 use malloc_size_of_derive::MallocSizeOf;
 use paint_api::PinchZoomInfos;
 use paint_api::display_list::PaintTimingInfo;

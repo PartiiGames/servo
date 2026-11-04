@@ -3659,6 +3659,8 @@ impl ScriptThread {
             incomplete.pipeline_id,
             image_cache,
         );
+        // Partii: the frame's container policy (<iframe allow>) for a nested document.
+        document.set_container_policy(incomplete.load_data.container_policy.clone());
 
         // Step 8. Let loadTimingInfo be a new document load timing info with its
         //   navigation start time set to navigationParams's response's timing
