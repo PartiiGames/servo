@@ -117,7 +117,12 @@ impl RenderStats {
         let enabled = real_time && std::env::var_os("PARTII_AUDIO_STATS").is_some_and(|v| v != "0");
         RenderStats {
             enabled,
-            budget: Duration::from_secs_f64(128. / sample_rate as f64),
+            // Never panic here: a context may come up with a sample rate of 0 (or worse).
+            budget: if enabled {
+                Duration::try_from_secs_f64(128. / sample_rate as f64).unwrap_or(Duration::MAX)
+            } else {
+                Duration::ZERO
+            },
             window_start: Instant::now(),
             window: Histogram::new(),
             total: Histogram::new(),
