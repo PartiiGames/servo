@@ -49,6 +49,9 @@ pub(crate) struct IndependentFormattingContext {
     /// Partii: for a textual `<input>`, its `size`: the min/max-content inline size is at least
     /// that many characters wide (`width` stays `auto`, so the input stretches).
     pub text_input_size: Option<u32>,
+    /// Partii: for a `<textarea>`, its `rows`: the content block size is at least that many
+    /// `em` (`height` stays `auto`, so it stretches).
+    pub textarea_rows: Option<u32>,
 }
 
 #[derive(Debug, MallocSizeOf)]
@@ -115,6 +118,7 @@ impl IndependentFormattingContext {
             propagated_data,
             layout_root_layout_inputs: None.into(),
             text_input_size: None,
+            textarea_rows: None,
         }
     }
 
@@ -147,6 +151,7 @@ impl IndependentFormattingContext {
         );
 
         self.text_input_size = node_and_style_info.node.text_input_size();
+        self.textarea_rows = node_and_style_info.node.textarea_rows();
         self.base.clear_fragments_and_dirty_fragment_cache();
         *self.base.cached_inline_content_size.borrow_mut() = None;
         self.base.repair_style(&node_and_style_info.style);
@@ -178,6 +183,7 @@ impl IndependentFormattingContext {
             propagated_data,
             layout_root_layout_inputs: None.into(),
             text_input_size: node_and_style_info.node.text_input_size(),
+            textarea_rows: node_and_style_info.node.textarea_rows(),
         }
     }
 
@@ -578,6 +584,12 @@ impl IndependentFormattingContext {
         // (`min-block-size: auto`). Callers use the content block size only for an automatic
         // block size, so every path (in flow, flex, grid, abspos) gets the ratio from here.
         // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-automatic>
+        if let Some(rows) = self.textarea_rows {
+            let font_size = self.style().get_font().font_size.computed_size().px();
+            result
+                .content_block_size
+                .max_assign(Au::from_f32_px(font_size * rows as f32));
+        }
         if let Some(ratio) = preferred_aspect_ratio {
             if !self.is_replaced() {
                 let ratio_block_size = ratio.compute_dependent_size(

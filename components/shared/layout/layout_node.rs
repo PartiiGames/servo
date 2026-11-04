@@ -230,6 +230,11 @@ pub trait LayoutNode<'dom>: Copy + Debug + NodeInfo + Send + Sync {
         None
     }
 
+    /// Partii: for a `<textarea>`, its `rows` (intrinsic height in lines).
+    fn textarea_rows(&self) -> Option<u32> {
+        None
+    }
+
     /// Whether or not this [`LayoutNode`] is in a user agent widget shadow DOM.
     fn is_root_of_user_agent_widget(&self) -> bool;
 
