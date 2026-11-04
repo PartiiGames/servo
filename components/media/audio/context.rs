@@ -14,7 +14,9 @@ use crate::AudioBackend;
 use crate::audio_node::{AudioNodeInit, AudioNodeMessage, ChannelInfo};
 use crate::decoder::{AudioDecoder, AudioDecoderCallbacks, AudioDecoderOptions};
 use crate::graph::{AudioGraph, InputPort, NodeId, OutputPort, PortId};
-use crate::render_thread::{AudioRenderThread, AudioRenderThreadMsg, SinkEosCallback};
+use crate::render_thread::{
+    AudioRenderThread, AudioRenderThreadMsg, RenderThreadTask, SinkEosCallback,
+};
 use crate::sink::AudioSinkError;
 
 /// Describes the state of the audio context on the control thread.
@@ -109,6 +111,20 @@ impl Default for AudioContextOptions {
     }
 }
 
+/// Runs embedder tasks on a context's render thread. Cloneable and Send.
+#[derive(Clone)]
+pub struct RenderTaskSender(Sender<AudioRenderThreadMsg>);
+
+impl RenderTaskSender {
+    /// Queue `task` to run on the render thread, between render quanta. Errs when the render
+    /// thread is gone (the context was closed).
+    pub fn send(&self, task: RenderThreadTask) -> Result<(), ()> {
+        self.0
+            .send(AudioRenderThreadMsg::RunTask(task))
+            .map_err(|_| ())
+    }
+}
+
 /// Representation of an audio context on the control thread.
 #[derive(MallocSizeOf)]
 pub struct AudioContext {
@@ -194,6 +210,11 @@ impl AudioContext {
             listener,
             make_decoder: Arc::new(|| B::make_decoder()),
         })
+    }
+
+    /// A sender that runs closures on this context's render thread (for AudioWorklet).
+    pub fn render_task_sender(&self) -> RenderTaskSender {
+        RenderTaskSender(self.sender.clone())
     }
 
     pub fn state(&self) -> ProcessingState {
