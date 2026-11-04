@@ -59,7 +59,6 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomOnceCell, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
-#[cfg(feature = "webgl_backtrace")]
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::NodeTraits;
 #[cfg(feature = "webxr")]
@@ -206,7 +205,7 @@ pub(crate) struct WebGLRenderingContext {
 impl WebGLRenderingContext {
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new_inherited(
-        window: &Window,
+        global: &GlobalScope,
         canvas: HTMLCanvasElementOrOffscreenCanvas,
         webgl_version: WebGLVersion,
         size: Size2D<u32>,
@@ -216,15 +215,19 @@ impl WebGLRenderingContext {
             return Err("WebGL context creation error forced by pref `webgl.testing.context_creation_error`".into());
         }
 
-        let webgl_chan = match window.webgl_chan() {
+        // A Window, or a worker drawing into an OffscreenCanvas.
+        let webgl_chan = match global.webgl_chan() {
             Some(chan) => chan,
             None => return Err("WebGL initialization failed early on".into()),
+        };
+        let Some(webview_id) = global.webview_id() else {
+            return Err("WebGL needs a Window or a dedicated or shared worker".into());
         };
 
         let (sender, receiver) = webgl_channel().unwrap();
         webgl_chan
             .send(WebGLMsg::CreateContext(
-                window.webview_id().into(),
+                webview_id.into(),
                 webgl_version,
                 size,
                 attrs,
@@ -281,14 +284,14 @@ impl WebGLRenderingContext {
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new(
         cx: &mut JSContext,
-        window: &Window,
+        global: &GlobalScope,
         canvas: &RootedHTMLCanvasElementOrOffscreenCanvas,
         webgl_version: WebGLVersion,
         size: Size2D<u32>,
         attrs: GLContextAttributes,
     ) -> Option<DomRoot<WebGLRenderingContext>> {
         match WebGLRenderingContext::new_inherited(
-            window,
+            global,
             HTMLCanvasElementOrOffscreenCanvas::from(canvas),
             webgl_version,
             size,
@@ -297,13 +300,13 @@ impl WebGLRenderingContext {
             Ok(ctx) => Some(reflect_weak_referenceable_dom_object(
                 cx,
                 Rc::new(ctx),
-                window,
+                global,
             )),
             Err(msg) => {
                 error!("Couldn't create WebGLRenderingContext: {}", msg);
                 let event = WebGLContextEvent::new(
                     cx,
-                    window,
+                    global,
                     atom!("webglcontextcreationerror"),
                     EventBubbles::DoesNotBubble,
                     EventCancelable::Cancelable,
@@ -330,18 +333,20 @@ impl WebGLRenderingContext {
         if !self.onscreen() {
             return false;
         }
+        self.swap_buffers(Some(canvas_epoch))
+    }
 
-        let global = self.global();
-        let Some(window) = global.downcast::<Window>() else {
+    /// Presents the drawing buffer: the WebGL thread swaps it to the front and, if this
+    /// context has an image key, updates that image (tagged `canvas_epoch`). This works on
+    /// any thread; an OffscreenCanvas uses it to update its placeholder canvas element.
+    pub(crate) fn swap_buffers(&self, canvas_epoch: Option<Epoch>) -> bool {
+        let Some(webgl_chan) = self.global().webgl_chan() else {
             return false;
         };
-
-        window
-            .webgl_chan()
-            .expect("Where's the WebGL channel?")
+        webgl_chan
             .send(WebGLMsg::SwapBuffers(
                 vec![self.context_id()],
-                Some(canvas_epoch),
+                canvas_epoch,
                 0, /* time */
             ))
             .is_ok()
@@ -2050,8 +2055,12 @@ impl CanvasContext for WebGLRenderingContext {
         }
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-offscreencanvas-transfertoimagebitmap>
+    /// step 4: give the context a new, cleared drawing buffer. A swap does that: the WebGL
+    /// thread clears the new back buffer (unless `preserveDrawingBuffer` is set, which
+    /// keeps its contents, as a swap with that attribute always does).
     fn reset_bitmap(&self) {
-        warn!("The WebGLRenderingContext 'reset_bitmap' is not implemented yet");
+        self.swap_buffers(None);
     }
 
     // Used by HTMLCanvasElement.toDataURL
@@ -2096,7 +2105,11 @@ impl CanvasContext for WebGLRenderingContext {
 
         // Dirtying the canvas is unnecessary if we're actively displaying immersive
         // XR content right now.
-        if self.global().as_window().in_immersive_xr_session() {
+        if self
+            .global()
+            .downcast::<Window>()
+            .is_some_and(|window| window.in_immersive_xr_session())
+        {
             return;
         }
 
@@ -3619,7 +3632,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         let (range_min, range_max, precision) = receiver.recv().unwrap();
         Some(WebGLShaderPrecisionFormat::new(
             cx,
-            self.global().as_window(),
+            &self.global(),
             range_min,
             range_max,
             precision,

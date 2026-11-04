@@ -390,6 +390,12 @@ pub(crate) struct WorkerGlobalScope {
     /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-module-map>
     #[ignore_malloc_size_of = "mozjs"]
     module_map: DomRefCell<HashMapTracedValues<ModuleRequest, ModuleStatus>>,
+
+    /// The WebGL thread, for WebGL contexts of OffscreenCanvases on this worker.
+    #[cfg(feature = "webgl")]
+    #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
+    webgl_chan: Option<WebGLChan>,
 }
 
 impl WorkerGlobalScope {
@@ -465,7 +471,15 @@ impl WorkerGlobalScope {
             origin: MutableOrigin::new(init.origin),
             font_context,
             module_map: Default::default(),
+            #[cfg(feature = "webgl")]
+            webgl_chan: init.webgl_chan,
         }
+    }
+
+    /// The WebGL thread, if WebGL is available to this worker.
+    #[cfg(feature = "webgl")]
+    pub(crate) fn webgl_chan(&self) -> Option<WebGLChan> {
+        self.webgl_chan.clone()
     }
 
     pub(crate) fn module_map(

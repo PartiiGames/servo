@@ -8,7 +8,7 @@
  * https://www.khronos.org/registry/webgl/extensions/WEBGL_compressed_texture_s3tc/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface WEBGLCompressedTextureS3TC {
     /* Compressed Texture Formats */
     const GLenum COMPRESSED_RGB_S3TC_DXT1_EXT  = 0x83F0;

@@ -75,7 +75,6 @@ use crate::dom::webgl::webgltexture::WebGLTexture;
 use crate::dom::webgl::webgltransformfeedback::WebGLTransformFeedback;
 use crate::dom::webgl::webgluniformlocation::WebGLUniformLocation;
 use crate::dom::webgl::webglvertexarrayobject::WebGLVertexArrayObject;
-use crate::dom::window::Window;
 
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 #[derive(JSTraceable, MallocSizeOf)]
@@ -133,13 +132,13 @@ struct ReadPixelsSizes {
 impl WebGL2RenderingContext {
     fn new_inherited(
         cx: &mut JSContext,
-        window: &Window,
+        global: &GlobalScope,
         canvas: &RootedHTMLCanvasElementOrOffscreenCanvas,
         size: Size2D<u32>,
         attrs: GLContextAttributes,
     ) -> Option<WebGL2RenderingContext> {
         let base =
-            WebGLRenderingContext::new(cx, window, canvas, WebGLVersion::WebGL2, size, attrs)?;
+            WebGLRenderingContext::new(cx, global, canvas, WebGLVersion::WebGL2, size, attrs)?;
 
         let samplers = (0..base.limits().max_combined_texture_image_units)
             .map(|_| Default::default())
@@ -181,13 +180,13 @@ impl WebGL2RenderingContext {
 
     pub(crate) fn new(
         cx: &mut js::context::JSContext,
-        window: &Window,
+        global: &GlobalScope,
         canvas: &RootedHTMLCanvasElementOrOffscreenCanvas,
         size: Size2D<u32>,
         attrs: GLContextAttributes,
     ) -> Option<DomRoot<WebGL2RenderingContext>> {
-        WebGL2RenderingContext::new_inherited(cx, window, canvas, size, attrs)
-            .map(|ctx| reflect_dom_object_with_cx(Box::new(ctx), window, cx))
+        WebGL2RenderingContext::new_inherited(cx, global, canvas, size, attrs)
+            .map(|ctx| reflect_dom_object_with_cx(Box::new(ctx), global, cx))
     }
 
     pub(crate) fn set_image_key(&self, image_key: ImageKey) {
@@ -4486,7 +4485,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let (size, ty, name) = receiver.recv().unwrap();
         Some(WebGLActiveInfo::new(
             cx,
-            self.base.global().as_window(),
+            &self.base.global(),
             size,
             ty,
             DOMString::from(name),

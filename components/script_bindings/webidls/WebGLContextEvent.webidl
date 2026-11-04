@@ -4,7 +4,7 @@
 // skip-unless CARGO_FEATURE_WEBGL
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.15
-[Exposed=Window]
+[Exposed=(Window,Worker)]
 interface WebGLContextEvent : Event {
     [Throws] constructor(DOMString type, optional WebGLContextEventInit eventInit = {});
     readonly attribute DOMString statusMessage;

@@ -7,6 +7,6 @@
  * https://www.khronos.org/registry/webgl/extensions/OES_texture_float_linear/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface OESTextureFloatLinear {
 };

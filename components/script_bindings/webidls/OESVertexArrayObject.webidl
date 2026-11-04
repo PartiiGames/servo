@@ -7,7 +7,7 @@
  * https://www.khronos.org/registry/webgl/extensions/OES_vertex_array_object/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface OESVertexArrayObject {
     const unsigned long VERTEX_ARRAY_BINDING_OES = 0x85B5;
 

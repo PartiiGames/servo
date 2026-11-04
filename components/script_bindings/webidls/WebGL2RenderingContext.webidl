@@ -580,7 +580,7 @@ interface mixin WebGL2RenderingContextOverloads
                   /*[AllowShared]*/ ArrayBufferView dstData, GLuint dstOffset);
 };
 
-[Exposed=Window, Func="WebGL2RenderingContext::is_webgl2_enabled"]
+[Exposed=(Window,Worker), Func="WebGL2RenderingContext::is_webgl2_enabled"]
 interface WebGL2RenderingContext
 {
 };

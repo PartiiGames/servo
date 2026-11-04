@@ -15,7 +15,6 @@ use pixels::{EncodedImageType, Snapshot};
 use rustc_hash::FxHashMap;
 use script_bindings::cell::{DomRefCell, Ref};
 #[cfg(feature = "webgl")]
-use script_bindings::inheritance::Castable;
 #[cfg(feature = "webgl")]
 use script_bindings::reflector::DomObject;
 use script_bindings::reflector::reflect_dom_object_with_proto;
@@ -56,7 +55,7 @@ use crate::dom::imagebitmaprenderingcontext::ImageBitmapRenderingContext;
 use crate::dom::offscreencanvasrenderingcontext2d::OffscreenCanvasRenderingContext2D;
 use crate::dom::promise::Promise;
 #[cfg(feature = "webgl")]
-use crate::dom::types::{WebGLRenderingContext, Window};
+use crate::dom::types::WebGLRenderingContext;
 #[cfg(feature = "webgl")]
 use crate::dom::webgl::webgl2renderingcontext::WebGL2RenderingContext;
 use crate::tasks::task_source::SendableTaskSource;
@@ -304,20 +303,28 @@ impl OffscreenCanvas {
             RootedHTMLCanvasElementOrOffscreenCanvas::OffscreenCanvas(DomRoot::from_ref(self));
         let size = self.get_size();
         let attrs = Self::get_gl_attributes(cx, options)?;
-        self.global()
-            .downcast::<Window>()
-            .and_then(|window| {
-                WebGLRenderingContext::new(cx, window, &canvas, WebGLVersion::WebGL1, size, attrs)
-            })
-            .map(|context| {
-                // Step 2. If context is null, then return null;
-                // otherwise set this's context mode to webgl or webgl2.
-                *self.context.safe_borrow_mut(cx.no_gc()) =
-                    Some(OffscreenRenderingContext::WebGL(Dom::from_ref(&*context)));
+        // In a Window or a worker: the WebGL thread is reachable from both.
+        let global = self.global();
+        let context = WebGLRenderingContext::new(
+            cx,
+            &global,
+            &canvas,
+            WebGLVersion::WebGL1,
+            size,
+            attrs,
+        )?;
+        // Step 2. If context is null, then return null;
+        // otherwise set this's context mode to webgl or webgl2.
+        *self.context.safe_borrow_mut(cx.no_gc()) =
+            Some(OffscreenRenderingContext::WebGL(Dom::from_ref(&*context)));
+        // With a placeholder canvas element, the WebGL thread presents the drawing buffer
+        // into the image the placeholder shows (see `commit_to_placeholder`).
+        if let Some(image_key) = self.placeholder_image_key() {
+            context.set_image_key(image_key);
+        }
 
-                // Step 3. Return context.
-                context
-            })
+        // Step 3. Return context.
+        Some(context)
     }
 
     #[cfg(feature = "webgl")]
@@ -344,18 +351,18 @@ impl OffscreenCanvas {
             RootedHTMLCanvasElementOrOffscreenCanvas::OffscreenCanvas(DomRoot::from_ref(self));
         let size = self.get_size();
         let attrs = Self::get_gl_attributes(cx, options)?;
-        self.global()
-            .downcast::<Window>()
-            .and_then(|window| WebGL2RenderingContext::new(cx, window, &canvas, size, attrs))
-            .map(|context| {
-                // Step 2. If context is null, then return null;
-                // otherwise set this's context mode to webgl or webgl2.
-                *self.context.safe_borrow_mut(cx.no_gc()) =
-                    Some(OffscreenRenderingContext::WebGL2(Dom::from_ref(&*context)));
+        let global = self.global();
+        let context = WebGL2RenderingContext::new(cx, &global, &canvas, size, attrs)?;
+        // Step 2. If context is null, then return null;
+        // otherwise set this's context mode to webgl or webgl2.
+        *self.context.safe_borrow_mut(cx.no_gc()) =
+            Some(OffscreenRenderingContext::WebGL2(Dom::from_ref(&*context)));
+        if let Some(image_key) = self.placeholder_image_key() {
+            context.set_image_key(image_key);
+        }
 
-                // Step 3. Return context.
-                context
-            })
+        // Step 3. Return context.
+        Some(context)
     }
 
     pub(crate) fn placeholder(&self) -> Option<DomRoot<HTMLCanvasElement>> {
@@ -385,9 +392,12 @@ impl OffscreenCanvas {
         if self.commit_queued.get() || !self.has_placeholder() {
             return;
         }
-        let Some(OffscreenRenderingContext::Context2d(_)) = self.context.borrow().as_ref() else {
-            return;
-        };
+        match self.context.borrow().as_ref() {
+            Some(OffscreenRenderingContext::Context2d(_)) => {},
+            #[cfg(feature = "webgl")]
+            Some(OffscreenRenderingContext::WebGL(_) | OffscreenRenderingContext::WebGL2(_)) => {},
+            _ => return,
+        }
         let global = self.global();
         let task_manager = global.task_manager();
         // A dedicated worker can only queue tasks while it handles a message; drawing
@@ -408,13 +418,23 @@ impl OffscreenCanvas {
     /// placeholder (on its own thread) to show that frame at its next rendering update.
     fn commit_to_placeholder(&self, cx: &mut js::context::JSContext) {
         self.commit_queued.set(false);
+        let epoch = Epoch(self.commit_epoch.get().wrapping_add(1));
         let committed = match self.context.borrow().as_ref() {
-            Some(OffscreenRenderingContext::Context2d(context)) => {
-                let epoch = Epoch(self.commit_epoch.get().wrapping_add(1));
-                context.commit(epoch).then_some(epoch)
+            Some(OffscreenRenderingContext::Context2d(context)) => context.commit(epoch),
+            // The WebGL thread swaps the drawing buffer to the front and updates the
+            // placeholder's image (the context has its key) tagged with `epoch`.
+            #[cfg(feature = "webgl")]
+            Some(OffscreenRenderingContext::WebGL(context)) => {
+                self.placeholder_image_key().is_some() && context.swap_buffers(Some(epoch))
             },
-            _ => None,
+            #[cfg(feature = "webgl")]
+            Some(OffscreenRenderingContext::WebGL2(context)) => {
+                self.placeholder_image_key().is_some() &&
+                    context.base_context().swap_buffers(Some(epoch))
+            },
+            _ => false,
         };
+        let committed = committed.then_some(epoch);
         let Some(epoch) = committed else {
             return;
         };

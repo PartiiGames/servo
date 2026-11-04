@@ -319,7 +319,14 @@ impl HTMLCanvasElement {
         let size = self.get_size();
         let attrs = Self::get_gl_attributes(cx, options)?;
         let context =
-            WebGLRenderingContext::new(cx, &window, &canvas, WebGLVersion::WebGL1, size, attrs)?;
+            WebGLRenderingContext::new(
+                cx,
+                window.upcast(),
+                &canvas,
+                WebGLVersion::WebGL1,
+                size,
+                attrs,
+            )?;
         self.set_rendering_context(cx.no_gc(), || {
             RenderingContext::WebGL(Dom::from_ref(&*context))
         });
@@ -347,7 +354,7 @@ impl HTMLCanvasElement {
             RootedHTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(DomRoot::from_ref(self));
         let size = self.get_size();
         let attrs = Self::get_gl_attributes(cx, options)?;
-        let context = WebGL2RenderingContext::new(cx, &window, &canvas, size, attrs)?;
+        let context = WebGL2RenderingContext::new(cx, window.upcast(), &canvas, size, attrs)?;
         self.set_rendering_context(cx.no_gc(), || {
             RenderingContext::WebGL2(Dom::from_ref(&*context))
         });

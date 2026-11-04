@@ -7,7 +7,7 @@
  * https://www.khronos.org/registry/webgl/extensions/OES_standard_derivatives/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface OESStandardDerivatives {
     const GLenum FRAGMENT_SHADER_DERIVATIVE_HINT_OES = 0x8B8B;
 };

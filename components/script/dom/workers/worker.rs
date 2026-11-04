@@ -248,10 +248,9 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
             }
         }
 
+        // A nested worker gets the WebGL thread from its parent worker.
         #[cfg(feature = "webgl")]
-        let webgl_chan = global
-            .downcast::<Window>()
-            .and_then(|window| window.webgl_chan_value());
+        let webgl_chan = global.webgl_chan();
         let init = prepare_workerscope_init(
             global,
             Some(devtools_sender),

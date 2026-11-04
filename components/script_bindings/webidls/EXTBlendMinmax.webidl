@@ -7,7 +7,7 @@
  * https://www.khronos.org/registry/webgl/extensions/EXT_blend_minmax/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface EXTBlendMinmax {
   const GLenum MIN_EXT = 0x8007;
   const GLenum MAX_EXT = 0x8008;

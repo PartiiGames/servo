@@ -10,7 +10,7 @@ use script_bindings::reflector::{Reflector, reflect_dom_object};
 use crate::dom::bindings::codegen::Bindings::WebGLActiveInfoBinding::WebGLActiveInfoMethods;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
-use crate::dom::window::Window;
+use crate::dom::globalscope::GlobalScope;
 
 #[dom_struct]
 pub(crate) struct WebGLActiveInfo {
@@ -33,7 +33,7 @@ impl WebGLActiveInfo {
 
     pub(crate) fn new(
         cx: &mut JSContext,
-        window: &Window,
+        global: &GlobalScope,
         size: i32,
         ty: u32,
         name: DOMString,
@@ -41,7 +41,7 @@ impl WebGLActiveInfo {
         reflect_dom_object(
             cx,
             Box::new(WebGLActiveInfo::new_inherited(size, ty, name)),
-            window,
+            global,
         )
     }
 }

@@ -17,7 +17,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
-use crate::dom::window::Window;
+use crate::dom::globalscope::GlobalScope;
 
 #[dom_struct]
 pub(crate) struct WebGLContextEvent {
@@ -29,7 +29,7 @@ impl WebGLContextEventMethods<crate::DomTypeHolder> for WebGLContextEvent {
     /// <https://registry.khronos.org/webgl/specs/latest/1.0/#5.15>
     fn Constructor(
         cx: &mut JSContext,
-        window: &Window,
+        global: &GlobalScope,
         proto: Option<HandleObject>,
         type_: DOMString,
         init: &WebGLContextEventInit,
@@ -45,7 +45,7 @@ impl WebGLContextEventMethods<crate::DomTypeHolder> for WebGLContextEvent {
 
         Ok(WebGLContextEvent::new_with_proto(
             cx,
-            window,
+            global,
             proto,
             Atom::from(type_),
             bubbles,
@@ -75,18 +75,18 @@ impl WebGLContextEvent {
 
     pub(crate) fn new(
         cx: &mut JSContext,
-        window: &Window,
+        global: &GlobalScope,
         type_: Atom,
         bubbles: EventBubbles,
         cancelable: EventCancelable,
         status_message: DOMString,
     ) -> DomRoot<WebGLContextEvent> {
-        Self::new_with_proto(cx, window, None, type_, bubbles, cancelable, status_message)
+        Self::new_with_proto(cx, global, None, type_, bubbles, cancelable, status_message)
     }
 
     fn new_with_proto(
         cx: &mut JSContext,
-        window: &Window,
+        global: &GlobalScope,
         proto: Option<HandleObject>,
         type_: Atom,
         bubbles: EventBubbles,
@@ -96,7 +96,7 @@ impl WebGLContextEvent {
         let event = reflect_dom_object_with_proto(
             cx,
             Box::new(WebGLContextEvent::new_inherited(status_message)),
-            window,
+            global,
             proto,
         );
 

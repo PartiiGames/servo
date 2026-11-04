@@ -7,7 +7,7 @@
  * https://www.khronos.org/registry/webgl/extensions/OES_texture_half_float/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface OESTextureHalfFloat {
     const GLenum HALF_FLOAT_OES = 0x8D61;
 };

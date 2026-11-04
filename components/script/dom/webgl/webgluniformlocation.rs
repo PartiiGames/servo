@@ -9,7 +9,7 @@ use script_bindings::reflector::{Reflector, reflect_dom_object};
 use servo_canvas_traits::webgl::{WebGLContextId, WebGLProgramId};
 
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::window::Window;
+use crate::dom::globalscope::GlobalScope;
 
 #[dom_struct]
 pub(crate) struct WebGLUniformLocation {
@@ -47,7 +47,7 @@ impl WebGLUniformLocation {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         cx: &mut JSContext,
-        window: &Window,
+        global: &GlobalScope,
         id: i32,
         context_id: WebGLContextId,
         program_id: WebGLProgramId,
@@ -65,7 +65,7 @@ impl WebGLUniformLocation {
                 size,
                 type_,
             )),
-            window,
+            global,
         )
     }
 

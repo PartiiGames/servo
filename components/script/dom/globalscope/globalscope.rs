@@ -374,6 +374,18 @@ impl GlobalScope {
         Some(key)
     }
 
+    /// The WebGL thread, from a Window or a worker (for an OffscreenCanvas's WebGL context).
+    #[cfg(feature = "webgl")]
+    pub(crate) fn webgl_chan(&self) -> Option<servo_canvas_traits::webgl::WebGLChan> {
+        if let Some(window) = self.downcast::<Window>() {
+            return window.webgl_chan();
+        }
+        if let Some(worker) = self.downcast::<WorkerGlobalScope>() {
+            return worker.webgl_chan();
+        }
+        None
+    }
+
     pub(crate) fn webview_id(&self) -> Option<WebViewId> {
         if let Some(window) = self.downcast::<Window>() {
             return Some(window.webview_id());

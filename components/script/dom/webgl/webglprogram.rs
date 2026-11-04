@@ -456,7 +456,7 @@ impl WebGLProgram {
             .ok_or(WebGLError::InvalidValue)?;
         Ok(WebGLActiveInfo::new(
             cx,
-            self.global().as_window(),
+            &self.global(),
             data.size.unwrap_or(1),
             data.type_,
             data.name().into(),
@@ -478,7 +478,7 @@ impl WebGLProgram {
             .ok_or(WebGLError::InvalidValue)?;
         Ok(WebGLActiveInfo::new(
             cx,
-            self.global().as_window(),
+            &self.global(),
             data.size,
             data.type_,
             data.name.clone().into(),
@@ -580,7 +580,7 @@ impl WebGLProgram {
 
         Ok(Some(WebGLUniformLocation::new(
             cx,
-            self.global().as_window(),
+            &self.global(),
             location,
             context_id,
             self.id(),
