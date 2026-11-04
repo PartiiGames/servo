@@ -893,22 +893,23 @@ impl WebGLFramebuffer {
 
         let tex_id = match texture {
             Some(texture) => {
-                let (max_level, max_layer) = match texture.target() {
+                // Layers of 3D textures and 2D arrays only (GL ES 3.0, glFramebufferTextureLayer).
+                let (max_size, layers) = match texture.target() {
                     Some(constants::TEXTURE_3D) => (
-                        context.limits().max_3d_texture_size.ilog2(),
-                        context.limits().max_3d_texture_size - 1,
+                        context.limits().max_3d_texture_size,
+                        context.limits().max_3d_texture_size,
                     ),
-                    Some(constants::TEXTURE_2D) => (
-                        context.limits().max_tex_size.ilog2(),
-                        context.limits().max_array_texture_layers - 1,
+                    Some(constants::TEXTURE_2D_ARRAY) => (
+                        context.limits().max_tex_size,
+                        context.limits().max_array_texture_layers,
                     ),
                     _ => return Err(WebGLError::InvalidOperation),
                 };
 
-                if level < 0 || level as u32 >= max_level {
+                if level < 0 || level as u32 > max_size.ilog2() {
                     return Err(WebGLError::InvalidValue);
                 }
-                if layer < 0 || layer as u32 >= max_layer {
+                if layer < 0 || layer as u32 >= layers {
                     return Err(WebGLError::InvalidValue);
                 }
 
@@ -930,6 +931,14 @@ impl WebGLFramebuffer {
             level,
             layer,
         ));
+
+        if texture.is_none() {
+            self.detach_binding(binding, attachment)?;
+        }
+
+        // As for framebufferTexture2D: completeness (and readPixels / draws) depend on it.
+        self.update_status();
+        self.is_initialized.set(false);
         Ok(())
     }
 

@@ -281,8 +281,36 @@ impl WebGLTexture {
             return Err(WebGLError::InvalidOperation);
         }
 
-        if !base_image_info.is_power_of_two() {
-            return Err(WebGLError::InvalidOperation);
+        let context = self.upcast().context().ok_or(WebGLError::ContextLost)?;
+        match context.webgl_version() {
+            // WebGL 1 needs power-of-two sizes.
+            WebGLVersion::WebGL1 => {
+                if !base_image_info.is_power_of_two() {
+                    return Err(WebGLError::InvalidOperation);
+                }
+            },
+            // WebGL 2: any size, but the base level must be colour-renderable and filterable
+            // (GL ES 3.0, glGenerateMipmap): no integer, depth or unfilterable 32-bit float formats.
+            WebGLVersion::WebGL2 => {
+                let format = base_image_info.internal_format;
+                let unsized_format = format.to_unsized();
+                let is_float32 = matches!(
+                    format,
+                    TexFormat::R32f | TexFormat::RG32f | TexFormat::RGB32f | TexFormat::RGBA32f
+                );
+                if matches!(
+                    unsized_format,
+                    TexFormat::RedInteger |
+                        TexFormat::RGInteger |
+                        TexFormat::RGBInteger |
+                        TexFormat::RGBAInteger |
+                        TexFormat::DepthComponent |
+                        TexFormat::DepthStencil
+                ) || (is_float32 && !context.extension_manager().is_filterable(constants::FLOAT))
+                {
+                    return Err(WebGLError::InvalidOperation);
+                }
+            },
         }
 
         if base_image_info.is_compressed_format() {
@@ -463,23 +491,29 @@ impl WebGLTexture {
 
         let mut ref_width = base_image_info.width;
         let mut ref_height = base_image_info.height;
+        let mut ref_depth = base_image_info.depth;
+        // Only 3D textures shrink in depth; a 2D array keeps its layers.
+        let is_3d = self.target.get() == Some(constants::TEXTURE_3D);
 
         if ref_width == 0 || ref_height == 0 {
             return Err(WebGLError::InvalidOperation);
         }
 
-        for level in (first_level + 1)..last_level {
-            if ref_width == 1 && ref_height == 1 {
+        for level in (first_level + 1)..=last_level {
+            if ref_width == 1 && ref_height == 1 && (!is_3d || ref_depth <= 1) {
                 break;
             }
 
             ref_width = cmp::max(1, ref_width / 2);
             ref_height = cmp::max(1, ref_height / 2);
+            if is_3d {
+                ref_depth = cmp::max(1, ref_depth / 2);
+            }
 
             let image_info = ImageInfo {
                 width: ref_width,
                 height: ref_height,
-                depth: 0,
+                depth: ref_depth,
                 internal_format: base_image_info.internal_format,
                 data_type: base_image_info.data_type,
             };
@@ -623,7 +657,10 @@ impl WebGLTexture {
 
             width = cmp::max(1, width / 2);
             height = cmp::max(1, height / 2);
-            depth = cmp::max(1, depth / 2);
+            // A 2D array keeps its layers at every level.
+            if target == TexImageTarget::Texture3D {
+                depth = cmp::max(1, depth / 2);
+            }
         }
 
         self.immutable_levels.set(Some(levels));
