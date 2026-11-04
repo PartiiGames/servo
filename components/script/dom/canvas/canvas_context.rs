@@ -352,8 +352,8 @@ pub(crate) enum OffscreenRenderingContext {
     WebGL(Dom<WebGLRenderingContext>),
     #[cfg(feature = "webgl")]
     WebGL2(Dom<WebGL2RenderingContext>),
-    // #[cfg(feature = "webgpu")]
-    // WebGPU(Dom<GPUCanvasContext>),
+    #[cfg(feature = "webgpu")]
+    WebGPU(Dom<GPUCanvasContext>),
     Detached,
 }
 
@@ -370,6 +370,8 @@ impl CanvasContext for OffscreenRenderingContext {
             OffscreenRenderingContext::WebGL(context) => context.canvas(),
             #[cfg(feature = "webgl")]
             OffscreenRenderingContext::WebGL2(context) => context.canvas(),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContext::WebGPU(context) => context.canvas(),
             OffscreenRenderingContext::Detached => None,
         }
     }
@@ -382,6 +384,8 @@ impl CanvasContext for OffscreenRenderingContext {
             OffscreenRenderingContext::WebGL(context) => context.resize(),
             #[cfg(feature = "webgl")]
             OffscreenRenderingContext::WebGL2(context) => context.resize(),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContext::WebGPU(context) => context.resize(),
             OffscreenRenderingContext::Detached => {},
         }
     }
@@ -394,6 +398,8 @@ impl CanvasContext for OffscreenRenderingContext {
             OffscreenRenderingContext::WebGL(context) => context.reset_bitmap(),
             #[cfg(feature = "webgl")]
             OffscreenRenderingContext::WebGL2(context) => context.reset_bitmap(),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContext::WebGPU(context) => context.reset_bitmap(),
             OffscreenRenderingContext::Detached => {},
         }
     }
@@ -406,6 +412,8 @@ impl CanvasContext for OffscreenRenderingContext {
             OffscreenRenderingContext::WebGL(context) => context.get_image_data(),
             #[cfg(feature = "webgl")]
             OffscreenRenderingContext::WebGL2(context) => context.get_image_data(),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContext::WebGPU(context) => context.get_image_data(),
             OffscreenRenderingContext::Detached => None,
         }
     }
@@ -418,6 +426,8 @@ impl CanvasContext for OffscreenRenderingContext {
             OffscreenRenderingContext::WebGL(context) => context.origin_is_clean(),
             #[cfg(feature = "webgl")]
             OffscreenRenderingContext::WebGL2(context) => context.origin_is_clean(),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContext::WebGPU(context) => context.origin_is_clean(),
             OffscreenRenderingContext::Detached => true,
         }
     }
@@ -430,6 +440,8 @@ impl CanvasContext for OffscreenRenderingContext {
             OffscreenRenderingContext::WebGL(context) => context.size(),
             #[cfg(feature = "webgl")]
             OffscreenRenderingContext::WebGL2(context) => context.size(),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContext::WebGPU(context) => context.size(),
             OffscreenRenderingContext::Detached => Size2D::default(),
         }
     }
@@ -442,6 +454,8 @@ impl CanvasContext for OffscreenRenderingContext {
             OffscreenRenderingContext::WebGL(context) => context.mark_as_dirty(),
             #[cfg(feature = "webgl")]
             OffscreenRenderingContext::WebGL2(context) => context.mark_as_dirty(),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContext::WebGPU(context) => context.mark_as_dirty(),
             OffscreenRenderingContext::Detached => {},
         }
     }
@@ -454,6 +468,8 @@ impl CanvasContext for OffscreenRenderingContext {
             OffscreenRenderingContext::WebGL(context) => context.onscreen(),
             #[cfg(feature = "webgl")]
             OffscreenRenderingContext::WebGL2(context) => context.onscreen(),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContext::WebGPU(context) => context.onscreen(),
             OffscreenRenderingContext::Detached => false,
         }
     }

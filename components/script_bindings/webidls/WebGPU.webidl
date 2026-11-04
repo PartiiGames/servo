@@ -1241,8 +1241,18 @@ dictionary GPUCanvasConfiguration {
     required GPUTextureFormat format;
     GPUTextureUsageFlags usage = 0x10;  // GPUTextureUsage.RENDER_ATTACHMENT
     sequence<GPUTextureFormat> viewFormats = [];
-    // PredefinedColorSpace colorSpace = "srgb"; // TODO
+    PredefinedColorSpace colorSpace = "srgb";
+    GPUCanvasToneMapping toneMapping = {};
     GPUCanvasAlphaMode alphaMode = "opaque";
+};
+
+enum GPUCanvasToneMappingMode {
+    "standard",
+    "extended",
+};
+
+dictionary GPUCanvasToneMapping {
+    GPUCanvasToneMappingMode mode = "standard";
 };
 
 enum GPUDeviceLostReason {

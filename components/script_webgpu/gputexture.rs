@@ -66,6 +66,9 @@ pub struct GPUTexture<D: DomTypes> {
     dimension: GPUTextureDimension,
     format: GPUTextureFormat,
     texture_usage: u32,
+    /// What `usage` returns: `texture_usage`, except for a canvas's current texture, which
+    /// is created with COPY_SRC (for presentation) but reports the configured usage.
+    reported_usage: std::cell::Cell<u32>,
     droppable: DroppableGPUTexture,
     default_view: MutNullableDom<GPUTextureView<D>>,
 }
@@ -94,6 +97,7 @@ impl<D: Equivalence> GPUTexture<D> {
             dimension,
             format,
             texture_usage,
+            reported_usage: std::cell::Cell::new(texture_usage),
             droppable: DroppableGPUTexture { channel, texture },
             default_view: MutNullableDom::new(None),
         }
@@ -141,6 +145,11 @@ where
 {
     pub fn id(&self) -> WebGPUTexture {
         self.droppable.texture
+    }
+
+    /// See `reported_usage`.
+    pub fn set_reported_usage(&self, usage: u32) {
+        self.reported_usage.set(usage);
     }
 
     pub fn wgpu_texture_descriptor(&self) -> TextureDescriptor<'static> {
@@ -338,6 +347,6 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gputexture-usage>
     fn Usage(&self) -> u32 {
-        self.texture_usage
+        self.reported_usage.get()
     }
 }

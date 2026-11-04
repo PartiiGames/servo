@@ -70,13 +70,56 @@ struct MappedBuffer {
     image_size: Size2D<u32>,
     image_format: ImageFormat,
     is_opaque: bool,
+    /// For an rgba16float canvas: the mapped data converted to 8-bit pixels (with the
+    /// 8-bit stride), which is what WebRender and snapshots read.
+    converted: Option<Vec<u8>>,
 }
 
 // Mapped buffer can be shared between safely (it's read-only)
 unsafe impl Send for MappedBuffer {}
 
+/// An f16 colour channel as a byte: clamped to [0, 1], as for a canvas with the
+/// "standard" tone mapping (NaN and negatives become 0).
+fn f16_channel_to_u8(bits: u16) -> u8 {
+    let negative = bits & 0x8000 != 0;
+    let exponent = ((bits >> 10) & 0x1f) as i32;
+    let mantissa = (bits & 0x3ff) as f32;
+    let value = match exponent {
+        0 => mantissa / 1024.0 / 16384.0,
+        0x1f if mantissa != 0.0 => return 0,
+        0x1f => f32::INFINITY,
+        _ => (1.0 + mantissa / 1024.0) * 2f32.powi(exponent - 15),
+    };
+    if negative {
+        return 0;
+    }
+    (value.min(1.0) * 255.0).round() as u8
+}
+
+/// Converts rgba16float rows (`copy_stride` apart) to RGBA8 rows (`stride` apart).
+fn convert_half_float_rows(
+    data: &[u8],
+    size: Size2D<u32>,
+    copy_stride: u32,
+    stride: u32,
+) -> Vec<u8> {
+    let mut out = vec![0; stride as usize * size.height as usize];
+    for row in 0..size.height as usize {
+        let src = &data[row * copy_stride as usize..];
+        let dst = &mut out[row * stride as usize..];
+        for i in 0..size.width as usize * 4 {
+            let bits = u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]);
+            dst[i] = f16_channel_to_u8(bits);
+        }
+    }
+    out
+}
+
 impl MappedBuffer {
-    const fn slice(&'_ self) -> &'_ [u8] {
+    fn slice(&'_ self) -> &'_ [u8] {
+        if let Some(converted) = &self.converted {
+            return converted;
+        }
         // Safety: Pointer is from wgpu, and we only use it here
         unsafe { std::slice::from_raw_parts(self.data.as_ptr(), self.len as usize) }
     }
@@ -211,7 +254,7 @@ impl StagingBuffer {
             buffer: self.buffer_id,
             layout: TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(config.stride()),
+                bytes_per_row: Some(config.copy_stride()),
                 rows_per_image: None,
             },
         };
@@ -769,6 +812,18 @@ impl crate::WGPU {
                                 Some(buffer.size),
                             )
                         }) {
+                            // Safety: the range wgpu just mapped for us, read-only.
+                            let converted = config.half_float.then(|| {
+                                let raw = unsafe {
+                                    std::slice::from_raw_parts(data.as_ptr(), len as usize)
+                                };
+                                convert_half_float_rows(
+                                    raw,
+                                    config.size,
+                                    config.copy_stride(),
+                                    config.stride(),
+                                )
+                            });
                             StagingBufferState::Mapped(MappedBuffer {
                                 buffer,
                                 data,
@@ -776,6 +831,7 @@ impl crate::WGPU {
                                 image_size: config.size,
                                 image_format: config.format,
                                 is_opaque: config.is_opaque,
+                                converted,
                             })
                         } else {
                             StagingBufferState::Available(buffer)

@@ -25,10 +25,12 @@ use webrender_api::{ImageFormat, ImageKey};
 
 use super::gputexture::GPUTexture;
 use crate::canvas_context::{CanvasContext, CanvasHelpers, HTMLCanvasElementOrOffscreenCanvas};
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::PredefinedColorSpace;
 use crate::dom::bindings::codegen::Bindings::GPUCanvasContextBinding::GPUCanvasContextMethods;
 use crate::dom::bindings::codegen::Bindings::WebGPUBinding::GPUTexture_Binding::GPUTextureMethods;
 use crate::dom::bindings::codegen::Bindings::WebGPUBinding::{
-    GPUCanvasAlphaMode, GPUCanvasConfiguration as RootedGPUCanvasConfiguration, GPUExtent3D,
+    GPUCanvasAlphaMode, GPUCanvasConfiguration as RootedGPUCanvasConfiguration,
+    GPUCanvasToneMapping, GPUCanvasToneMappingMode, GPUExtent3D,
     GPUExtent3DDict, GPUObjectDescriptorBase, GPUTextureDescriptor, GPUTextureDimension,
 };
 use crate::dom::bindings::codegen::UnionTypes::HTMLCanvasElementOrOffscreenCanvas as RootedHTMLCanvasElementOrOffscreenCanvas;
@@ -38,14 +40,27 @@ use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::USVString;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlcanvaselement::HTMLCanvasElement;
+use crate::dom::offscreencanvas::OffscreenCanvas;
 use crate::dom::webgpu::gpudevice::GPUDevice;
+
+/// Whether `usage` only has known bits and isn't empty: then COPY_SRC can be added to the
+/// canvas texture without hiding a validation error the configured usage should cause.
+fn usage_is_valid_for_copy_src(usage: u32) -> bool {
+    let known = GPUTextureUsageConstants::COPY_SRC |
+        GPUTextureUsageConstants::COPY_DST |
+        GPUTextureUsageConstants::TEXTURE_BINDING |
+        GPUTextureUsageConstants::STORAGE_BINDING |
+        GPUTextureUsageConstants::RENDER_ATTACHMENT |
+        GPUTextureUsageConstants::TRANSIENT_ATTACHMENT;
+    usage != 0 && usage & !known == 0
+}
 
 /// <https://gpuweb.github.io/gpuweb/#supported-context-formats>
 fn supported_context_format(format: GPUTextureFormat) -> bool {
-    // TODO: GPUTextureFormat::Rgba16float
+    // rgba16float is presented as RGBA8 (clamped to [0, 1], the "standard" tone mapping).
     matches!(
         format,
-        GPUTextureFormat::Bgra8unorm | GPUTextureFormat::Rgba8unorm
+        GPUTextureFormat::Bgra8unorm | GPUTextureFormat::Rgba8unorm | GPUTextureFormat::Rgba16float
     )
 }
 
@@ -74,6 +89,9 @@ impl Drop for DroppableGPUCanvasContext {
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 struct GPUCanvasConfiguration {
     alpha_mode: GPUCanvasAlphaMode,
+    /// Kept so getConfiguration() returns it; the image is shown as sRGB either way.
+    color_space: PredefinedColorSpace,
+    tone_mapping: GPUCanvasToneMappingMode,
     device: Dom<GPUDevice>,
     format: GPUTextureFormat,
     usage: u32,
@@ -84,6 +102,8 @@ impl From<&RootedGPUCanvasConfiguration> for GPUCanvasConfiguration {
     fn from(value: &RootedGPUCanvasConfiguration) -> GPUCanvasConfiguration {
         GPUCanvasConfiguration {
             alpha_mode: value.alphaMode,
+            color_space: value.colorSpace,
+            tone_mapping: value.toneMapping.mode,
             device: value.device.as_traced(),
             format: value.format,
             usage: value.usage,
@@ -96,6 +116,10 @@ impl GPUCanvasConfiguration {
     fn root(&self) -> RootedGPUCanvasConfiguration {
         RootedGPUCanvasConfiguration {
             alphaMode: self.alpha_mode,
+            colorSpace: self.color_space,
+            toneMapping: GPUCanvasToneMapping {
+                mode: self.tone_mapping,
+            },
             device: self.device.as_rooted(),
             format: self.format,
             usage: self.usage,
@@ -174,6 +198,24 @@ impl GPUCanvasContext {
             global,
         )
     }
+
+    /// A context for an OffscreenCanvas, in a Window or a worker.
+    pub(crate) fn new_for_offscreen_canvas(
+        cx: &mut JSContext,
+        global: &GlobalScope,
+        canvas: &OffscreenCanvas,
+        channel: WebGPU,
+    ) -> DomRoot<Self> {
+        reflect_weak_referenceable_dom_object(
+            cx,
+            Rc::new(GPUCanvasContext::new_inherited(
+                global,
+                HTMLCanvasElementOrOffscreenCanvas::OffscreenCanvas(Dom::from_ref(canvas)),
+                channel,
+            )),
+            global,
+        )
+    }
 }
 
 // Abstract ops from spec
@@ -225,9 +267,8 @@ impl GPUCanvasContext {
                 depthOrArrayLayers: 1,
             }),
             format: configuration.format,
-            // We need to add `COPY_SRC` so we can copy texture to presentation buffer
-            // causes FAIL on webgpu:web_platform,canvas,configure:usage:*
-            usage: configuration.usage | GPUTextureUsageConstants::COPY_SRC,
+            // The real texture also gets COPY_SRC, for presentation: see GetCurrentTexture.
+            usage: configuration.usage,
             viewFormats: configuration.viewFormats.clone(),
             // All other members set to their defaults.
             mipLevelCount: 1,
@@ -283,11 +324,12 @@ impl GPUCanvasContext {
             queue_id: configuration.device.queue_id().0,
             format: match configuration.format {
                 GPUTextureFormat::Bgra8unorm => ImageFormat::BGRA8,
-                GPUTextureFormat::Rgba8unorm => ImageFormat::RGBA8,
+                GPUTextureFormat::Rgba8unorm | GPUTextureFormat::Rgba16float => ImageFormat::RGBA8,
                 _ => unreachable!("Configure method should set valid texture format"),
             },
             is_opaque: matches!(configuration.alpha_mode, GPUCanvasAlphaMode::Opaque),
             size: self.size(),
+            half_float: configuration.format == GPUTextureFormat::Rgba16float,
         })
     }
 
@@ -326,8 +368,10 @@ impl CanvasContext for GPUCanvasContext {
         }
     }
 
+    /// After transferToImageBitmap: the canvas gets a new, cleared drawing buffer.
+    /// <https://gpuweb.github.io/gpuweb/#abstract-opdef-replace-the-drawing-buffer>
     fn reset_bitmap(&self) {
-        warn!("The GPUCanvasContext 'reset_bitmap' is not implemented yet");
+        self.replace_drawing_buffer();
     }
 
     /// <https://gpuweb.github.io/gpuweb/#ref-for-abstract-opdef-get-a-copy-of-the-image-contents-of-a-context%E2%91%A5>
@@ -450,8 +494,8 @@ impl GPUCanvasContextMethods<crate::DomTypeHolder> for GPUCanvasContext {
             )));
         };
         // 2. Assert this.[[textureDescriptor]] is not null.
-        let texture_descriptor = self.texture_descriptor.borrow();
-        let texture_descriptor = texture_descriptor.as_ref().unwrap();
+        let texture_descriptor_ref = self.texture_descriptor.borrow();
+        let texture_descriptor = texture_descriptor_ref.as_ref().unwrap();
         // 3. Let device be this.[[configuration]].device.
         let device = &configuration.device;
         let current_texture = if let Some(current_texture) = self.current_texture.get() {
@@ -462,7 +506,22 @@ impl GPUCanvasContextMethods<crate::DomTypeHolder> for GPUCanvasContext {
             self.replace_drawing_buffer();
             // 4.2. Set this.[[currentTexture]] to the result of calling device.createTexture() with this.[[textureDescriptor]],
             // except with the GPUTexture’s underlying storage pointing to this.[[drawingBuffer]].
-            let current_texture = device.CreateTexture(cx, texture_descriptor)?;
+            // Presentation copies the texture out, so it also gets COPY_SRC, unless the
+            // configured usage is invalid (then creating it must fail validation as is);
+            // it still reports the configured usage.
+            let configured_usage = texture_descriptor.usage;
+            let current_texture = if usage_is_valid_for_copy_src(configured_usage) {
+                drop(texture_descriptor_ref);
+                let mut descriptor = self.texture_descriptor.borrow_mut();
+                let descriptor = descriptor.as_mut().unwrap();
+                descriptor.usage |= GPUTextureUsageConstants::COPY_SRC;
+                let result = device.CreateTexture(cx, descriptor);
+                descriptor.usage = configured_usage;
+                result?
+            } else {
+                device.CreateTexture(cx, texture_descriptor)?
+            };
+            current_texture.set_reported_usage(configured_usage);
             self.current_texture.set(Some(&current_texture));
 
             // The content of the texture is the content of the canvas.

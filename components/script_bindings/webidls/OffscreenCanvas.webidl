@@ -9,6 +9,7 @@ typedef (OffscreenCanvasRenderingContext2D
   or WebGLRenderingContext
   or WebGL2RenderingContext
   // skip-unless CARGO_FEATURE_WEBGL end
+  or GPUCanvasContext
 ) OffscreenRenderingContext;
 
 dictionary ImageEncodeOptions {
@@ -23,8 +24,9 @@ enum OffscreenRenderingContextId {
   "webgl",
   "webgl2",
   "experimental-webgl",
-  "experimental-webgl2"
+  "experimental-webgl2",
   // skip-unless CARGO_FEATURE_WEBGL end
+  "webgpu"
 };
 
 [Exposed=(Window,Worker), Transferable, Pref="dom_offscreen_canvas_enabled"]

@@ -801,6 +801,22 @@ impl CanvasState {
                         self.state.borrow().transform,
                     ));
                 },
+                #[cfg(feature = "webgpu")]
+                OffscreenRenderingContext::WebGPU(ref context) => {
+                    let Some(snapshot) = context.get_image_data() else {
+                        return Ok(());
+                    };
+
+                    self.send_canvas_command(CanvasCommand::DrawImage(
+                        snapshot.to_shared(),
+                        dest_rect,
+                        source_rect,
+                        smoothing_enabled,
+                        self.state.borrow().shadow_options(),
+                        self.state.borrow().composition_options(),
+                        self.state.borrow().transform,
+                    ));
+                },
                 OffscreenRenderingContext::Detached => return Err(Error::InvalidState(None)),
             }
         } else {
@@ -946,12 +962,44 @@ impl CanvasState {
                                 self.state.borrow().transform,
                             ));
                         },
+                        #[cfg(feature = "webgpu")]
+                        OffscreenRenderingContext::WebGPU(ref context) => {
+                            let Some(snapshot) = context.get_image_data() else {
+                                return Ok(());
+                            };
+
+                            self.send_canvas_command(CanvasCommand::DrawImage(
+                                snapshot.to_shared(),
+                                dest_rect,
+                                source_rect,
+                                smoothing_enabled,
+                                self.state.borrow().shadow_options(),
+                                self.state.borrow().composition_options(),
+                                self.state.borrow().transform,
+                            ));
+                        },
                         OffscreenRenderingContext::Detached => {
                             return Err(Error::InvalidState(None));
                         },
                     }
                 },
-                _ => return Err(Error::InvalidState(None)),
+                // WebGL, WebGL2 and WebGPU canvases: draw a copy of their image contents
+                // (the drawing buffer / current texture), as for the contexts above.
+                ref other => {
+                    let Some(snapshot) = other.get_image_data() else {
+                        return Ok(());
+                    };
+
+                    self.send_canvas_command(CanvasCommand::DrawImage(
+                        snapshot.to_shared(),
+                        dest_rect,
+                        source_rect,
+                        smoothing_enabled,
+                        self.state.borrow().shadow_options(),
+                        self.state.borrow().composition_options(),
+                        self.state.borrow().transform,
+                    ));
+                },
             }
         } else {
             self.send_canvas_command(CanvasCommand::DrawEmptyImage(

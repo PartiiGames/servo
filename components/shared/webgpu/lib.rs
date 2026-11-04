@@ -107,19 +107,34 @@ pub struct Adapter {
 pub struct ContextConfiguration {
     pub device_id: DeviceId,
     pub queue_id: QueueId,
+    /// The 8-bit format WebRender and snapshots see.
     pub format: ImageFormat,
     pub is_opaque: bool,
     pub size: Size2D<u32>,
+    /// The canvas texture is rgba16float: it is copied out as 8 bytes per pixel and
+    /// converted to `format` (RGBA8) when the staging buffer is mapped.
+    pub half_float: bool,
 }
 
 impl ContextConfiguration {
+    /// Row stride of the image WebRender and snapshots read (8-bit pixels).
     pub fn stride(&self) -> u32 {
         (self.size.width * self.format.bytes_per_pixel() as u32)
             .next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT)
     }
 
+    /// Row stride of the texture-to-buffer copy (8 bytes per pixel for rgba16float).
+    pub fn copy_stride(&self) -> u32 {
+        let bytes_per_pixel = if self.half_float {
+            8
+        } else {
+            self.format.bytes_per_pixel() as u32
+        };
+        (self.size.width * bytes_per_pixel).next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT)
+    }
+
     pub fn buffer_size(&self) -> u64 {
-        self.stride() as u64 * self.size.height as u64
+        self.copy_stride() as u64 * self.size.height as u64
     }
 }
 

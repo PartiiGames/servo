@@ -23,6 +23,8 @@ use servo_base::Epoch;
 use servo_base::id::{OffscreenCanvasId, OffscreenCanvasIndex};
 #[cfg(feature = "webgl")]
 use servo_canvas_traits::webgl::{GLContextAttributes, WebGLVersion};
+#[cfg(feature = "webgpu")]
+use servo_constellation_traits::ScriptToConstellationMessage;
 use servo_constellation_traits::{BlobImpl, TransferableOffscreenCanvas};
 use webrender_api::ImageKey;
 
@@ -56,6 +58,8 @@ use crate::dom::offscreencanvasrenderingcontext2d::OffscreenCanvasRenderingConte
 use crate::dom::promise::Promise;
 #[cfg(feature = "webgl")]
 use crate::dom::types::WebGLRenderingContext;
+#[cfg(feature = "webgpu")]
+use crate::dom::webgpu::gpucanvascontext::GPUCanvasContext;
 #[cfg(feature = "webgl")]
 use crate::dom::webgl::webgl2renderingcontext::WebGL2RenderingContext;
 use crate::tasks::task_source::SendableTaskSource;
@@ -365,6 +369,35 @@ impl OffscreenCanvas {
         Some(context)
     }
 
+    /// <https://gpuweb.github.io/gpuweb/#canvas-getcontext>, for an OffscreenCanvas in a
+    /// Window or a worker.
+    #[cfg(feature = "webgpu")]
+    fn get_or_init_webgpu_context(
+        &self,
+        cx: &mut js::context::JSContext,
+    ) -> Option<DomRoot<GPUCanvasContext>> {
+        if let Some(ctx) = self.context() {
+            return match *ctx {
+                OffscreenRenderingContext::WebGPU(ref ctx) => Some(DomRoot::from_ref(ctx)),
+                _ => None,
+            };
+        }
+        let (sender, receiver) = servo_base::generic_channel::channel()?;
+        let global = self.global();
+        let _ = global
+            .script_to_constellation_chan()
+            .send(ScriptToConstellationMessage::GetWebGPUChan(sender));
+        let channel = receiver.recv().ok()??;
+        let context = GPUCanvasContext::new_for_offscreen_canvas(cx, &global, self, channel);
+        *self.context.safe_borrow_mut(cx.no_gc()) =
+            Some(OffscreenRenderingContext::WebGPU(Dom::from_ref(&*context)));
+        // With a placeholder canvas element, presenting updates the image it shows.
+        if let Some(image_key) = self.placeholder_image_key() {
+            context.set_image_key(image_key);
+        }
+        Some(context)
+    }
+
     pub(crate) fn placeholder(&self) -> Option<DomRoot<HTMLCanvasElement>> {
         self.placeholder
             .as_ref()
@@ -396,6 +429,8 @@ impl OffscreenCanvas {
             Some(OffscreenRenderingContext::Context2d(_)) => {},
             #[cfg(feature = "webgl")]
             Some(OffscreenRenderingContext::WebGL(_) | OffscreenRenderingContext::WebGL2(_)) => {},
+            #[cfg(feature = "webgpu")]
+            Some(OffscreenRenderingContext::WebGPU(_)) => {},
             _ => return,
         }
         let global = self.global();
@@ -431,6 +466,12 @@ impl OffscreenCanvas {
             Some(OffscreenRenderingContext::WebGL2(context)) => {
                 self.placeholder_image_key().is_some() &&
                     context.base_context().swap_buffers(Some(epoch))
+            },
+            // Presenting copies the current texture into the placeholder's image (tagged
+            // `epoch`) and expires it, as "update the rendering" does for a canvas element.
+            #[cfg(feature = "webgpu")]
+            Some(OffscreenRenderingContext::WebGPU(context)) => {
+                self.placeholder_image_key().is_some() && context.update_rendering(epoch)
             },
             _ => false,
         };
@@ -632,6 +673,12 @@ impl OffscreenCanvasMethods<crate::DomTypeHolder> for OffscreenCanvas {
             OffscreenRenderingContextId::Experimental_webgl2 => Ok(self
                 .get_or_init_webgl2_context(cx, options)
                 .map(RootedOffscreenRenderingContext::WebGL2RenderingContext)),
+            #[cfg(feature = "webgpu")]
+            OffscreenRenderingContextId::Webgpu => Ok(self
+                .get_or_init_webgpu_context(cx)
+                .map(RootedOffscreenRenderingContext::GPUCanvasContext)),
+            #[cfg(not(feature = "webgpu"))]
+            OffscreenRenderingContextId::Webgpu => Ok(None),
         }
     }
 
