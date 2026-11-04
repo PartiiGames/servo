@@ -422,16 +422,30 @@ impl Painter {
             None,
             time_profiler_channel.clone(),
             || {
+                let stats_on = paint_stats::enabled();
+                let t0 = std::time::Instant::now();
                 if let Some(renderer) = self.webrender_renderer.as_mut() {
                     renderer.update();
                 }
+                let t1 = std::time::Instant::now();
 
                 // Paint the scene.
                 // TODO(gw): Take notice of any errors the renderer returns!
                 self.clear_background();
+                let mut results = None;
                 if let Some(renderer) = self.webrender_renderer.as_mut() {
                     let size = self.rendering_context.size2d().to_i32();
-                    renderer.render(size, 0 /* buffer_age */).ok();
+                    results = renderer.render(size, 0 /* buffer_age */).ok();
+                }
+                if stats_on {
+                    let t2 = std::time::Instant::now();
+                    // PARTII_PAINT_STATS=finish: wait for the GL to finish this frame, so the
+                    // rasterizer's time shows apart from WebRender's submission.
+                    if paint_stats::finish() {
+                        self.webrender_gl.finish();
+                    }
+                    let t3 = std::time::Instant::now();
+                    paint_stats::record(t1 - t0, t2 - t1, t3 - t2, results.as_ref());
                 }
             }
         );
@@ -1670,4 +1684,78 @@ impl SceneBuilderHooks for BoostWebRenderThread {
     fn poke(&self) {}
 
     fn deregister(&self) {}
+}
+
+/// Partii (perf stream): per-frame paint timing and WebRender stats, logged to stderr every 2 s
+/// when PARTII_PAINT_STATS is set (`finish` also waits for the GL after each frame).
+mod paint_stats {
+    use std::cell::RefCell;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    fn mode() -> &'static Option<String> {
+        static MODE: OnceLock<Option<String>> = OnceLock::new();
+        MODE.get_or_init(|| std::env::var("PARTII_PAINT_STATS").ok())
+    }
+    pub(super) fn enabled() -> bool {
+        mode().is_some()
+    }
+    pub(super) fn finish() -> bool {
+        mode().as_deref() == Some("finish")
+    }
+
+    #[derive(Default)]
+    struct Acc {
+        since: Option<Instant>,
+        frames: u32,
+        update: Duration,
+        render: Duration,
+        finish: Duration,
+        draws: usize,
+        color_targets: usize,
+        alpha_targets: usize,
+        upload_mb: f64,
+        frame_build_ms: f64,
+    }
+    thread_local!(static ACC: RefCell<Acc> = RefCell::default());
+
+    pub(super) fn record(
+        update: Duration,
+        render: Duration,
+        finish: Duration,
+        results: Option<&webrender::RenderResults>,
+    ) {
+        ACC.with_borrow_mut(|a| {
+            let now = Instant::now();
+            let since = *a.since.get_or_insert(now);
+            a.frames += 1;
+            a.update += update;
+            a.render += render;
+            a.finish += finish;
+            if let Some(r) = results {
+                a.draws += r.stats.total_draw_calls;
+                a.color_targets += r.stats.color_target_count;
+                a.alpha_targets += r.stats.alpha_target_count;
+                a.upload_mb += r.stats.texture_upload_mb;
+                a.frame_build_ms += r.stats.frame_build_time;
+            }
+            if now - since >= Duration::from_secs(2) {
+                let n = a.frames.max(1) as f64;
+                let ms = |d: Duration| d.as_secs_f64() * 1000.0 / n;
+                eprintln!(
+                    "partii-paint-stats: frames={} update_ms={:.2} render_ms={:.2} finish_ms={:.2} draws={:.1} color_targets={:.2} alpha_targets={:.2} upload_mb={:.3} frame_build_ms={:.2}",
+                    a.frames,
+                    ms(a.update),
+                    ms(a.render),
+                    ms(a.finish),
+                    a.draws as f64 / n,
+                    a.color_targets as f64 / n,
+                    a.alpha_targets as f64 / n,
+                    a.upload_mb / n,
+                    a.frame_build_ms / n,
+                );
+                *a = Acc::default();
+            }
+        });
+    }
 }
