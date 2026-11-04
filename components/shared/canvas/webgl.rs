@@ -670,7 +670,7 @@ pub enum WebGLCommand {
     GetQueryState(GenericSender<u32>, WebGLQueryId, u32),
     GenerateSampler(GenericSender<WebGLSamplerId>),
     DeleteSampler(WebGLSamplerId),
-    BindSampler(u32, WebGLSamplerId),
+    BindSampler(u32, Option<WebGLSamplerId>),
     SetSamplerParameterFloat(WebGLSamplerId, u32, f32),
     SetSamplerParameterInt(WebGLSamplerId, u32, i32),
     GetSamplerParameterFloat(WebGLSamplerId, u32, GenericSender<f32>),
