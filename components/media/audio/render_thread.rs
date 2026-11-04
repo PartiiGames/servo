@@ -28,6 +28,7 @@ use crate::media_stream_source_node::MediaStreamSourceNode;
 use crate::offline_sink::OfflineAudioSink;
 use crate::oscillator_node::OscillatorNode;
 use crate::panner_node::PannerNode;
+use crate::render_stats::RenderStats;
 use crate::sink::{AudioSink, AudioSinkError};
 use crate::stereo_panner::StereoPannerNode;
 use crate::wave_shaper_node::WaveShaperNode;
@@ -45,6 +46,34 @@ thread_local! {
 /// to tear its JS runtime down in order rather than leaving it to thread-local destructors.
 pub fn on_render_thread_exit(hook: Box<dyn FnOnce()>) {
     EXIT_HOOKS.with(|hooks| hooks.borrow_mut().push(hook));
+}
+
+thread_local! {
+    static IDLE_HOOKS: std::cell::RefCell<Vec<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Register `hook` to run on the current render thread whenever it is about to wait with the
+/// sink full (so the work is covered by the buffered audio) or while suspended. Call it from a
+/// [`RenderThreadTask`]. Hooks must be cheap when they have nothing to do. The AudioWorklet runs
+/// its garbage collections here rather than letting them happen inside `process()`.
+pub fn on_render_thread_idle(hook: Box<dyn FnMut()>) {
+    IDLE_HOOKS.with(|hooks| hooks.borrow_mut().push(hook));
+}
+
+fn run_idle_hooks() {
+    // Take the hooks out while they run, so a hook may register another.
+    let mut hooks = IDLE_HOOKS.with(|hooks| std::mem::take(&mut *hooks.borrow_mut()));
+    if hooks.is_empty() {
+        return;
+    }
+    for hook in hooks.iter_mut() {
+        hook();
+    }
+    IDLE_HOOKS.with(|h| {
+        let mut h = h.borrow_mut();
+        hooks.append(&mut h);
+        *h = hooks;
+    });
 }
 
 fn run_exit_hooks() {
@@ -126,6 +155,13 @@ impl AudioSink for Sink {
                 sink.stop().unwrap();
                 Ok(())
             },
+        }
+    }
+
+    fn underrun_stats(&self) -> Option<(u64, u64)> {
+        match *self {
+            Sink::RealTime(ref sink) => sink.underrun_stats(),
+            Sink::Offline(_) => None,
         }
     }
 
@@ -333,6 +369,7 @@ impl AudioRenderThread {
 
     fn event_loop(&mut self, event_queue: Receiver<AudioRenderThreadMsg>) {
         let sample_rate = self.sample_rate;
+        let mut stats = RenderStats::new(sample_rate, matches!(self.sink, Sink::RealTime(_)));
         let handle_msg = move |context: &mut Self, msg: AudioRenderThreadMsg| -> bool {
             let mut break_loop = false;
             match msg {
@@ -398,6 +435,9 @@ impl AudioRenderThread {
                 // we wait for messages coming from the control thread or
                 // the audio sink. The audio sink will notify whenever it
                 // needs more data.
+                // Embedder work that would glitch inside a quantum goes here, with the
+                // buffer full, unless a message is already waiting.
+                run_idle_hooks();
                 if event_queue.recv().is_ok_and(|msg| handle_msg(self, msg)) {
                     break;
                 }
@@ -418,7 +458,11 @@ impl AudioRenderThread {
 
                 // push into the audio sink the result of processing a
                 // render quantum.
+                let started = stats.enabled().then(std::time::Instant::now);
                 let data = self.process();
+                if let Some(started) = started {
+                    stats.record(started.elapsed(), self.sink.underrun_stats());
+                }
                 if self.sink.push_data(data).is_ok() {
                     // increment current frame by the render quantum size.
                     self.current_frame += FRAMES_PER_BLOCK;
@@ -428,5 +472,6 @@ impl AudioRenderThread {
                 }
             }
         }
+        stats.finish();
     }
 }
