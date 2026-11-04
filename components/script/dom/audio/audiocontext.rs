@@ -164,8 +164,11 @@ impl AudioContextMethods<crate::DomTypeHolder> for AudioContext {
             return promise;
         }
 
-        // Step 3.
-        if self.context.State() == AudioContextState::Suspended {
+        // Step 3. The [[control thread state]] (set synchronously by suspend()/resume()), not
+        // the state attribute, which a queued task updates later: with the attribute,
+        // `suspend(); resume();` saw "running", skipped the resume, and the context stayed
+        // suspended.
+        if self.context.control_thread_state() == ProcessingState::Suspended {
             promise.resolve_native(cx, &());
             return promise;
         }

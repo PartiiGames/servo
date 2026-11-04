@@ -299,8 +299,12 @@ impl OfflineAudioContextMethods<crate::DomTypeHolder> for OfflineAudioContext {
         // > time or is greater than or equal to the total render duration or is scheduled by
         // > another suspend for the same time, then the promise is rejected with
         // > InvalidStateError.
+        //
+        // Deviation, as in Chrome and Firefox (and WPT, e.g. audioworkletglobalscope-timing-info):
+        // a suspend at the current frame is allowed when that quantum hasn't been rendered yet,
+        // e.g. suspend(0) before startRendering(); only frames already rendered are rejected.
         if *suspend_time < 0. ||
-            frame <= current_frame.round() ||
+            frame < current_frame.round() ||
             frame >= self.length as f64 ||
             self.suspend_frames.borrow().contains(&(frame as u64)) ||
             self.context.State() == AudioContextState::Closed
