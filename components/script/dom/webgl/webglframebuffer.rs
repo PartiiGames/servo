@@ -461,6 +461,19 @@ impl WebGLFramebuffer {
         if !is_supported {
             return self.status.set(constants::FRAMEBUFFER_UNSUPPORTED);
         }
+        // WebGL 2.0 5.x: one image attached at two colour attachment points is
+        // FRAMEBUFFER_UNSUPPORTED.
+        if self.webgl_version == WebGLVersion::WebGL2 {
+            let mut images = Vec::new();
+            for index in 0..self.colors.len() as u32 {
+                if let Some(image) = self.attached_image(constants::COLOR_ATTACHMENT0 + index) {
+                    if images.contains(&image) {
+                        return self.status.set(constants::FRAMEBUFFER_UNSUPPORTED);
+                    }
+                    images.push(image);
+                }
+            }
+        }
 
         let mut fb_size = None;
 
