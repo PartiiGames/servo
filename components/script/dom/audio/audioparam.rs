@@ -370,11 +370,16 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
                 *cancel_time
             )));
         }
-        // Events at or after cancelTime are removed (a curve that started before goes on).
-        self.events.borrow_mut().retain(|&(t, _)| t < *cancel_time);
+        // > Cancels all scheduled parameter changes with times greater than or equal to
+        // > cancelTime. [...] Any active automations whose automation event time is less than
+        // > cancelTime are also cancelled: so is a curve still running at cancelTime.
+        let cancel_time = *cancel_time;
+        self.events
+            .borrow_mut()
+            .retain(|&(t, d)| t < cancel_time && d.is_none_or(|d| t + d <= cancel_time));
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
-            UserAutomationEvent::CancelScheduledValues(*cancel_time),
+            UserAutomationEvent::CancelScheduledValues(cancel_time),
         ));
         Ok(DomRoot::from_ref(self))
     }
