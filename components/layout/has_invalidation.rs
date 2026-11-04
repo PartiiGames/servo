@@ -12,6 +12,8 @@
 //! - [`invalidate_for_insertion`] / [`invalidate_for_removal`]: called by script around DOM
 //!   mutations (layout never sees removals); they return the elements script must mark dirty.
 
+#![allow(unsafe_code)] // TElement::set_dirty_descendants (dirty bits, as Stylo's invalidator sets them)
+
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
@@ -24,7 +26,7 @@ use style::invalidation::element::relative_selector::{
     DomMutationOperation, RelativeSelectorInvalidator,
 };
 use style::invalidation::element::restyle_hints::RestyleHint;
-use style::selector_parser::SnapshotMap;
+use style::selector_parser::{Snapshot, SnapshotMap};
 use style::stylist::Stylist;
 use stylo_atoms::Atom;
 
@@ -92,7 +94,7 @@ fn take_invalidated() -> Vec<OpaqueNode> {
 }
 
 /// The classes added or removed, from the snapshot.
-fn classes_changed<E: TElement>(element: &E, snapshot: &impl ElementSnapshot) -> SmallVec<[Atom; 8]> {
+fn classes_changed<E: TElement>(element: &E, snapshot: &Snapshot) -> SmallVec<[Atom; 8]> {
     let mut changed = SmallVec::new();
     if !snapshot.class_changed() {
         return changed;
