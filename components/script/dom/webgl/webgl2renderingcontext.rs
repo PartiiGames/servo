@@ -839,6 +839,15 @@ impl WebGL2RenderingContext {
         }
         let array = array[src_offset..src_offset + array_size].to_vec();
 
+        // Zero-initialize the framebuffer's attachments first if they haven't been yet (WebGL
+        // does it lazily, on first use): otherwise the next draw or read does it and wipes what
+        // this clear wrote. An incomplete framebuffer is INVALID_FRAMEBUFFER_OPERATION.
+        if let Some(fb) = self.base.get_draw_framebuffer_slot().get() &&
+            let CompleteForRendering::Incomplete = fb.check_status_for_rendering()
+        {
+            return self.base.webgl_error(InvalidFramebufferOperation);
+        }
+
         self.base.send_command(msg(buffer, draw_buffer, array));
         self.mark_as_dirty();
     }
@@ -7423,6 +7432,12 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             self.clearbuffer_array_size(buffer, draw_buffer),
             return
         );
+        // As in clear_buffer: initialize the attachments before this clear, not after it.
+        if let Some(fb) = self.base.get_draw_framebuffer_slot().get() &&
+            let CompleteForRendering::Incomplete = fb.check_status_for_rendering()
+        {
+            return self.base.webgl_error(InvalidFramebufferOperation);
+        }
 
         self.base.send_command(WebGLCommand::ClearBufferfi(
             buffer,
