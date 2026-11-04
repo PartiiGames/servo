@@ -12,6 +12,7 @@ use servo_canvas_traits::webgl::{WebGLCommand, webgl_channel};
 
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
+use crate::dom::webgl::webgl2renderingcontext::IndexedBinding;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
@@ -58,12 +59,107 @@ impl Drop for DroppableWebGLTransformFeedback {
     }
 }
 
+/// Begin/pause state of a transform feedback object. The default transform
+/// feedback object (GL name 0) has no DOM object, so its state lives in the
+/// context; this struct is shared by both.
+#[derive(JSTraceable, MallocSizeOf)]
+pub(crate) struct TransformFeedbackState {
+    /// The indexed TRANSFORM_FEEDBACK_BUFFER bindings, which are per-object state. The
+    /// context keeps the bound object's bindings; these hold an object's bindings while
+    /// another one is bound.
+    saved_buffer_bindings: Box<[IndexedBinding]>,
+    is_active: Cell<bool>,
+    is_paused: Cell<bool>,
+    primitive_mode: Cell<u32>,
+    /// Vertices recorded since beginTransformFeedback, used for the
+    /// buffer-space check in draws (ES 3.0 2.15.2).
+    vertices_recorded: Cell<u64>,
+}
+
+impl TransformFeedbackState {
+    pub(crate) fn new(context: &WebGLRenderingContext) -> Self {
+        Self {
+            saved_buffer_bindings: (0..context.limits().max_transform_feedback_separate_attribs)
+                .map(|_| IndexedBinding::new())
+                .collect::<Vec<_>>()
+                .into(),
+            is_active: Default::default(),
+            is_paused: Default::default(),
+            primitive_mode: Default::default(),
+            vertices_recorded: Default::default(),
+        }
+    }
+
+    pub(crate) fn saved_buffer_bindings(&self) -> &[IndexedBinding] {
+        &self.saved_buffer_bindings
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.is_active.get()
+    }
+
+    pub(crate) fn is_paused(&self) -> bool {
+        self.is_paused.get()
+    }
+
+    pub(crate) fn is_active_unpaused(&self) -> bool {
+        self.is_active.get() && !self.is_paused.get()
+    }
+
+    pub(crate) fn primitive_mode(&self) -> u32 {
+        self.primitive_mode.get()
+    }
+
+    pub(crate) fn vertices_recorded(&self) -> u64 {
+        self.vertices_recorded.get()
+    }
+
+    pub(crate) fn add_vertices_recorded(&self, count: u64) {
+        self.vertices_recorded
+            .set(self.vertices_recorded.get().saturating_add(count));
+    }
+
+    pub(crate) fn begin(&self, context: &WebGLRenderingContext, primitive_mode: u32) {
+        if !self.is_active() {
+            context.send_command(WebGLCommand::BeginTransformFeedback(primitive_mode));
+            self.is_active.set(true);
+            self.is_paused.set(false);
+            self.primitive_mode.set(primitive_mode);
+            self.vertices_recorded.set(0);
+        }
+    }
+
+    pub(crate) fn end(&self, context: &WebGLRenderingContext) {
+        if self.is_active() {
+            if self.is_paused() {
+                context.send_command(WebGLCommand::ResumeTransformFeedback());
+            }
+            context.send_command(WebGLCommand::EndTransformFeedback());
+            self.is_active.set(false);
+            self.is_paused.set(false);
+        }
+    }
+
+    pub(crate) fn resume(&self, context: &WebGLRenderingContext) {
+        if self.is_active() && self.is_paused() {
+            context.send_command(WebGLCommand::ResumeTransformFeedback());
+            self.is_paused.set(false);
+        }
+    }
+
+    pub(crate) fn pause(&self, context: &WebGLRenderingContext) {
+        if self.is_active() && !self.is_paused() {
+            context.send_command(WebGLCommand::PauseTransformFeedback());
+            self.is_paused.set(true);
+        }
+    }
+}
+
 #[dom_struct]
 pub(crate) struct WebGLTransformFeedback {
     webgl_object: WebGLObject,
     has_been_bound: Cell<bool>,
-    is_active: Cell<bool>,
-    is_paused: Cell<bool>,
+    state: TransformFeedbackState,
     droppable: DroppableWebGLTransformFeedback,
 }
 
@@ -72,8 +168,7 @@ impl WebGLTransformFeedback {
         Self {
             webgl_object: WebGLObject::new_inherited(context),
             has_been_bound: Cell::new(false),
-            is_active: Cell::new(false),
-            is_paused: Cell::new(false),
+            state: TransformFeedbackState::new(context),
             droppable: DroppableWebGLTransformFeedback {
                 context: WeakRef::new(context),
                 id,
@@ -101,35 +196,8 @@ impl WebGLTransformFeedback {
         self.has_been_bound.set(true);
     }
 
-    pub(crate) fn begin(&self, context: &WebGLRenderingContext, primitive_mode: u32) {
-        if self.has_been_bound.get() && !self.is_active() {
-            context.send_command(WebGLCommand::BeginTransformFeedback(primitive_mode));
-            self.set_active(true);
-        }
-    }
-
-    pub(crate) fn end(&self, context: &WebGLRenderingContext) {
-        if self.has_been_bound.get() && self.is_active() {
-            if self.is_paused() {
-                context.send_command(WebGLCommand::ResumeTransformFeedback());
-            }
-            context.send_command(WebGLCommand::EndTransformFeedback());
-            self.set_active(false);
-        }
-    }
-
-    pub(crate) fn resume(&self, context: &WebGLRenderingContext) {
-        if self.is_active() && self.is_paused() {
-            context.send_command(WebGLCommand::ResumeTransformFeedback());
-            self.set_pause(false);
-        }
-    }
-
-    pub(crate) fn pause(&self, context: &WebGLRenderingContext) {
-        if self.is_active() && !self.is_paused() {
-            context.send_command(WebGLCommand::PauseTransformFeedback());
-            self.set_pause(true);
-        }
+    pub(crate) fn state(&self) -> &TransformFeedbackState {
+        &self.state
     }
 
     pub(crate) fn id(&self) -> u32 {
@@ -141,26 +209,10 @@ impl WebGLTransformFeedback {
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        self.is_active.get()
-    }
-
-    pub(crate) fn is_paused(&self) -> bool {
-        self.is_paused.get()
+        self.state.is_active()
     }
 
     pub(crate) fn delete(&self, operation_fallibility: Operation) {
         self.droppable.delete(operation_fallibility);
-    }
-
-    pub(crate) fn set_active(&self, value: bool) {
-        if self.is_valid() && self.has_been_bound.get() {
-            self.is_active.set(value);
-        }
-    }
-
-    pub(crate) fn set_pause(&self, value: bool) {
-        if self.is_valid() && self.is_active() {
-            self.is_active.set(value);
-        }
     }
 }

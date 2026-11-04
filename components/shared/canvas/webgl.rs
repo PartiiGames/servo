@@ -875,6 +875,8 @@ pub struct ProgramLinkInfo {
     pub transform_feedback_length: i32,
     /// The buffer mode used when transform feedback is active
     pub transform_feedback_mode: i32,
+    /// Bytes each transform feedback varying writes per vertex.
+    pub transform_feedback_varying_bytes: Box<[u32]>,
 }
 
 /// Description of a single active attribute.

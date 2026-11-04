@@ -78,20 +78,20 @@ use crate::dom::webgl::webglshader::WebGLShader;
 use crate::dom::webgl::webglshaderprecisionformat::WebGLShaderPrecisionFormat;
 use crate::dom::webgl::webglsync::WebGLSync;
 use crate::dom::webgl::webgltexture::{TexCompression, TexCompressionValidation, WebGLTexture};
-use crate::dom::webgl::webgltransformfeedback::WebGLTransformFeedback;
+use crate::dom::webgl::webgltransformfeedback::{TransformFeedbackState, WebGLTransformFeedback};
 use crate::dom::webgl::webgluniformlocation::WebGLUniformLocation;
 use crate::dom::webgl::webglvertexarrayobject::WebGLVertexArrayObject;
 
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 #[derive(JSTraceable, MallocSizeOf)]
-struct IndexedBinding {
+pub(crate) struct IndexedBinding {
     buffer: MutNullableDom<WebGLBuffer>,
     start: Cell<i64>,
     size: Cell<i64>,
 }
 
 impl IndexedBinding {
-    fn new() -> IndexedBinding {
+    pub(crate) fn new() -> IndexedBinding {
         IndexedBinding {
             buffer: MutNullableDom::new(None),
             start: Cell::new(0),
@@ -116,6 +116,9 @@ pub(crate) struct WebGL2RenderingContext {
     indexed_uniform_buffer_bindings: Box<[IndexedBinding]>,
     indexed_transform_feedback_buffer_bindings: Box<[IndexedBinding]>,
     current_transform_feedback: MutNullableDom<WebGLTransformFeedback>,
+    /// State of the default transform feedback object (bound when
+    /// `current_transform_feedback` is null).
+    default_transform_feedback: TransformFeedbackState,
     texture_pack_row_length: Cell<usize>,
     texture_pack_skip_pixels: Cell<usize>,
     texture_pack_skip_rows: Cell<usize>,
@@ -180,6 +183,7 @@ impl WebGL2RenderingContext {
             indexed_uniform_buffer_bindings,
             indexed_transform_feedback_buffer_bindings,
             current_transform_feedback: MutNullableDom::new(None),
+            default_transform_feedback: TransformFeedbackState::new(&base),
             texture_pack_row_length: Cell::new(0),
             texture_pack_skip_pixels: Cell::new(0),
             texture_pack_skip_rows: Cell::new(0),
@@ -1605,6 +1609,205 @@ impl WebGL2RenderingContext {
             _ => primary,
         };
         (primary, implementation)
+    }
+
+    /// Makes `to` the bound transform feedback object (None: the default one) in the
+    /// script-side mirror: the indexed TRANSFORM_FEEDBACK_BUFFER bindings are per-object
+    /// state, so the outgoing object's are saved (unless it is being deleted) and the
+    /// incoming object's restored.
+    fn switch_transform_feedback(&self, to: Option<&WebGLTransformFeedback>, save_current: bool) {
+        let copy = |from: &[IndexedBinding], into: &[IndexedBinding]| {
+            for (from, into) in from.iter().zip(into.iter()) {
+                into.buffer.set(from.buffer.get().as_deref());
+                into.start.set(from.start.get());
+                into.size.set(from.size.get());
+            }
+        };
+        if save_current {
+            self.with_current_transform_feedback(|tf| {
+                copy(
+                    &self.indexed_transform_feedback_buffer_bindings,
+                    tf.saved_buffer_bindings(),
+                )
+            });
+        }
+        self.current_transform_feedback.set(to);
+        self.with_current_transform_feedback(|tf| {
+            copy(
+                tf.saved_buffer_bindings(),
+                &self.indexed_transform_feedback_buffer_bindings,
+            )
+        });
+    }
+
+    /// Runs `f` on the state of the bound transform feedback object, or of the default
+    /// object when none is bound.
+    fn with_current_transform_feedback<R>(
+        &self,
+        f: impl FnOnce(&TransformFeedbackState) -> R,
+    ) -> R {
+        match self.current_transform_feedback.get() {
+            Some(tf) => f(tf.state()),
+            None => f(&self.default_transform_feedback),
+        }
+    }
+
+    /// Transform feedback checks for a draw (OpenGL ES 3.0.6 2.15.2): while recording, only
+    /// non-indexed draws in the begin primitive mode are allowed, and every bound buffer
+    /// (range) must hold all vertices recorded since beginTransformFeedback. Writing past
+    /// the end is left to the driver otherwise. Returns the vertices this draw records
+    /// (to count once it is issued), or None when nothing is recorded. Argument errors are
+    /// left to the base draw, which reports them first.
+    fn validate_transform_feedback_for_draw(
+        &self,
+        mode: u32,
+        count: i32,
+        primcount: i32,
+        indexed: bool,
+    ) -> WebGLResult<Option<u64>> {
+        let (recording, primitive_mode, recorded) = self.with_current_transform_feedback(|tf| {
+            (
+                tf.is_active_unpaused(),
+                tf.primitive_mode(),
+                tf.vertices_recorded(),
+            )
+        });
+        if !recording || count < 0 || primcount < 0 {
+            return Ok(None);
+        }
+        let vertices_per_primitive = match mode {
+            constants::POINTS => 1,
+            constants::LINES => 2,
+            constants::TRIANGLES => 3,
+            constants::LINE_STRIP |
+            constants::LINE_LOOP |
+            constants::TRIANGLE_STRIP |
+            constants::TRIANGLE_FAN => return Err(InvalidOperation),
+            _ => return Ok(None),
+        };
+        if indexed || mode != primitive_mode {
+            return Err(InvalidOperation);
+        }
+        let Some(program) = self.base.current_program() else {
+            return Ok(None);
+        };
+        let count = count as u64;
+        let vertices = (count - count % vertices_per_primitive) * primcount as u64;
+        let total = recorded.checked_add(vertices).ok_or(InvalidOperation)?;
+        for (index, stride) in program
+            .transform_feedback_buffer_strides()
+            .into_iter()
+            .enumerate()
+        {
+            let binding = self
+                .indexed_transform_feedback_buffer_bindings
+                .get(index)
+                .ok_or(InvalidOperation)?;
+            let buffer = binding.buffer.get().ok_or(InvalidOperation)?;
+            let mut available =
+                (buffer.capacity() as u64).saturating_sub(binding.start.get().max(0) as u64);
+            if binding.size.get() > 0 {
+                available = available.min(binding.size.get() as u64);
+            }
+            let needed = total.checked_mul(stride).ok_or(InvalidOperation)?;
+            if needed > available {
+                return Err(InvalidOperation);
+            }
+        }
+        Ok(Some(vertices))
+    }
+
+    /// WebGL 2.0 5.1: a buffer bound to one of the bound transform feedback object's
+    /// indexed binding points that the current program records into may not be read by a
+    /// draw at the same time, as an enabled vertex attribute array or as a uniform buffer
+    /// the program uses. While recording, it may not be bound anywhere else at all.
+    fn validate_transform_feedback_buffers_for_draw(&self, cx: &mut JSContext) -> WebGLResult<()> {
+        let Some(program) = self.base.current_program() else {
+            return Ok(());
+        };
+        if program.transform_feedback_varyings_length() <= 0 {
+            return Ok(());
+        }
+        let used = program.transform_feedback_buffer_strides().len();
+        let tf_buffers: Vec<_> = self
+            .indexed_transform_feedback_buffer_bindings
+            .iter()
+            .take(used)
+            .filter_map(|binding| binding.buffer.get())
+            .map(|buffer| buffer.id())
+            .collect();
+        if tf_buffers.is_empty() {
+            return Ok(());
+        }
+        let is_tf_buffer = |buffer: Option<&WebGLBuffer>| {
+            buffer.is_some_and(|buffer| tf_buffers.contains(&buffer.id()))
+        };
+        let vao = self.base.current_vao_webgl2(cx);
+        for attrib in program.active_attribs().iter() {
+            let Some(location) = attrib.location else {
+                continue;
+            };
+            if let Some(data) = vao.get_vertex_attrib(location) &&
+                data.enabled_as_array &&
+                is_tf_buffer(data.buffer.as_deref())
+            {
+                return Err(InvalidOperation);
+            }
+        }
+        for uniform in program.active_uniforms().iter() {
+            if let Some(index) = uniform.bind_index &&
+                let Some(binding) = self.indexed_uniform_buffer_bindings.get(index as usize) &&
+                is_tf_buffer(binding.buffer.get().as_deref())
+            {
+                return Err(InvalidOperation);
+            }
+        }
+        if self.with_current_transform_feedback(|tf| tf.is_active_unpaused()) {
+            let generic = [
+                self.base.array_buffer_slot().get(),
+                vao.element_array_buffer().get(),
+                self.bound_copy_read_buffer.get(),
+                self.bound_copy_write_buffer.get(),
+                self.bound_pixel_pack_buffer.get(),
+                self.bound_pixel_unpack_buffer.get(),
+                self.bound_uniform_buffer.get(),
+            ];
+            if generic.iter().any(|buffer| is_tf_buffer(buffer.as_deref())) ||
+                self.indexed_uniform_buffer_bindings
+                    .iter()
+                    .any(|binding| is_tf_buffer(binding.buffer.get().as_deref()))
+            {
+                return Err(InvalidOperation);
+            }
+        }
+        Ok(())
+    }
+
+    /// Issues a draw after the transform feedback checks, counting the recorded vertices
+    /// when the draw goes through.
+    fn draw_with_transform_feedback(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        count: i32,
+        primcount: i32,
+        indexed: bool,
+        draw: impl FnOnce(&mut JSContext) -> WebGLResult<()>,
+    ) {
+        handle_potential_webgl_error!(
+            self.base,
+            self.validate_transform_feedback_buffers_for_draw(cx),
+            return
+        );
+        let recorded = handle_potential_webgl_error!(
+            self.base,
+            self.validate_transform_feedback_for_draw(mode, count, primcount, indexed),
+            return
+        );
+        handle_potential_webgl_error!(self.base, draw(cx), return);
+        if let Some(vertices) = recorded {
+            self.with_current_transform_feedback(|tf| tf.add_vertices_recorded(vertices));
+        }
     }
 
     /// WebGL 2.0, 5.22 / GL ES 3.0, 2.11.2: each active sampler must sample a texture of its own
@@ -3413,7 +3616,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if !self.validate_sampler_types_for_draw() {
             return;
         }
-        self.base.DrawArrays(cx, mode, first, count)
+        self.draw_with_transform_feedback(cx, mode, count, 1, false, |cx| {
+            self.base.draw_arrays_instanced(cx, mode, first, count, 1)
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
@@ -3423,7 +3628,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if !self.validate_sampler_types_for_draw() {
             return;
         }
-        self.base.DrawElements(cx, mode, count, type_, offset)
+        self.draw_with_transform_feedback(cx, mode, count, 1, true, |cx| {
+            self.base
+                .draw_elements_instanced(cx, mode, count, type_, offset, 1)
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
@@ -3880,6 +4088,15 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn LinkProgram(&self, program: &WebGLProgram) {
+        // ES 3.0 2.15.2: relinking the program transform feedback is recording with.
+        if self.with_current_transform_feedback(|tf| tf.is_active()) &&
+            self.base
+                .current_program()
+                .is_some_and(|current| &*current == program)
+        {
+            self.base.webgl_error(InvalidOperation);
+            return;
+        }
         self.base.LinkProgram(program)
     }
 
@@ -4455,6 +4672,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn UseProgram(&self, program: Option<&WebGLProgram>) {
+        // ES 3.0 2.15.2: no program changes while transform feedback is recording.
+        if self.with_current_transform_feedback(|tf| tf.is_active_unpaused()) {
+            self.base.webgl_error(InvalidOperation);
+            return;
+        }
         self.base.UseProgram(program)
     }
 
@@ -6010,11 +6232,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if !self.validate_sampler_types_for_draw() {
             return;
         }
-        handle_potential_webgl_error!(
-            self.base,
+        self.draw_with_transform_feedback(cx, mode, count, primcount, false, |cx| {
             self.base
                 .draw_arrays_instanced(cx, mode, first, count, primcount)
-        )
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.9>
@@ -6032,11 +6253,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if !self.validate_sampler_types_for_draw() {
             return;
         }
-        handle_potential_webgl_error!(
-            self.base,
+        self.draw_with_transform_feedback(cx, mode, count, primcount, true, |cx| {
             self.base
                 .draw_elements_instanced(cx, mode, count, type_, offset, primcount)
-        )
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.9>
@@ -6059,11 +6279,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if !self.validate_sampler_types_for_draw() {
             return;
         }
-        handle_potential_webgl_error!(
-            self.base,
+        self.draw_with_transform_feedback(cx, mode, count, 1, true, |cx| {
             self.base
                 .draw_elements_instanced(cx, mode, count, type_, offset, 1)
-        )
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.9>
@@ -6455,7 +6674,14 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 return;
             }
             tf.delete(Operation::Infallible);
-            self.current_transform_feedback.set(None);
+            // Deleting the bound object reverts the binding to the default object.
+            if self
+                .current_transform_feedback
+                .get()
+                .is_some_and(|current| &*current == tf)
+            {
+                self.switch_transform_feedback(None, false);
+            }
         }
     }
 
@@ -6507,20 +6733,22 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                     self.base.webgl_error(InvalidOperation);
                     return;
                 }
-                if let Some(current_tf) = self.current_transform_feedback.get() &&
-                    current_tf.is_active() &&
-                    !current_tf.is_paused()
-                {
+                if self.with_current_transform_feedback(|tf| tf.is_active_unpaused()) {
                     self.base.webgl_error(InvalidOperation);
                     return;
                 }
                 transform_feedback.bind(&self.base, target);
-                self.current_transform_feedback
-                    .set(Some(transform_feedback));
+                self.switch_transform_feedback(Some(transform_feedback), true);
             },
-            None => self
-                .base
-                .send_command(WebGLCommand::BindTransformFeedback(target, 0)),
+            None => {
+                if self.with_current_transform_feedback(|tf| tf.is_active_unpaused()) {
+                    self.base.webgl_error(InvalidOperation);
+                    return;
+                }
+                self.base
+                    .send_command(WebGLCommand::BindTransformFeedback(target, 0));
+                self.switch_transform_feedback(None, true);
+            },
         }
     }
 
@@ -6534,14 +6762,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 return;
             },
         };
-        let current_tf = match self.current_transform_feedback.get() {
-            Some(current_tf) => current_tf,
-            None => {
-                self.base.webgl_error(InvalidOperation);
-                return;
-            },
-        };
-        if current_tf.is_active() {
+        if self.with_current_transform_feedback(|tf| tf.is_active()) {
             self.base.webgl_error(InvalidOperation);
             return;
         };
@@ -6556,40 +6777,62 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             self.base.webgl_error(InvalidOperation);
             return;
         };
-        current_tf.begin(&self.base, primitiveMode);
+        // Every buffer the program records into must be bound (ES 3.0 2.15.2).
+        let buffers_needed =
+            if program.transform_feedback_buffer_mode() == constants::INTERLEAVED_ATTRIBS as i32 {
+                1
+            } else {
+                program.transform_feedback_varyings_length() as usize
+            };
+        // WebGL 2.0 5.36: nor may one buffer be bound to two of those binding points.
+        let mut buffers = Vec::with_capacity(buffers_needed);
+        for binding in self
+            .indexed_transform_feedback_buffer_bindings
+            .iter()
+            .take(buffers_needed)
+        {
+            match binding.buffer.get() {
+                Some(buffer) if !buffers.contains(&buffer.id()) => buffers.push(buffer.id()),
+                _ => {
+                    self.base.webgl_error(InvalidOperation);
+                    return;
+                },
+            }
+        }
+        self.with_current_transform_feedback(|tf| tf.begin(&self.base, primitiveMode));
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn EndTransformFeedback(&self) {
-        if let Some(current_tf) = self.current_transform_feedback.get() {
-            if !current_tf.is_active() {
+        self.with_current_transform_feedback(|tf| {
+            if !tf.is_active() {
                 self.base.webgl_error(InvalidOperation);
                 return;
             }
-            current_tf.end(&self.base);
-        }
+            tf.end(&self.base);
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn ResumeTransformFeedback(&self) {
-        if let Some(current_tf) = self.current_transform_feedback.get() {
-            if !current_tf.is_active() || !current_tf.is_paused() {
+        self.with_current_transform_feedback(|tf| {
+            if !tf.is_active() || !tf.is_paused() {
                 self.base.webgl_error(InvalidOperation);
                 return;
             }
-            current_tf.resume(&self.base);
-        }
+            tf.resume(&self.base);
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
     fn PauseTransformFeedback(&self) {
-        if let Some(current_tf) = self.current_transform_feedback.get() {
-            if !current_tf.is_active() || current_tf.is_paused() {
+        self.with_current_transform_feedback(|tf| {
+            if !tf.is_active() || tf.is_paused() {
                 self.base.webgl_error(InvalidOperation);
                 return;
             }
-            current_tf.pause(&self.base);
-        }
+            tf.pause(&self.base);
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.15>
@@ -6689,6 +6932,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             ),
             _ => return self.base.webgl_error(InvalidEnum),
         };
+        if target == constants::TRANSFORM_FEEDBACK_BUFFER &&
+            self.with_current_transform_feedback(|tf| tf.is_active())
+        {
+            return self.base.webgl_error(InvalidOperation);
+        }
         let indexed_binding = match indexed_bindings.get(index as usize) {
             Some(slot) => slot,
             None => return self.base.webgl_error(InvalidValue),
@@ -6743,6 +6991,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             ),
             _ => return self.base.webgl_error(InvalidEnum),
         };
+        if target == constants::TRANSFORM_FEEDBACK_BUFFER &&
+            self.with_current_transform_feedback(|tf| tf.is_active())
+        {
+            return self.base.webgl_error(InvalidOperation);
+        }
         let indexed_binding = match indexed_bindings.get(index as usize) {
             Some(slot) => slot,
             None => return self.base.webgl_error(InvalidValue),

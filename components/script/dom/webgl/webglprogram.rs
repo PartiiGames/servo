@@ -190,6 +190,7 @@ pub(crate) struct WebGLProgram {
     active_uniform_blocks: DomRefCell<Box<[ActiveUniformBlockInfo]>>,
     transform_feedback_varyings_length: Cell<i32>,
     transform_feedback_mode: Cell<i32>,
+    transform_feedback_varying_bytes: DomRefCell<Box<[u32]>>,
     /// The WebGL thread's answer to the last linkProgram, until something needs it. Links are
     /// resolved lazily so that pages polling COMPLETION_STATUS_KHR (KHR_parallel_shader_compile)
     /// don't block on the link; everything that reads link results resolves it first.
@@ -216,6 +217,7 @@ impl WebGLProgram {
             active_uniform_blocks: DomRefCell::new(vec![].into()),
             transform_feedback_varyings_length: Default::default(),
             transform_feedback_mode: Default::default(),
+            transform_feedback_varying_bytes: DomRefCell::new(vec![].into()),
             pending_link: RefCell::new(None),
             sampler_units: Default::default(),
             droppable: RefCell::new(DroppableWebGLProgram::new(id, context)),
@@ -418,6 +420,8 @@ impl WebGLProgram {
             .set(link_info.transform_feedback_length);
         self.transform_feedback_mode
             .set(link_info.transform_feedback_mode);
+        *self.transform_feedback_varying_bytes.borrow_mut() =
+            link_info.transform_feedback_varying_bytes;
         *self.active_attribs.borrow_mut() = link_info.active_attribs;
         *self.active_uniforms.borrow_mut() = link_info.active_uniforms;
         *self.active_uniform_blocks.borrow_mut() = link_info.active_uniform_blocks;
@@ -869,6 +873,18 @@ impl WebGLProgram {
     pub(crate) fn transform_feedback_buffer_mode(&self) -> i32 {
         self.resolve_link();
         self.transform_feedback_mode.get()
+    }
+
+    /// Bytes per vertex written into each transform feedback buffer binding: one entry
+    /// (the sum) for INTERLEAVED_ATTRIBS, one per varying for SEPARATE_ATTRIBS.
+    pub(crate) fn transform_feedback_buffer_strides(&self) -> Vec<u64> {
+        self.resolve_link();
+        let bytes = self.transform_feedback_varying_bytes.borrow();
+        if self.transform_feedback_mode.get() == constants2::INTERLEAVED_ATTRIBS as i32 {
+            vec![bytes.iter().map(|b| *b as u64).sum()]
+        } else {
+            bytes.iter().map(|b| *b as u64).collect()
+        }
     }
 
     fn set_marked_for_deletion(&self, value: bool) {
