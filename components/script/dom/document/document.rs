@@ -5155,6 +5155,29 @@ impl Document {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#visibility-state>
+    /// Partii: the embedder hid or showed this document's webview (`WebView::hide`/`show`, which
+    /// throttles its pipelines). Update the visibility state to match, as browsers do for a hidden
+    /// tab or window, so `visibilitychange` fires. Only for a fully active document whose page is
+    /// showing; pageshow and unload keep their own steps.
+    pub(crate) fn set_system_visibility(&self, visible: bool) {
+        let document = Trusted::new(self);
+        self.owner_global()
+            .task_manager()
+            .dom_manipulation_task_source()
+            .queue(task!(update_system_visibility: move |cx| {
+                let document = document.root();
+                if !document.is_fully_active() || !document.page_showing.get() {
+                    return;
+                }
+                let state = if visible {
+                    DocumentVisibilityState::Visible
+                } else {
+                    DocumentVisibilityState::Hidden
+                };
+                document.update_visibility_state(cx, state);
+            }));
+    }
+
     fn update_visibility_state(
         &self,
         cx: &mut JSContext,

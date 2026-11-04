@@ -3666,7 +3666,11 @@ impl Window {
 
     /// Set whether to use less resources by running timers at a heavily limited rate.
     pub(crate) fn set_throttled(&self, throttled: bool) {
+        let changed = self.throttled.get() != throttled;
         self.throttled.set(throttled);
+        if changed {
+            self.Document().set_system_visibility(!throttled);
+        }
         if throttled {
             if pref!(js_timers_throttle_hidden) {
                 self.as_global_scope().slow_down_timers();
