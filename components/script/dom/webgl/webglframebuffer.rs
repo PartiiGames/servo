@@ -666,7 +666,11 @@ impl WebGLFramebuffer {
             return CompleteForRendering::Complete;
         }
 
-        if self.colors.iter().all(|att| att.borrow().is_none()) {
+        // GL ES 3.0 framebuffers need no colour attachment (depth-only passes such as shadow
+        // maps); WebGL 1 keeps rejecting them.
+        if self.webgl_version == WebGLVersion::WebGL1 &&
+            self.colors.iter().all(|att| att.borrow().is_none())
+        {
             return CompleteForRendering::MissingColorAttachment;
         }
 
