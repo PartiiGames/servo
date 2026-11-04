@@ -13,7 +13,7 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
-    WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
+    TexDataType, WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
     WebGLRenderbufferId, WebGLResult, WebGLTextureId, WebGLVersion, webgl_channel,
 };
 #[cfg(feature = "webxr")]
@@ -287,6 +287,25 @@ impl WebGLFramebuffer {
 
     pub(crate) fn size(&self) -> Option<(i32, i32)> {
         self.size.get()
+    }
+
+    /// Whether COLOR_ATTACHMENT0 holds float data (a 16/32-bit float renderbuffer, or a texture
+    /// uploaded with FLOAT / HALF_FLOAT), for WebGL 1's float readPixels.
+    pub(crate) fn color_attachment_is_float(&self) -> bool {
+        let binding = self.colors[0].borrow();
+        match binding.as_ref() {
+            Some(WebGLFramebufferAttachment::Renderbuffer(rb)) => matches!(
+                rb.internal_format(),
+                constants::RGBA32F | constants::RGBA16F | constants::RGB16F
+            ),
+            Some(WebGLFramebufferAttachment::Texture { texture, level }) => texture
+                .image_info_at_face(0, *level as u32)
+                .and_then(|info| info.data_type())
+                .is_some_and(|data_type| {
+                    matches!(data_type, TexDataType::Float | TexDataType::HalfFloat)
+                }),
+            None => false,
+        }
     }
 
     /// What image is attached at `attachment`, to tell when a blit reads and writes the same one.

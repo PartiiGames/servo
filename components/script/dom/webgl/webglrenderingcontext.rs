@@ -4045,11 +4045,25 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return self.webgl_error(InvalidValue);
         }
 
-        if format != constants::RGBA || pixel_type != constants::UNSIGNED_BYTE {
+        // RGBA/UNSIGNED_BYTE always; RGBA/FLOAT into a Float32Array from a float colour buffer
+        // (WEBGL_color_buffer_float / EXT_color_buffer_half_float).
+        let float_read = format == constants::RGBA &&
+            pixel_type == constants::FLOAT &&
+            (self.extension_manager.is_float_buffer_renderable() ||
+                self.extension_manager.is_half_float_buffer_renderable()) &&
+            self.bound_draw_framebuffer
+                .get()
+                .is_some_and(|fb| fb.color_attachment_is_float());
+        if !float_read && (format != constants::RGBA || pixel_type != constants::UNSIGNED_BYTE) {
             return self.webgl_error(InvalidOperation);
         }
 
-        if pixels.get_array_type() != Type::Uint8 {
+        let expected_array_type = if float_read {
+            Type::Float32
+        } else {
+            Type::Uint8
+        };
+        if pixels.get_array_type() != expected_array_type {
             return self.webgl_error(InvalidOperation);
         }
 
@@ -4063,7 +4077,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return;
         }
 
-        let bytes_per_pixel = 4;
+        let bytes_per_pixel = if float_read { 16 } else { 4 };
 
         let row_len = handle_potential_webgl_error!(
             self,
@@ -4112,7 +4126,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             dest_offset += -x * bytes_per_pixel;
         }
         if y < 0 {
-            dest_offset += -y * row_len;
+            dest_offset += -y * dest_stride;
         }
 
         let (sender, receiver) = generic_channel::channel().unwrap();
