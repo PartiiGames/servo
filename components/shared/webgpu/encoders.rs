@@ -81,6 +81,10 @@ pub enum RenderBundleEncoderCommand {
     BindingCommand(BindingCommand),
     RenderCommand(RenderCommand),
     DebugCommand(DebugCommand),
+    /// Script found a command invalid (for example an indirect draw outside its buffer,
+    /// which wgpu-core doesn't check for bundles and later asserts on): the encoder is
+    /// invalid, and finishing it gives an invalid bundle and this validation error.
+    Invalidate(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -11,7 +11,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use script_bindings::DomTypes;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::WebGPUBinding::{
-    GPUIndexFormat, GPURenderBundleDescriptor, GPURenderBundleEncoderDescriptor,
+    GPUBufferMethods, GPUIndexFormat, GPURenderBundleDescriptor, GPURenderBundleEncoderDescriptor,
     GPURenderBundleEncoderMethods, GPURenderBundleEncoderWrap,
 };
 use script_bindings::interfaces::PromiseHelpers;
@@ -60,6 +60,24 @@ pub struct GPURenderBundleEncoder<D: DomTypes> {
     device: Dom<D::GPUDevice>,
     label: DomRefCell<USVString>,
     droppable: DroppableGPURenderBundleEncoder,
+}
+
+/// Validation of an indirect draw's arguments in a render bundle, which wgpu-core
+/// doesn't do for bundles (gfx-rs/wgpu#8051) and later asserts on when the bundle is
+/// executed, killing the WGPU thread. `args_size` is 16 for drawIndirect and 20 for
+/// drawIndexedIndirect.
+/// <https://gpuweb.github.io/gpuweb/#dom-gpurenderencoderbase-drawindirect>
+fn indirect_args_error(offset: u64, args_size: u64, buffer_size: u64) -> Option<String> {
+    if offset % 4 != 0 {
+        return Some(format!("Indirect offset {offset} is not a multiple of 4"));
+    }
+    match offset.checked_add(args_size) {
+        Some(end) if end <= buffer_size => None,
+        _ => Some(format!(
+            "Indirect draw arguments ({args_size} bytes at offset {offset}) overrun the \
+             indirect buffer ({buffer_size} bytes)"
+        )),
+    }
 }
 
 impl<D> GPURenderBundleEncoder<D>
@@ -178,6 +196,32 @@ where
 
     pub(crate) fn id(&self) -> WebGPURenderBundleEncoder {
         self.droppable.render_bundle_encoder
+    }
+}
+
+impl<D> GPURenderBundleEncoder<D>
+where
+    D: Equivalence,
+    <D::Promise as PromiseHelpers<D>>::StackRoot: WebGPUPromise<D>,
+{
+    /// Makes this encoder invalid: finishing it gives an invalid bundle and a validation
+    /// error with `message`.
+    fn invalidate(&self, message: String) {
+        if let Err(error) =
+            self.droppable
+                .channel
+                .0
+                .send(WebGPURequest::RenderBundleEncoderCommand {
+                    render_bundle_encoder_id: self.droppable.render_bundle_encoder.0,
+                    render_command: RenderBundleEncoderCommand::Invalidate(message),
+                    device_id: self.device.id().0,
+                })
+        {
+            warn!(
+                "Failed to invalidate render bundle encoder {:?} ({error})",
+                self.droppable.render_bundle_encoder.0
+            );
+        }
     }
 }
 
@@ -362,6 +406,12 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpurenderencoderbase-drawindirect>
     fn DrawIndirect(&self, indirect_buffer: &GPUBuffer<D>, indirect_offset: u64) {
+        if let Some(message) =
+            indirect_args_error(indirect_offset, 16, indirect_buffer.Size())
+        {
+            self.invalidate(message);
+            return;
+        }
         if let Err(error) =
             self.droppable
                 .channel
@@ -386,6 +436,12 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpurenderencoderbase-drawindexedindirect>
     fn DrawIndexedIndirect(&self, indirect_buffer: &GPUBuffer<D>, indirect_offset: u64) {
+        if let Some(message) =
+            indirect_args_error(indirect_offset, 20, indirect_buffer.Size())
+        {
+            self.invalidate(message);
+            return;
+        }
         if let Err(error) =
             self.droppable
                 .channel

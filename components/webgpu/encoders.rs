@@ -161,6 +161,8 @@ pub(crate) fn handle_render_bundle_command(
     command: RenderBundleEncoderCommand,
 ) -> Result<(), PassStateError> {
     match command {
+        // Handled by the WGPU thread before it gets here.
+        RenderBundleEncoderCommand::Invalidate(_) => Ok(()),
         RenderBundleEncoderCommand::BindingCommand(binding_command) => match binding_command {
             BindingCommand::SetBindGroup {
                 index,

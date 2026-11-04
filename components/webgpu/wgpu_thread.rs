@@ -18,7 +18,8 @@ use webgpu_traits::id::DeviceId;
 use webgpu_traits::{
     Adapter, BufferAddress, ComputePassDescriptor, DeviceDescriptor, DeviceLostReason, Error,
     ErrorScope, ExperimentalFeatures, Extent3d, Mapping, MemoryHints, Origin3d, Pipeline, PopError,
-    RenderPassDescriptor, ShaderCompilationInfo, ShaderModuleDescriptor, TexelCopyBufferLayout,
+    RenderBundleEncoderCommand, RenderPassDescriptor, ShaderCompilationInfo, ShaderModuleDescriptor,
+    TexelCopyBufferLayout,
     TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
     TextureUsages, TextureViewDescriptor, WebGPU, WebGPUAdapter, WebGPUContextId, WebGPUDevice,
     WebGPUMsg, WebGPUQueue, WebGPURequest, id,
@@ -75,6 +76,9 @@ pub(crate) struct WGPU {
     pub(crate) wgpu_image_map: WebGpuExternalImageMap,
     /// Provides access to poller thread
     pub(crate) poller: Poller,
+    /// Render bundle encoders that script invalidated, with the validation error to report
+    /// when they are finished. Their later commands are dropped.
+    invalid_render_bundle_encoders: FxHashMap<id::RenderBundleEncoderId, String>,
 }
 
 impl WGPU {
@@ -135,6 +139,7 @@ impl WGPU {
             paint_api,
             webrender_external_image_id_manager,
             wgpu_image_map,
+            invalid_render_bundle_encoders: FxHashMap::default(),
         }
     }
 
@@ -971,6 +976,7 @@ impl WGPU {
                         };
                     },
                     WebGPURequest::DropRenderBundleEncoder(id) => {
+                        self.invalid_render_bundle_encoders.remove(&id);
                         let global = &self.global;
                         global.render_bundle_encoder_drop(id);
                         if let Err(e) = self
@@ -1248,6 +1254,15 @@ impl WGPU {
                         render_bundle_id,
                         device_id,
                     } => {
+                        if let Some(message) = self
+                            .invalid_render_bundle_encoders
+                            .remove(&render_bundle_encoder_id)
+                        {
+                            self.global
+                                .create_render_bundle_error(Some(render_bundle_id), &descriptor);
+                            self.dispatch_error(device_id, Error::Validation(message));
+                            continue;
+                        }
                         let global = &self.global;
                         let (_, error) = global.render_bundle_encoder_finish_with_id(
                             render_bundle_encoder_id,
@@ -1274,6 +1289,18 @@ impl WGPU {
                         render_command,
                         device_id,
                     } => {
+                        if let RenderBundleEncoderCommand::Invalidate(message) = render_command {
+                            self.invalid_render_bundle_encoders
+                                .entry(render_bundle_encoder_id)
+                                .or_insert(message);
+                            continue;
+                        }
+                        if self
+                            .invalid_render_bundle_encoders
+                            .contains_key(&render_bundle_encoder_id)
+                        {
+                            continue;
+                        }
                         let result = handle_render_bundle_command(
                             &self.global,
                             render_bundle_encoder_id,
