@@ -51,28 +51,28 @@ impl WebGLExtension for EXTTextureCompressionRGTC {
                 bytes_per_block: 8,
                 block_width: 4,
                 block_height: 4,
-                validation: TexCompressionValidation::SubImageBlockAligned,
+                validation: TexCompressionValidation::BaseLevelBlockMultiple,
             },
             TexCompression {
                 format: TexFormat::CompressedSignedRedRgtc1,
                 bytes_per_block: 8,
                 block_width: 4,
                 block_height: 4,
-                validation: TexCompressionValidation::SubImageBlockAligned,
+                validation: TexCompressionValidation::BaseLevelBlockMultiple,
             },
             TexCompression {
                 format: TexFormat::CompressedRedGreenRgtc2,
                 bytes_per_block: 16,
                 block_width: 4,
                 block_height: 4,
-                validation: TexCompressionValidation::SubImageBlockAligned,
+                validation: TexCompressionValidation::BaseLevelBlockMultiple,
             },
             TexCompression {
                 format: TexFormat::CompressedSignedRedGreenRgtc2,
                 bytes_per_block: 16,
                 block_width: 4,
                 block_height: 4,
-                validation: TexCompressionValidation::SubImageBlockAligned,
+                validation: TexCompressionValidation::BaseLevelBlockMultiple,
             },
         ]);
     }

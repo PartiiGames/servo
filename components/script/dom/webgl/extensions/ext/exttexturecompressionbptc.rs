@@ -51,28 +51,28 @@ impl WebGLExtension for EXTTextureCompressionBPTC {
                 bytes_per_block: 16,
                 block_width: 4,
                 block_height: 4,
-                validation: TexCompressionValidation::SubImageBlockAligned,
+                validation: TexCompressionValidation::BaseLevelBlockMultiple,
             },
             TexCompression {
                 format: TexFormat::CompressedSrgbAlphaBptcUnorm,
                 bytes_per_block: 16,
                 block_width: 4,
                 block_height: 4,
-                validation: TexCompressionValidation::SubImageBlockAligned,
+                validation: TexCompressionValidation::BaseLevelBlockMultiple,
             },
             TexCompression {
                 format: TexFormat::CompressedRgbBptcSignedFloat,
                 bytes_per_block: 16,
                 block_width: 4,
                 block_height: 4,
-                validation: TexCompressionValidation::SubImageBlockAligned,
+                validation: TexCompressionValidation::BaseLevelBlockMultiple,
             },
             TexCompression {
                 format: TexFormat::CompressedRgbBptcUnsignedFloat,
                 bytes_per_block: 16,
                 block_width: 4,
                 block_height: 4,
-                validation: TexCompressionValidation::SubImageBlockAligned,
+                validation: TexCompressionValidation::BaseLevelBlockMultiple,
             },
         ]);
     }

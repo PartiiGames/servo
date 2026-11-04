@@ -702,8 +702,11 @@ impl ImageInfo {
 pub(crate) enum TexCompressionValidation {
     None,
     S3TC,
-    /// No extra rule for full images; sub-images must be block-aligned (ASTC, BPTC, RGTC).
+    /// No extra rule for full images; sub-images must be block-aligned (ASTC).
     SubImageBlockAligned,
+    /// BPTC and RGTC: the implied base level (size << level) must be a multiple of the 4x4
+    /// block; sub-images must be block-aligned.
+    BaseLevelBlockMultiple,
 }
 
 #[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf)]

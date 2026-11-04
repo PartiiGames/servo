@@ -5,7 +5,7 @@
 use std::{self, fmt};
 
 use servo_canvas_traits::webgl::WebGLError::*;
-use servo_canvas_traits::webgl::{TexDataType, TexFormat};
+use servo_canvas_traits::webgl::{TexDataType, TexFormat, WebGLVersion};
 
 use super::WebGLValidator;
 use super::types::TexImageTarget;
@@ -28,10 +28,6 @@ pub(crate) enum TexImageValidationError {
     NegativeLevel,
     /// A level too high to be allowed by the implementation was passed.
     LevelTooHigh,
-    /// A level less than an allowed minimal value was passed.
-    LevelTooLow,
-    /// A depth less than an allowed minimal value was passed.
-    DepthTooLow,
     /// A negative width and height was passed.
     NegativeDimension,
     /// A bigger with and height were passed than what the implementation
@@ -70,8 +66,6 @@ impl fmt::Display for TexImageValidationError {
             },
             NegativeLevel => "A negative level was passed",
             LevelTooHigh => "Level too high",
-            LevelTooLow => "Level too low",
-            DepthTooLow => "Depth too low",
             NegativeDimension => "Negative dimensions were passed",
             TextureTooBig => "Dimensions given are too big",
             InvalidDataType => "Invalid data type",
@@ -367,6 +361,17 @@ impl WebGLValidator for TexImage2DValidator<'_> {
             _ => {},
         }
 
+        // WebGL 2: the type must be one GL ES 3.0 allows for the internal format; unsized
+        // formats with FLOAT / HALF_FLOAT are WebGL 1 extensions only.
+        if version == WebGLVersion::WebGL2 &&
+            (!internal_format.compatible_data_types().contains(&data_type) ||
+                (!internal_format.is_sized() &&
+                    matches!(data_type, TexDataType::Float | TexDataType::HalfFloat)))
+        {
+            context.webgl_error(InvalidOperation);
+            return Err(TexImageValidationError::InvalidTypeForFormat);
+        }
+
         Ok(TexImage2DValidatorResult {
             width,
             height,
@@ -441,6 +446,18 @@ fn valid_compressed_data_len(
 
     let required_bytes = required_blocks * compression.bytes_per_block as u32;
     data_len == required_bytes as usize
+}
+
+/// BPTC / RGTC: the level's size scaled up to the base level must be whole blocks.
+pub(crate) fn base_level_block_multiple(
+    level: u32,
+    width: u32,
+    height: u32,
+    compression: &TexCompression,
+) -> bool {
+    let base = |size: u32| (size as u64) << level.min(32);
+    base(width).is_multiple_of(compression.block_width as u64) &&
+        base(height).is_multiple_of(compression.block_height as u64)
 }
 
 pub(crate) fn is_subimage_blockaligned(
@@ -563,6 +580,9 @@ impl WebGLValidator for CompressedTexImage2DValidator<'_> {
                     valid_s3tc_dimension(level, height, compression.block_height as u32);
                 valid_width && valid_height
             },
+            TexCompressionValidation::BaseLevelBlockMultiple => {
+                base_level_block_multiple(level, width, height, &compression)
+            },
             TexCompressionValidation::SubImageBlockAligned | TexCompressionValidation::None => true,
         };
         if !compression_valid {
@@ -663,16 +683,16 @@ impl WebGLValidator for CompressedTexSubImage2DValidator<'_> {
         // supported by the specific compressed internal format as specified
         // in the specific texture compression extension.
         let compression_valid = match compression.validation {
-            TexCompressionValidation::S3TC | TexCompressionValidation::SubImageBlockAligned => {
-                is_subimage_blockaligned(
-                    self.xoffset as u32,
-                    self.yoffset as u32,
-                    width,
-                    height,
-                    &compression,
-                    &tex_info,
-                )
-            },
+            TexCompressionValidation::S3TC |
+            TexCompressionValidation::SubImageBlockAligned |
+            TexCompressionValidation::BaseLevelBlockMultiple => is_subimage_blockaligned(
+                self.xoffset as u32,
+                self.yoffset as u32,
+                width,
+                height,
+                &compression,
+                &tex_info,
+            ),
             TexCompressionValidation::None => true,
         };
         if !compression_valid {

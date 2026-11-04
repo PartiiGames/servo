@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use js::jsapi::Type;
 use js::typedarray::ArrayBufferView;
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{TexDataType, TexFormat};
@@ -11,7 +10,9 @@ use super::WebGLValidator;
 use super::tex_image_2d::TexImageValidationError;
 use super::types::TexImageTarget;
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext;
+use crate::dom::webgl::webglrenderingcontext::{
+    WebGLRenderingContext, array_buffer_type_to_sized_type,
+};
 use crate::dom::webgl::webgltexture::WebGLTexture;
 
 pub(crate) struct CommonTexImage3DValidator<'a> {
@@ -270,26 +271,20 @@ impl WebGLValidator for TexImage3DValidator<'_> {
             return Err(TexImageValidationError::InvalidTypeForFormat);
         }
 
+        // Unsized formats with FLOAT / HALF_FLOAT are WebGL 1 extensions, not WebGL 2.
+        if !internal_format.is_sized() &&
+            matches!(data_type, TexDataType::Float | TexDataType::HalfFloat)
+        {
+            context.webgl_error(InvalidOperation);
+            return Err(TexImageValidationError::InvalidTypeForFormat);
+        }
+
         // If srcData is non-null, the type of srcData must match the type according to
         // the above table; otherwise, generate an INVALID_OPERATION error.
-        let element_size = data_type.element_size();
-        let received_size = match self.data {
-            Some(buf) => match buf.get_array_type() {
-                Type::Int8 => 1,
-                Type::Uint8 => 1,
-                Type::Int16 => 2,
-                Type::Uint16 => 2,
-                Type::Int32 => 4,
-                Type::Uint32 => 4,
-                Type::Float32 => 4,
-                _ => {
-                    context.webgl_error(InvalidOperation);
-                    return Err(TexImageValidationError::InvalidTypeForFormat);
-                },
-            },
-            None => element_size,
-        };
-        if received_size != element_size {
+        if let Some(buf) = self.data &&
+            array_buffer_type_to_sized_type(buf.get_array_type()) !=
+                Some(data_type.sized_data_type())
+        {
             context.webgl_error(InvalidOperation);
             return Err(TexImageValidationError::InvalidTypeForFormat);
         }

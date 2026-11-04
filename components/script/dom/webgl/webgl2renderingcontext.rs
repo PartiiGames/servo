@@ -56,7 +56,7 @@ use crate::dom::promise::Promise;
 use crate::dom::webgl::validations::WebGLValidator;
 use crate::dom::webgl::validations::tex_image_2d::{
     TexImage2DValidator, TexImage2DValidatorResult, TexStorageValidator, TexStorageValidatorResult,
-    is_subimage_blockaligned, valid_s3tc_dimension,
+    base_level_block_multiple, is_subimage_blockaligned, valid_s3tc_dimension,
 };
 use crate::dom::webgl::validations::tex_image_3d::{
     TexImage3DValidator, TexImage3DValidatorResult,
@@ -1053,10 +1053,17 @@ impl WebGL2RenderingContext {
         if data.len() as u64 != Self::compressed_byte_len(&compression, width, height, depth) {
             return self.base.webgl_error(InvalidValue);
         }
-        if let TexCompressionValidation::S3TC = compression.validation &&
-            !(valid_s3tc_dimension(level, width, compression.block_width as u32) &&
-                valid_s3tc_dimension(level, height, compression.block_height as u32))
-        {
+        let size_valid = match compression.validation {
+            TexCompressionValidation::S3TC => {
+                valid_s3tc_dimension(level, width, compression.block_width as u32) &&
+                    valid_s3tc_dimension(level, height, compression.block_height as u32)
+            },
+            TexCompressionValidation::BaseLevelBlockMultiple => {
+                base_level_block_multiple(level, width, height, &compression)
+            },
+            _ => true,
+        };
+        if !size_valid {
             return self.base.webgl_error(InvalidOperation);
         }
         handle_potential_webgl_error!(
@@ -1134,16 +1141,16 @@ impl WebGL2RenderingContext {
             return self.base.webgl_error(InvalidValue);
         }
         let aligned = match compression.validation {
-            TexCompressionValidation::S3TC | TexCompressionValidation::SubImageBlockAligned => {
-                is_subimage_blockaligned(
-                    xoffset as u32,
-                    yoffset as u32,
-                    width,
-                    height,
-                    &compression,
-                    &info,
-                )
-            },
+            TexCompressionValidation::S3TC |
+            TexCompressionValidation::SubImageBlockAligned |
+            TexCompressionValidation::BaseLevelBlockMultiple => is_subimage_blockaligned(
+                xoffset as u32,
+                yoffset as u32,
+                width,
+                height,
+                &compression,
+                &info,
+            ),
             TexCompressionValidation::None => true,
         };
         if !aligned {
@@ -1471,7 +1478,7 @@ impl WebGL2RenderingContext {
         view: &ArrayBufferView,
         src_offset: u32,
     ) -> Fallible<()> {
-        let Ok(TexImage2DValidatorResult {
+        let Some(TexSubImage2DArgs {
             texture,
             target,
             width,
@@ -1479,11 +1486,9 @@ impl WebGL2RenderingContext {
             level,
             format,
             data_type,
-            ..
-        }) = TexImage2DValidator::new(
-            &self.base, target, level, format, width, height, 0, format, type_,
+        }) = self.validate_tex_sub_image_2d(
+            target, level, xoffset, yoffset, width, height, format, type_,
         )
-        .validate()
         else {
             return Ok(());
         };
@@ -1698,6 +1703,94 @@ impl WebGL2RenderingContext {
         known_format && known_type
     }
 
+    /// Validation shared by the WebGL 2 texSubImage2D overloads: the WebGL 1 path validates
+    /// `format` as if it were an internal format, which rejects the WebGL 2 transfer formats
+    /// (RED, RG, *_INTEGER) with INVALID_ENUM.
+    #[allow(clippy::too_many_arguments)]
+    fn validate_tex_sub_image_2d(
+        &self,
+        target: u32,
+        level: i32,
+        xoffset: i32,
+        yoffset: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+        type_: u32,
+    ) -> Option<TexSubImage2DArgs> {
+        let target = match TexImageTarget::from_gl_constant(target) {
+            Some(target) if target.dimensions() == 2 && target != TexImageTarget::CubeMap => target,
+            _ => {
+                self.base.webgl_error(InvalidEnum);
+                return None;
+            },
+        };
+        let Some(texture) = self.base.textures().active_texture_for_image_target(target) else {
+            self.base.webgl_error(InvalidOperation);
+            return None;
+        };
+        let version = self.base.webgl_version();
+        let Some(data_type) = TexDataType::from_webgl_constant(type_, version)
+            .filter(|data_type| data_type.required_webgl_version() <= version)
+        else {
+            self.base.webgl_error(InvalidEnum);
+            return None;
+        };
+        let Some(format) = TexFormat::from_gl_constant(format)
+            .filter(|format| !format.is_sized() || format.to_unsized() == *format)
+        else {
+            self.base.webgl_error(InvalidEnum);
+            return None;
+        };
+        if level < 0 || width < 0 || height < 0 {
+            self.base.webgl_error(InvalidValue);
+            return None;
+        }
+        let level = level as u32;
+        let Some(image_info) = texture.image_info_for_target(&target, level) else {
+            self.base.webgl_error(InvalidOperation);
+            return None;
+        };
+        let (width, height) = (width as u32, height as u32);
+        let fits = |offset: i32, size: u32, max: u32| {
+            offset >= 0 && offset as u64 + size as u64 <= max as u64
+        };
+        if !fits(xoffset, width, image_info.width()) || !fits(yoffset, height, image_info.height())
+        {
+            self.base.webgl_error(InvalidValue);
+            return None;
+        }
+        let internal_format = image_info.internal_format();
+        if internal_format.is_compressed() ||
+            format != internal_format.to_unsized() ||
+            !Self::type_allowed_for(internal_format, data_type)
+        {
+            self.base.webgl_error(InvalidOperation);
+            return None;
+        }
+        Some(TexSubImage2DArgs {
+            texture,
+            target,
+            width,
+            height,
+            level,
+            format,
+            data_type,
+        })
+    }
+
+    /// Whether `data_type` may upload into `internal_format` in WebGL 2. Unsized formats take
+    /// the GL ES 3.0 unsized combinations only: FLOAT and HALF_FLOAT with them are WebGL 1
+    /// extensions (OES_texture_float), which WebGL 2 doesn't have.
+    fn type_allowed_for(internal_format: TexFormat, data_type: TexDataType) -> bool {
+        if !internal_format.is_sized() &&
+            matches!(data_type, TexDataType::Float | TexDataType::HalfFloat)
+        {
+            return false;
+        }
+        internal_format.compatible_data_types().contains(&data_type)
+    }
+
     /// Validation shared by the texSubImage3D overloads, per
     /// <https://registry.khronos.org/OpenGL-Refpages/es3.0/html/glTexSubImage3D.xhtml>
     /// and <https://registry.khronos.org/webgl/specs/latest/2.0/#3.7.6>.
@@ -1762,7 +1855,7 @@ impl WebGL2RenderingContext {
         let internal_format = image_info.internal_format();
         if internal_format.is_compressed() ||
             format != internal_format.to_unsized() ||
-            !internal_format.compatible_data_types().contains(&data_type)
+            !Self::type_allowed_for(internal_format, data_type)
         {
             self.base.webgl_error(InvalidOperation);
             return None;
@@ -1953,6 +2046,17 @@ struct UnpackLayout {
     first: u64,
     /// Bytes past the start of the source that the upload reads: `first` plus the extent.
     end: u64,
+}
+
+/// The validated arguments of a WebGL 2 texSubImage2D call.
+struct TexSubImage2DArgs {
+    texture: DomRoot<WebGLTexture>,
+    target: TexImageTarget,
+    width: u32,
+    height: u32,
+    level: u32,
+    format: TexFormat,
+    data_type: TexDataType,
 }
 
 /// The validated arguments of a texSubImage3D call.
@@ -5257,17 +5361,22 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if self.forbid_pixel_unpack_buffer() {
             return Ok(());
         }
-        // With WebGL 2 unpack parameters set, client data goes through the repacking path.
-        if let Some(ref view) = *pixels &&
-            self.unpack_params.get() != UnpackParams::default()
-        {
-            return self.tex_sub_image_2d_from_view(
+        match *pixels {
+            Some(ref view) => self.tex_sub_image_2d_from_view(
                 no_gc, target, level, xoffset, yoffset, width, height, format, data_type, view, 0,
-            );
+            ),
+            None => {
+                if self
+                    .validate_tex_sub_image_2d(
+                        target, level, xoffset, yoffset, width, height, format, data_type,
+                    )
+                    .is_some()
+                {
+                    self.base.webgl_error(InvalidValue);
+                }
+                Ok(())
+            },
         }
-        self.base.TexSubImage2D(
-            no_gc, target, level, xoffset, yoffset, width, height, format, data_type, pixels,
-        )
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8>
@@ -5285,9 +5394,51 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if self.forbid_pixel_unpack_buffer() {
             return Ok(());
         }
-        self.base.TexSubImage2D_(
-            no_gc, target, level, xoffset, yoffset, format, data_type, source,
+        let Some(pixels) = self.base.get_image_pixels(no_gc, source)? else {
+            return Ok(());
+        };
+        let size = pixels.size();
+        let Some(TexSubImage2DArgs {
+            texture,
+            target,
+            width,
+            height,
+            level,
+            format,
+            data_type,
+        }) = self.validate_tex_sub_image_2d(
+            target,
+            level,
+            xoffset,
+            yoffset,
+            size.width as i32,
+            size.height as i32,
+            format,
+            data_type,
         )
+        else {
+            return Ok(());
+        };
+        if !Self::can_convert_image_source(format, data_type) {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        }
+        let Some(pixels) = self.image_source_window(pixels, width, height, 1, false) else {
+            return Ok(());
+        };
+        self.base.tex_sub_image_2d_from_source(
+            texture,
+            target,
+            level,
+            xoffset,
+            yoffset,
+            Size2D::new(width, height),
+            format,
+            data_type,
+            1,
+            TexSource::Pixels(pixels),
+        );
+        Ok(())
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#3.7.6>
@@ -5310,7 +5461,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             self.base.webgl_error(InvalidOperation);
             return Ok(());
         }
-        let Ok(TexImage2DValidatorResult {
+        let Some(TexSubImage2DArgs {
             texture,
             target,
             width,
@@ -5318,11 +5469,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             level,
             format,
             data_type,
-            ..
-        }) = TexImage2DValidator::new(
-            &self.base, target, level, format, width, height, 0, format, type_,
+        }) = self.validate_tex_sub_image_2d(
+            target, level, xoffset, yoffset, width, height, format, type_,
         )
-        .validate()
         else {
             return Ok(());
         };
@@ -5372,7 +5521,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if self.forbid_pixel_unpack_buffer() {
             return Ok(());
         }
-        let Ok(TexImage2DValidatorResult {
+        let Some(TexSubImage2DArgs {
             texture,
             target,
             width,
@@ -5380,11 +5529,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             level,
             format,
             data_type,
-            ..
-        }) = TexImage2DValidator::new(
-            &self.base, target, level, format, width, height, 0, format, type_,
+        }) = self.validate_tex_sub_image_2d(
+            target, level, xoffset, yoffset, width, height, format, type_,
         )
-        .validate()
         else {
             return Ok(());
         };
