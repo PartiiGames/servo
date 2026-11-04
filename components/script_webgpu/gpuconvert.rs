@@ -623,7 +623,8 @@ where
     let number_of_provided_bindings = bgle.buffer.is_some() as u8 +
         bgle.sampler.is_some() as u8 +
         bgle.storageTexture.is_some() as u8 +
-        bgle.texture.is_some() as u8;
+        bgle.texture.is_some() as u8 +
+        bgle.externalTexture.is_some() as u8;
     let ty = if let Some(buffer) = &bgle.buffer {
         Some(BindingType::Buffer {
             ty: match buffer.type_ {
@@ -666,6 +667,9 @@ where
             view_dimension: texture.viewDimension.convert(),
             multisampled: texture.multisampled,
         })
+    } else if bgle.externalTexture.is_some() {
+        // A GPUExternalTexture, or (per the spec) a GPUTextureView, can be bound here.
+        Some(BindingType::ExternalTexture)
     } else {
         assert_eq!(number_of_provided_bindings, 0);
         None
