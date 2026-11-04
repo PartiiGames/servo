@@ -282,24 +282,26 @@ impl WebGLFramebuffer {
         self.size.get()
     }
 
+    /// The internal formats of the colour attachment at `color_attachment` and of the depth and
+    /// stencil attachments, renderbuffers and textures alike.
     pub(crate) fn get_attachment_formats(
         &self,
+        color_attachment: u32,
     ) -> WebGLResult<(Option<u32>, Option<u32>, Option<u32>)> {
         if self.check_status() != constants::FRAMEBUFFER_COMPLETE {
             return Err(WebGLError::InvalidFramebufferOperation);
         }
-        let color = match self.attachment(constants::COLOR_ATTACHMENT0) {
-            Some(WebGLFramebufferAttachmentRoot::Renderbuffer(rb)) => Some(rb.internal_format()),
-            _ => None,
+        let depth_stencil = self.attachment_internal_format(constants::DEPTH_STENCIL_ATTACHMENT);
+        let color = match color_attachment {
+            constants::NONE => None,
+            attachment => self.attachment_internal_format(attachment),
         };
-        let depth = match self.attachment(constants::DEPTH_ATTACHMENT) {
-            Some(WebGLFramebufferAttachmentRoot::Renderbuffer(rb)) => Some(rb.internal_format()),
-            _ => None,
-        };
-        let stencil = match self.attachment(constants::STENCIL_ATTACHMENT) {
-            Some(WebGLFramebufferAttachmentRoot::Renderbuffer(rb)) => Some(rb.internal_format()),
-            _ => None,
-        };
+        let depth = self
+            .attachment_internal_format(constants::DEPTH_ATTACHMENT)
+            .or(depth_stencil);
+        let stencil = self
+            .attachment_internal_format(constants::STENCIL_ATTACHMENT)
+            .or(depth_stencil);
         Ok((color, depth, stencil))
     }
 

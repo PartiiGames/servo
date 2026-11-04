@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::{self, cmp, fmt};
+use std::{self, fmt};
 
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{TexDataType, TexFormat};
@@ -692,8 +692,13 @@ impl WebGLValidator for CompressedTexSubImage2DValidator<'_> {
 }
 
 pub(crate) struct TexStorageValidator<'a> {
-    common_validator: CommonTexImage2DValidator<'a>,
+    context: &'a WebGLRenderingContext,
     dimensions: u8,
+    target: u32,
+    levels: i32,
+    internal_format: u32,
+    width: i32,
+    height: i32,
     depth: i32,
 }
 
@@ -720,84 +725,126 @@ impl<'a> TexStorageValidator<'a> {
         depth: i32,
     ) -> Self {
         TexStorageValidator {
-            common_validator: CommonTexImage2DValidator::new(
-                context,
-                target,
-                levels,
-                internal_format,
-                width,
-                height,
-                0,
-            ),
+            context,
             dimensions,
+            target,
+            levels,
+            internal_format,
+            width,
+            height,
             depth,
         }
     }
 }
 
+/// texStorage2D / texStorage3D, per
+/// <https://registry.khronos.org/OpenGL-Refpages/es3.0/html/glTexStorage3D.xhtml> and
+/// <https://registry.khronos.org/OpenGL-Refpages/es3.0/html/glTexStorage2D.xhtml>.
 impl WebGLValidator for TexStorageValidator<'_> {
     type Error = TexImageValidationError;
     type ValidatedOutput = TexStorageValidatorResult;
 
     fn validate(self) -> Result<Self::ValidatedOutput, TexImageValidationError> {
-        let context = self.common_validator.context;
-        let CommonTexImage2DValidatorResult {
-            texture,
-            target,
-            level,
-            internal_format,
-            width,
-            height,
-            border: _,
-        } = self.common_validator.validate()?;
-
-        if self.depth < 1 {
-            context.webgl_error(InvalidValue);
-            return Err(TexImageValidationError::DepthTooLow);
-        }
-        if level < 1 {
-            context.webgl_error(InvalidValue);
-            return Err(TexImageValidationError::LevelTooLow);
-        }
-
-        let dimensions_valid = match target {
-            TexImageTarget::Texture2D | TexImageTarget::CubeMap => self.dimensions == 2,
-            TexImageTarget::Texture3D | TexImageTarget::Texture2DArray => self.dimensions == 3,
-            _ => false,
+        let context = self.context;
+        let target = match TexImageTarget::from_gl_constant(self.target) {
+            Some(target @ (TexImageTarget::Texture2D | TexImageTarget::CubeMap))
+                if self.dimensions == 2 =>
+            {
+                target
+            },
+            Some(target @ (TexImageTarget::Texture3D | TexImageTarget::Texture2DArray))
+                if self.dimensions == 3 =>
+            {
+                target
+            },
+            _ => {
+                context.webgl_error(InvalidEnum);
+                return Err(TexImageValidationError::InvalidTextureTarget(self.target));
+            },
         };
-        if !dimensions_valid {
-            context.webgl_error(InvalidEnum);
-            return Err(TexImageValidationError::InvalidTextureTarget(
-                target.as_gl_constant(),
-            ));
+
+        // Sized formats only; compressed formats need their extension enabled.
+        let internal_format = match TexFormat::from_gl_constant(self.internal_format) {
+            Some(format)
+                if format.is_sized() &&
+                    format.required_webgl_version() <= context.webgl_version() &&
+                    (if format.is_compressed() {
+                        context
+                            .extension_manager()
+                            .get_tex_compression_format(format.as_gl_constant())
+                            .is_some()
+                    } else {
+                        format.usable_as_internal()
+                    }) =>
+            {
+                format
+            },
+            _ => {
+                context.webgl_error(InvalidEnum);
+                return Err(TexImageValidationError::InvalidTextureFormat);
+            },
+        };
+
+        if self.levels < 1 || self.width < 1 || self.height < 1 || self.depth < 1 {
+            context.webgl_error(InvalidValue);
+            return Err(TexImageValidationError::NegativeDimension);
+        }
+        let (levels, width, height, depth) = (
+            self.levels as u32,
+            self.width as u32,
+            self.height as u32,
+            self.depth as u32,
+        );
+
+        let limits = context.limits();
+        let fits = match target {
+            TexImageTarget::Texture2D => {
+                width <= limits.max_tex_size && height <= limits.max_tex_size
+            },
+            TexImageTarget::CubeMap => width == height && width <= limits.max_cube_map_tex_size,
+            TexImageTarget::Texture3D => {
+                width <= limits.max_3d_tex_size &&
+                    height <= limits.max_3d_tex_size &&
+                    depth <= limits.max_3d_tex_size
+            },
+            _ => {
+                width <= limits.max_tex_size &&
+                    height <= limits.max_tex_size &&
+                    depth <= limits.max_array_texture_layers
+            },
+        };
+        if !fits {
+            context.webgl_error(InvalidValue);
+            return Err(TexImageValidationError::TextureTooBig);
         }
 
-        if !internal_format.is_sized() {
-            context.webgl_error(InvalidEnum);
-            return Err(TexImageValidationError::InvalidTextureFormat);
-        }
-
-        let max_level = cmp::max(width, height).ilog2() + 1;
-        if level > max_level {
+        // Levels may not exceed log2 of the largest dimension (depth counts for 3D only).
+        let largest = match target {
+            TexImageTarget::Texture3D => width.max(height).max(depth),
+            _ => width.max(height),
+        };
+        if levels > largest.ilog2() + 1 {
             context.webgl_error(InvalidOperation);
             return Err(TexImageValidationError::LevelTooHigh);
         }
 
-        if texture.target().is_none() {
+        let Some(texture) = context.textures().active_texture_for_image_target(target) else {
             context.webgl_error(InvalidOperation);
-            return Err(TexImageValidationError::TextureTargetNotBound(
-                target.as_gl_constant(),
-            ));
+            return Err(TexImageValidationError::TextureTargetNotBound(self.target));
+        };
+        if texture.is_immutable() {
+            context.webgl_error(InvalidOperation);
+            return Err(TexImageValidationError::TextureTargetNotBound(self.target));
         }
 
         Ok(TexStorageValidatorResult {
             texture,
             target,
-            levels: level,
+            levels,
             internal_format,
             width,
             height,
-            depth: self.depth as u32,
+            depth,
         })
     }
 }

@@ -927,7 +927,6 @@ impl WebGL2RenderingContext {
         );
     }
 
-    #[expect(clippy::too_many_arguments)]
     /// The bytes of a compressed upload from an ArrayBufferView: `src_offset` and
     /// `src_length_override` count elements of the view; a zero override means "to the end".
     fn compressed_src_bytes<'a>(
@@ -1830,6 +1829,7 @@ impl WebGL2RenderingContext {
         }
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn tex_image_3d(
         &self,
         texture: &WebGLTexture,
@@ -1887,6 +1887,47 @@ impl WebGL2RenderingContext {
         if let Some(fb) = self.base.bound_draw_framebuffer() {
             fb.invalidate_texture(texture);
         }
+    }
+}
+
+/// The component type of a colour format, which blitFramebuffer requires to match.
+fn color_component_class(format: u32) -> u8 {
+    match format {
+        constants::R16F |
+        constants::RG16F |
+        constants::RGB16F |
+        constants::RGBA16F |
+        constants::R32F |
+        constants::RG32F |
+        constants::RGB32F |
+        constants::RGBA32F |
+        constants::R11F_G11F_B10F => 1,
+        constants::R8I |
+        constants::R16I |
+        constants::R32I |
+        constants::RG8I |
+        constants::RG16I |
+        constants::RG32I |
+        constants::RGB8I |
+        constants::RGB16I |
+        constants::RGB32I |
+        constants::RGBA8I |
+        constants::RGBA16I |
+        constants::RGBA32I => 2,
+        constants::R8UI |
+        constants::R16UI |
+        constants::R32UI |
+        constants::RG8UI |
+        constants::RG16UI |
+        constants::RG32UI |
+        constants::RGB8UI |
+        constants::RGB16UI |
+        constants::RGB32UI |
+        constants::RGBA8UI |
+        constants::RGBA16UI |
+        constants::RGBA32UI |
+        constants::RGB10_A2UI => 3,
+        _ => 0,
     }
 }
 
@@ -5489,19 +5530,34 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         };
 
         let (src_color, src_depth, src_stencil) = match src_fb {
-            Some(fb) => {
-                handle_potential_webgl_error!(self.base, fb.get_attachment_formats(), return)
-            },
+            Some(fb) => handle_potential_webgl_error!(
+                self.base,
+                fb.get_attachment_formats(fb.read_buffer()),
+                return
+            ),
             None => handle_potential_webgl_error!(self.base, get_default_formats(), return),
         };
         let (dst_color, dst_depth, dst_stencil) = match dst_fb {
             Some(fb) => {
-                handle_potential_webgl_error!(self.base, fb.get_attachment_formats(), return)
+                let draw_buffer = match fb.draw_buffer_i(0) {
+                    constants::NONE => constants::COLOR_ATTACHMENT0,
+                    buffer => buffer,
+                };
+                handle_potential_webgl_error!(
+                    self.base,
+                    fb.get_attachment_formats(draw_buffer),
+                    return
+                )
             },
             None => handle_potential_webgl_error!(self.base, get_default_formats(), return),
         };
 
-        if bits.intersects(BlitFrameBufferFlags::COLOR) && src_color != dst_color {
+        // Colour blits need matching component types (normalized, float, signed or unsigned
+        // integer); GL itself rejects format mismatches out of multisampled buffers.
+        if bits.intersects(BlitFrameBufferFlags::COLOR) &&
+            let (Some(src), Some(dst)) = (src_color, dst_color) &&
+            color_component_class(src) != color_component_class(dst)
+        {
             return self.base.webgl_error(InvalidOperation);
         }
         if bits.intersects(BlitFrameBufferFlags::DEPTH) && src_depth != dst_depth {
