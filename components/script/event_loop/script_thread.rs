@@ -292,6 +292,10 @@ pub struct ScriptThread {
     /// frame (gl-worker: 79.5 fps on a 60 Hz grid). Callbacks wait while it is less than half a
     /// frame since they last ran.
     last_animation_frame_callbacks_time: Cell<Option<Instant>>,
+    /// Partii: a rendering update left rAF callbacks waiting (not due yet). The next
+    /// opportunity is then scheduled for when they are due, not after upstream's 20 ms
+    /// fallback (which held bench at 50 fps when a renderer tick was the one that waited).
+    animation_frame_deferred: Cell<bool>,
     /// The deadline of the last idle period (requestIdleCallback): the next one starts after it.
     idle_period_end: Cell<Option<Instant>>,
     /// A wake-up timer is scheduled for this time, to start the next idle period.
@@ -975,6 +979,7 @@ impl ScriptThread {
                     documents: DomRefCell::new(DocumentCollection::default()),
                     last_render_opportunity_time: Default::default(),
                     last_animation_frame_callbacks_time: Default::default(),
+                    animation_frame_deferred: Default::default(),
                     idle_period_end: Default::default(),
                     idle_wake_at: Default::default(),
                     window_proxies: Default::default(),
@@ -1240,6 +1245,8 @@ impl ScriptThread {
                         self.last_animation_frame_callbacks_time.set(Some(now));
                     }
                     document.run_the_animation_frame_callbacks(cx);
+                } else if document.has_active_request_animation_frame_callbacks() {
+                    self.animation_frame_deferred.set(true);
                 }
             }
 
@@ -1321,6 +1328,19 @@ impl ScriptThread {
         no_gc: &NoGC,
         built_any_display_lists: bool,
     ) {
+        // Partii: rAF callbacks that waited run one frame after they last ran (the frame the
+        // waiting update would have been), whatever else is pending.
+        if self.animation_frame_deferred.take() {
+            let due = self
+                .last_animation_frame_callbacks_time
+                .get()
+                .map(|last| last + frame_period())
+                .unwrap_or_else(Instant::now);
+            self.schedule_update_the_rendering_timer_if_necessary(
+                due.saturating_duration_since(Instant::now()),
+            );
+            return;
+        }
         let needs_rendering_update = self
             .documents
             .borrow()
