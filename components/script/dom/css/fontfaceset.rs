@@ -340,6 +340,33 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
         // then switch the FontFaceSet to loaded.
     }
 
+    /// <https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-check>
+    fn Check(&self, font: DOMString, text: DOMString) -> Fallible<bool> {
+        // This will need adjustments once FontFaceSet is exposed to workers.
+        let Some(window) = DomRoot::downcast::<Window>(self.global()) else {
+            return Ok(true);
+        };
+        let document = window.Document();
+        // Step 2. Find the matching font faces from font face set using the font and text
+        // arguments passed to the function, and including system fonts. If a syntax error was
+        // returned, throw a SyntaxError exception and terminate these steps.
+        let Ok(font_face_list) =
+            self.find_the_matching_font_faces(&document, &font.to_string(), &text.to_string())
+        else {
+            return Err(Error::Syntax(Some("Failed to parse font query".into())));
+        };
+        // Step 4. If font face list is empty, or all fonts in the font face list either have a
+        // status attribute of "loaded" or "error", return true. Otherwise, return false.
+        // (Matching faces are only author faces here, so a font query naming system or generic
+        // families only gives an empty list, as in other engines.)
+        Ok(font_face_list.iter().all(|face| {
+            matches!(
+                face.Status(),
+                FontFaceLoadStatus::Loaded | FontFaceLoadStatus::Error
+            )
+        }))
+    }
+
     /// <https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-load>
     fn Load(&self, cx: &mut JSContext, font: DOMString, text: DOMString) -> RootedPromise {
         // Step 1. Let font face set be the FontFaceSet object this method was called on. Let
