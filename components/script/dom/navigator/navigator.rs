@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 use bytes::Bytes;
 use dom_struct::dom_struct;
 use embedder_traits::{EmbedderMsg, ProtocolHandlerUpdateRegistration, RegisterOrUnregister};
+use js::realm::CurrentRealm;
 use headers::HeaderMap;
 use http::header::{self, HeaderValue};
 use js::context::JSContext;
@@ -61,6 +62,8 @@ use crate::dom::servointernals::ServoInternals;
 use crate::dom::storagemanager::StorageManager;
 use crate::dom::types::UserActivation;
 use crate::dom::wakelock::WakeLock;
+use crate::dom::battery::BatteryManager;
+use crate::dom::promise::{Promise, RootedPromise};
 #[cfg(feature = "webgpu")]
 use crate::dom::webgpu::gpu::GPU;
 use crate::dom::window::Window;
@@ -141,6 +144,8 @@ pub(crate) struct Navigator {
     servo_internals: MutNullableDom<ServoInternals>,
     user_activation: MutNullableDom<UserActivation>,
     wake_lock: MutNullableDom<WakeLock>,
+    /// Partii: <https://w3c.github.io/battery/#dfn-batterymanager>
+    battery_manager: MutNullableDom<BatteryManager>,
 }
 
 impl Navigator {
@@ -174,6 +179,7 @@ impl Navigator {
             servo_internals: Default::default(),
             user_activation: Default::default(),
             wake_lock: Default::default(),
+            battery_manager: Default::default(),
         }
     }
 
@@ -672,6 +678,21 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     /// <https://w3c.github.io/screen-wake-lock/#dom-navigator-wakelock>
     fn WakeLock(&self, cx: &mut js::context::JSContext) -> DomRoot<WakeLock> {
         self.wake_lock.or_init(|| WakeLock::new(cx, &self.global()))
+    }
+
+    /// <https://w3c.github.io/battery/#the-getbattery-method>
+    fn GetBattery(&self, realm: &mut CurrentRealm) -> RootedPromise {
+        let promise = Promise::new_in_realm(realm);
+        let manager = match self.battery_manager.get() {
+            Some(manager) => manager,
+            None => {
+                let manager = BatteryManager::new(realm, &self.global());
+                self.battery_manager.set(Some(&manager));
+                manager
+            },
+        };
+        manager.update(realm, &promise);
+        promise
     }
 }
 

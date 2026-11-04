@@ -613,6 +613,13 @@ impl ServoInner {
                         .get_text(webview, StringRequest::from(result_sender));
                 }
             },
+            EmbedderMsg::GetBatteryStatus(webview_id, callback) => {
+                let status = self
+                    .get_webview_handle(webview_id)
+                    .and_then(|webview| webview.delegate().battery_status(webview))
+                    .unwrap_or_default();
+                let _ = callback.send(status);
+            },
             EmbedderMsg::SetClipboardText(webview_id, string) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview.clipboard_delegate().set_text(webview, string);

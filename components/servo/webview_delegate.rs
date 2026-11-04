@@ -1031,6 +1031,12 @@ pub trait WebViewDelegate {
     /// reading a cached value or querying the user for permission via the user interface.
     fn request_permission(&self, _webview: WebView, _request: PermissionRequest) {}
 
+    /// Partii: the device's battery for `navigator.getBattery()`; `None` reports no battery
+    /// (charging, full).
+    fn battery_status(&self, _webview: WebView) -> Option<embedder_traits::BatteryStatus> {
+        None
+    }
+
     /// Request that the embedder supply credentials to use for HTTP authentication.
     fn request_authentication(
         &self,

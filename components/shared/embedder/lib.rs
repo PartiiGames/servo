@@ -491,6 +491,8 @@ pub enum EmbedderMsg {
     ClearClipboard(WebViewId),
     /// Gets system clipboard contents
     GetClipboardText(WebViewId, GenericCallback<Result<String, String>>),
+    /// Partii: the battery state for navigator.getBattery().
+    GetBatteryStatus(WebViewId, GenericCallback<BatteryStatus>),
     /// Sets system clipboard contents
     SetClipboardText(WebViewId, String),
     /// Changes the cursor.
@@ -1208,4 +1210,29 @@ pub trait WakeLockDelegate: Send + Sync {
     /// the resource to sleep. Called when the aggregate lock count transitions
     /// from N to 0.
     fn release(&self, type_: WakeLockType) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+/// Partii: the state of the device's battery (<https://w3c.github.io/battery/>).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BatteryStatus {
+    /// Charging (or no battery).
+    pub charging: bool,
+    /// Seconds until full; 0 when full, `f64::INFINITY` when discharging or unknown.
+    pub charging_time: f64,
+    /// Seconds until empty; `f64::INFINITY` when charging or unknown.
+    pub discharging_time: f64,
+    /// 0.0 to 1.0.
+    pub level: f64,
+}
+
+impl Default for BatteryStatus {
+    /// What a device without a battery reports.
+    fn default() -> Self {
+        Self {
+            charging: true,
+            charging_time: 0.0,
+            discharging_time: f64::INFINITY,
+            level: 1.0,
+        }
+    }
 }
