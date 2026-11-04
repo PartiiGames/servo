@@ -208,6 +208,11 @@ impl OfflineAudioContextMethods<crate::DomTypeHolder> for OfflineAudioContext {
                             .unwrap()
                             .root(cx)
                     };
+                    // Rendering is over: the context is closed (statechange) by the time
+                    // the promise resolves.
+                    if this.context.State() != AudioContextState::Closed {
+                        this.context.set_state_and_notify(AudioContextState::Closed);
+                    }
                     promise.resolve_native(cx, &buffer);
                     let global = &this.global();
                     let window = global.as_window();
