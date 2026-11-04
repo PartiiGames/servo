@@ -848,7 +848,7 @@ pub mod column_rule {
     }
 }
 
-#[cfg(feature = "gecko")]
+// Partii: text-wrap (and text-wrap-style) for Servo too.
 pub mod text_wrap {
     pub use crate::properties::generated::shorthands::text_wrap::*;
 

@@ -4007,7 +4007,7 @@ keyword = { values = ["wrap", "nowrap"] }
 
 [text-wrap-style]
 struct = "inherited_text"
-engine = "gecko"
+servo_restyle_damage = "rebuild_box"
 spec = "https://drafts.csswg.org/css-text-4/#text-wrap-style"
 animation_type = "discrete"
 affects = "layout"

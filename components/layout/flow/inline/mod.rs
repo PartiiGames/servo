@@ -106,6 +106,7 @@ use servo_base::text::{Utf8CodeUnits, Utf32CodeUnits};
 use style::Zero;
 use style::computed_values::line_break::T as LineBreak;
 use style::computed_values::text_wrap_mode::T as TextWrapMode;
+use style::computed_values::text_wrap_style::T as TextWrapStyle;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
@@ -916,6 +917,13 @@ struct InlineFormattingContextLayout<'layout_data> {
     /// Whether block-level boxes inside this inline formatting context should ignore their
     /// margins for the purpose of stretching in the block axis.
     ignore_block_margins_for_stretch: LogicalSides1D<bool>,
+
+    /// Partii: `text-wrap-style: balance` breaks lines at this inline size instead of the
+    /// containing block's (alignment still uses the containing block).
+    line_break_inline_size: Option<Au>,
+
+    /// Partii: lines finished so far (for `text-wrap-style: balance`).
+    lines_finished: usize,
 }
 
 impl InlineFormattingContextLayout<'_> {
@@ -1106,6 +1114,7 @@ impl InlineFormattingContextLayout<'_> {
         last_line_or_forced_line_break: bool,
         for_block_level: bool,
     ) {
+        self.lines_finished += 1;
         self.possibly_push_empty_text_run_to_line_for_text_caret();
 
         let whitespace_trimmed = self.current_line.trim_trailing_whitespace();
@@ -1511,7 +1520,9 @@ impl InlineFormattingContextLayout<'_> {
                 .size
         } else {
             LogicalVec2 {
-                inline: containing_block.size.inline,
+                inline: self
+                    .line_break_inline_size
+                    .unwrap_or(containing_block.size.inline),
                 block: MAX_AU,
             }
         };
@@ -1544,7 +1555,10 @@ impl InlineFormattingContextLayout<'_> {
 
         // If the potential line is larger than the containing block we do not even need to consider
         // floats. We definitely have to do a linebreak.
-        if potential_line_size.inline > containing_block.size.inline {
+        if potential_line_size.inline >
+            self.line_break_inline_size
+                .unwrap_or(containing_block.size.inline)
+        {
             return true;
         }
 
@@ -2076,6 +2090,72 @@ impl InlineFormattingContext {
         collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
         ignore_block_margins_for_stretch: LogicalSides1D<bool>,
     ) -> IndependentFormattingContextLayoutResult {
+        // Partii: `text-wrap-style: balance`. For 2 to 6 lines (as Blink), find the narrowest
+        // line-breaking width that keeps the line count, by trial layouts (no floats around:
+        // those need the sequential layout state, which a trial can't use).
+        // <https://drafts.csswg.org/css-text-4/#valdef-text-wrap-style-balance>
+        let balance = containing_block.style.get_inherited_text().text_wrap_style ==
+            TextWrapStyle::Balance &&
+            sequential_layout_state.is_none() &&
+            !self.is_single_line_text_input &&
+            containing_block.size.inline > Au::zero();
+        let mut line_break_inline_size = None;
+        if balance {
+            let mut lines_at = |width: Au| {
+                let mut scratch = PositioningContext::default();
+                self.layout_with_line_width(
+                    layout_context,
+                    &mut scratch,
+                    containing_block,
+                    None,
+                    collapsible_with_parent_start_margin,
+                    ignore_block_margins_for_stretch,
+                    Some(width),
+                )
+                .1
+            };
+            let full = containing_block.size.inline;
+            let lines = lines_at(full);
+            if (2..=6).contains(&lines) {
+                let (mut low, mut high) = (full.scale_by(1.0 / lines as f32), full);
+                for _ in 0..10 {
+                    if high - low <= Au::from_px(1) {
+                        break;
+                    }
+                    let middle = (low + high).scale_by(0.5);
+                    if lines_at(middle) > lines {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                line_break_inline_size = Some(high);
+            }
+        }
+        self.layout_with_line_width(
+            layout_context,
+            positioning_context,
+            containing_block,
+            sequential_layout_state,
+            collapsible_with_parent_start_margin,
+            ignore_block_margins_for_stretch,
+            line_break_inline_size,
+        )
+        .0
+    }
+
+    /// The inline layout proper; also returns the number of lines.
+    #[allow(clippy::too_many_arguments)]
+    fn layout_with_line_width(
+        &self,
+        layout_context: &LayoutContext,
+        positioning_context: &mut PositioningContext,
+        containing_block: &ContainingBlock,
+        sequential_layout_state: Option<&mut SequentialLayoutState>,
+        collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
+        ignore_block_margins_for_stretch: LogicalSides1D<bool>,
+        line_break_inline_size: Option<Au>,
+    ) -> (IndependentFormattingContextLayoutResult, usize) {
         // Clear any cached inline fragments from previous layouts.
         for inline_box in self.inline_boxes.iter() {
             inline_box.borrow().base.clear_fragments();
@@ -2124,6 +2204,8 @@ impl InlineFormattingContext {
             white_space_collapse: style_text.white_space_collapse,
             text_wrap_mode: style_text.text_wrap_mode,
             ignore_block_margins_for_stretch,
+            line_break_inline_size,
+            lines_finished: 0,
         };
 
         for item in self.inline_items.iter() {
@@ -2170,15 +2252,19 @@ impl InlineFormattingContext {
         let (content_block_size, collapsible_margins_in_children, baselines) =
             layout.placement_state.finish();
 
-        IndependentFormattingContextLayoutResult {
-            fragments: layout.fragments,
-            content_block_size,
-            collapsible_margins_in_children,
-            baselines,
-            depends_on_block_constraints: layout.depends_on_block_constraints,
-            content_inline_size_for_table: None,
-            specific_layout_info: None,
-        }
+        let lines_finished = layout.lines_finished;
+        (
+            IndependentFormattingContextLayoutResult {
+                fragments: layout.fragments,
+                content_block_size,
+                collapsible_margins_in_children,
+                baselines,
+                depends_on_block_constraints: layout.depends_on_block_constraints,
+                content_inline_size_for_table: None,
+                specific_layout_info: None,
+            },
+            lines_finished,
+        )
     }
 
     pub(crate) fn subtree_size(&self) -> usize {
