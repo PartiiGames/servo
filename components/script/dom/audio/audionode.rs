@@ -8,6 +8,7 @@ use std::sync::Arc;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use log::warn;
+use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::InheritTypes::{
     AudioNodeTypeId, AudioScheduledSourceNodeTypeId, EventTargetTypeId,
 };
@@ -17,6 +18,7 @@ use servo_media::audio::audio_node::{
     ChannelInterpretation as ServoMediaChannelInterpretation,
 };
 use servo_media::audio::graph::NodeId;
+use servo_media::audio::param::ParamType;
 
 use crate::conversions::Convert;
 use crate::dom::audio::audioparam::AudioParam;
@@ -30,6 +32,13 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::console::Console;
 use crate::dom::eventtarget::EventTarget;
+
+/// Where one of this node's outputs goes: an input of a node, or an AudioParam.
+#[derive(Clone, Copy, PartialEq)]
+enum ConnectionTarget {
+    Input(NodeId, u32),
+    Param(NodeId, ParamType),
+}
 
 // 32 is the minimum required by the spec for createBuffer() and the deprecated
 // createScriptProcessor() and matches what is used by Blink and Gecko.
@@ -52,6 +61,12 @@ pub(crate) struct AudioNode {
     #[no_trace]
     #[ignore_malloc_size_of = "servo_media"]
     lifetime: Option<Arc<NodeUnreferencedOnDrop>>,
+    /// This node's connections, (output, target), so that disconnect() can throw
+    /// InvalidAccessError for one that doesn't exist. By NodeId, so they keep no node alive; a
+    /// target's engine node (and so its id) lives on while it has this input.
+    #[no_trace]
+    #[ignore_malloc_size_of = "servo_media"]
+    connections: DomRefCell<Vec<(u32, ConnectionTarget)>>,
 }
 
 impl AudioNode {
@@ -114,7 +129,23 @@ impl AudioNode {
             channel_count_mode: Cell::new(options.mode),
             channel_interpretation: Cell::new(options.interpretation),
             lifetime: None,
+            connections: Default::default(),
         }
+    }
+
+    fn add_connection(&self, output: u32, target: ConnectionTarget) {
+        let mut connections = self.connections.borrow_mut();
+        if !connections.contains(&(output, target)) {
+            connections.push((output, target));
+        }
+    }
+
+    /// Forget the connections that match; false (InvalidAccessError) if none did.
+    fn remove_connections(&self, matches: impl Fn(u32, ConnectionTarget) -> bool) -> bool {
+        let mut connections = self.connections.borrow_mut();
+        let before = connections.len();
+        connections.retain(|&(output, target)| !matches(output, target));
+        connections.len() != before
     }
 
     pub(crate) fn message(&self, message: AudioNodeMessage) {
@@ -162,6 +193,7 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             .lock()
             .unwrap()
             .connect_ports(source_id.output(output), dest_id.input(input));
+        self.add_connection(output, ConnectionTarget::Input(dest_id, input));
 
         Ok(DomRoot::from_ref(destination))
     }
@@ -193,6 +225,10 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
                 source_id.output(output),
                 param_node.param(dest.param_type()),
             );
+        self.add_connection(
+            output,
+            ConnectionTarget::Param(param_node, dest.param_type()),
+        );
 
         Ok(())
     }
@@ -200,6 +236,7 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect>
     fn Disconnect(&self) -> ErrorResult {
         if let Some(node_id) = self.node_id() {
+            self.connections.borrow_mut().clear();
             self.context
                 .audio_context_impl()
                 .lock()
@@ -211,7 +248,11 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
 
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-output>
     fn Disconnect_(&self, out: u32) -> ErrorResult {
+        if out >= self.NumberOfOutputs() {
+            return Err(Error::IndexSize(None));
+        }
         if let Some(node_id) = self.node_id() {
+            self.remove_connections(|output, _| output == out);
             self.context
                 .audio_context_impl()
                 .lock()
@@ -224,6 +265,11 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-destinationnode>
     fn Disconnect__(&self, to: &AudioNode) -> ErrorResult {
         if let (Some(from_node), Some(to_node)) = (self.node_id(), to.node_id()) {
+            if !self.remove_connections(
+                |_, target| matches!(target, ConnectionTarget::Input(node, _) if node == to_node),
+            ) {
+                return Err(Error::InvalidAccess(None));
+            }
             self.context
                 .audio_context_impl()
                 .lock()
@@ -235,7 +281,16 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
 
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-destinationnode-output>
     fn Disconnect___(&self, to: &AudioNode, out: u32) -> ErrorResult {
+        if out >= self.NumberOfOutputs() {
+            return Err(Error::IndexSize(None));
+        }
         if let (Some(from_node), Some(to_node)) = (self.node_id(), to.node_id()) {
+            if !self.remove_connections(|output, target| {
+                output == out &&
+                    matches!(target, ConnectionTarget::Input(node, _) if node == to_node)
+            }) {
+                return Err(Error::InvalidAccess(None));
+            }
             self.context
                 .audio_context_impl()
                 .lock()
@@ -247,7 +302,14 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
 
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-destinationnode-output-input>
     fn Disconnect____(&self, to: &AudioNode, out: u32, inp: u32) -> ErrorResult {
+        if out >= self.NumberOfOutputs() || inp >= to.NumberOfInputs() {
+            return Err(Error::IndexSize(None));
+        }
         if let (Some(from_node), Some(to_node)) = (self.node_id(), to.node_id()) {
+            let target = ConnectionTarget::Input(to_node, inp);
+            if !self.remove_connections(|output, t| output == out && t == target) {
+                return Err(Error::InvalidAccess(None));
+            }
             self.context
                 .audio_context_impl()
                 .lock()
@@ -257,9 +319,13 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
         Ok(())
     }
 
-    /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect>
+    /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-destinationparam>
     fn Disconnect_____(&self, param: &AudioParam) -> ErrorResult {
         if let (Some(from_node), Some(param_node)) = (self.node_id(), param.node_id()) {
+            let target = ConnectionTarget::Param(param_node, param.param_type());
+            if !self.remove_connections(|_, t| t == target) {
+                return Err(Error::InvalidAccess(None));
+            }
             self.context
                 .audio_context_impl()
                 .lock()
@@ -269,9 +335,16 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
         Ok(())
     }
 
-    /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect>
+    /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-destinationparam-output>
     fn Disconnect______(&self, param: &AudioParam, out: u32) -> ErrorResult {
+        if out >= self.NumberOfOutputs() {
+            return Err(Error::IndexSize(None));
+        }
         if let (Some(from_node), Some(param_node)) = (self.node_id(), param.node_id()) {
+            let target = ConnectionTarget::Param(param_node, param.param_type());
+            if !self.remove_connections(|output, t| output == out && t == target) {
+                return Err(Error::InvalidAccess(None));
+            }
             self.context
                 .audio_context_impl()
                 .lock()
