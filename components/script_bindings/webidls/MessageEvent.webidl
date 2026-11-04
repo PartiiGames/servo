@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#messageevent
-[Exposed=(Window,Worker)]
+[Exposed=(Window,Worker,AudioWorklet)]
 interface MessageEvent : Event {
   [Throws] constructor(DOMString type, optional MessageEventInit eventInitDict = {});
   readonly attribute any data;

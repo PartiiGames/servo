@@ -81,7 +81,18 @@ use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::domexception::{DOMErrorName, DOMException};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::promise::{Promise, RootedPromise, TracedPromise};
-use crate::dom::types::PeriodicWave;
+use crate::dom::types::{AudioWorklet, PeriodicWave};
+
+/// One `AudioParamDescriptor` of a registered AudioWorkletProcessor (plain data: it crosses from
+/// the render thread to the main thread).
+#[derive(Clone, Debug, MallocSizeOf)]
+pub(crate) struct AudioParamDescriptorData {
+    pub(crate) name: String,
+    pub(crate) default_value: f32,
+    pub(crate) min_value: f32,
+    pub(crate) max_value: f32,
+    pub(crate) a_rate: bool,
+}
 
 pub(crate) enum BaseAudioContextOptions {
     AudioContext(RealTimeAudioContextOptions),
@@ -109,6 +120,11 @@ pub(crate) struct BaseAudioContext {
     /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-destination>
     destination: MutNullableDom<AudioDestinationNode>,
     listener: MutNullableDom<AudioListener>,
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-audioworklet>
+    audio_worklet: MutNullableDom<AudioWorklet>,
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-node-name-to-parameter-descriptor-map>
+    #[no_trace]
+    audio_worklet_processors: DomRefCell<HashMap<String, Vec<AudioParamDescriptorData>>>,
     /// Resume promises which are soon to be fulfilled by a queued task.
     in_flight_resume_promises_queue: DomRefCell<VecDeque<(BoxedSliceOfPromises, ErrorResult)>>,
     /// <https://webaudio.github.io/web-audio-api/#pendingresumepromises>
@@ -148,6 +164,8 @@ impl BaseAudioContext {
             audio_context_impl,
             destination: Default::default(),
             listener: Default::default(),
+            audio_worklet: Default::default(),
+            audio_worklet_processors: Default::default(),
             in_flight_resume_promises_queue: Default::default(),
             pending_resume_promises: Default::default(),
             decode_resolvers: Default::default(),
@@ -155,6 +173,22 @@ impl BaseAudioContext {
             state: Cell::new(AudioContextState::Suspended),
             channel_count: channel_count.into(),
         })
+    }
+
+    /// Record a processor registered in this context's AudioWorkletGlobalScope.
+    pub(crate) fn register_audio_worklet_processor(
+        &self,
+        name: String,
+        descriptors: Vec<AudioParamDescriptorData>,
+    ) {
+        self.audio_worklet_processors
+            .borrow_mut()
+            .insert(name, descriptors);
+    }
+
+    /// The parameter descriptors of a registered processor, if `name` is registered.
+    pub(crate) fn audio_worklet_processor(&self, name: &str) -> Option<Vec<AudioParamDescriptorData>> {
+        self.audio_worklet_processors.borrow().get(name).cloned()
     }
 
     /// Tells whether this is an OfflineAudioContext or not.
@@ -352,6 +386,14 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
         let window = global.as_window();
         self.listener
             .or_init(|| AudioListener::new(cx, window, self))
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-audioworklet>
+    fn AudioWorklet(&self, cx: &mut JSContext) -> DomRoot<AudioWorklet> {
+        let global = self.global();
+        let window = global.as_window();
+        self.audio_worklet
+            .or_init(|| AudioWorklet::new(cx, window, self))
     }
 
     // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-onstatechange

@@ -21,7 +21,7 @@ pub(crate) struct MessageChannel {
 
 impl MessageChannel {
     /// <https://html.spec.whatwg.org/multipage/#dom-messagechannel>
-    fn new(
+    pub(crate) fn new(
         cx: &mut JSContext,
         incumbent: &GlobalScope,
         proto: Option<HandleObject>,
