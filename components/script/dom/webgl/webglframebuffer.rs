@@ -379,6 +379,12 @@ impl WebGLFramebuffer {
                 texture: att_tex,
                 level,
             }) => match att_tex.image_info_at_face(0, *level as u32) {
+                Some(_)
+                    if self.webgl_version == WebGLVersion::WebGL2 &&
+                        !att_tex.level_is_attachment_complete(*level as u32) =>
+                {
+                    return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
+                },
                 Some(info) => (
                     Some(info.internal_format().as_gl_constant()),
                     Some((info.width() as i32, info.height() as i32)),

@@ -373,6 +373,47 @@ impl WebGLTexture {
         (base, max)
     }
 
+    /// Whether `level` of this texture can be a complete framebuffer attachment (ES 3.0.6
+    /// 4.4.4.2): for a mutable texture it must lie in [level_base, q], and a level other
+    /// than level_base needs the texture to be mipmap complete. Immutable textures (whose
+    /// levels all exist) and WebGL 1 rules are not affected.
+    pub(crate) fn level_is_attachment_complete(&self, level: u32) -> bool {
+        if self.is_immutable() {
+            return true;
+        }
+        let base = self.base_level.get();
+        let Some(base_info) = self.image_info_at_face(0, base) else {
+            return false;
+        };
+        let is_3d = self.target.get() == Some(constants::TEXTURE_3D);
+        let mut largest = base_info.width().max(base_info.height());
+        if is_3d {
+            largest = largest.max(base_info.depth());
+        }
+        let p = (31 - largest.max(1).leading_zeros()).saturating_add(base);
+        let q = p.min(self.max_level.get());
+        if level < base || level > q {
+            return false;
+        }
+        if level == base {
+            return true;
+        }
+        (base..=q).all(|l| {
+            let shift = l - base;
+            self.image_info_at_face(0, l).is_some_and(|info| {
+                info.internal_format() == base_info.internal_format() &&
+                    info.width() == (base_info.width() >> shift).max(1) &&
+                    info.height() == (base_info.height() >> shift).max(1) &&
+                    info.depth() ==
+                        if is_3d {
+                            (base_info.depth() >> shift).max(1)
+                        } else {
+                            base_info.depth()
+                        }
+            })
+        })
+    }
+
     pub(crate) fn compare_mode(&self) -> u32 {
         self.compare_mode.get()
     }
@@ -438,6 +479,10 @@ impl WebGLTexture {
                         self.max_level.set(int_value as u32);
                     }
                     context.send_command(WebGLCommand::TexParameteri(target, param, int_value));
+                    // The levels a framebuffer may attach depend on these.
+                    if let Some(fb) = self.attached_framebuffer.get() {
+                        fb.update_status();
+                    }
                     return Ok(());
                 },
                 constants::TEXTURE_COMPARE_FUNC => match int_value as u32 {
