@@ -2328,6 +2328,18 @@ impl VirtualMethods for HTMLInputElement {
             event.IsTrusted()
         {
             if let Some(compositionevent) = event.downcast::<CompositionEvent>() {
+                // <https://w3c.github.io/uievents/#events-composition-input-events>:
+                // beforeinput (insertCompositionText) before each change the composition makes
+                // (an empty compositionend, a cancel, changes nothing).
+                if event.type_() != atom!("compositionstart") &&
+                    !(event.type_() == atom!("compositionend") && compositionevent.data().is_empty())
+                {
+                    self.fire_composition_beforeinput(
+                        cx,
+                        compositionevent.data().clone(),
+                        event.type_() == atom!("compositionupdate"),
+                    );
+                }
                 if event.type_() == atom!("compositionend") {
                     let action = self
                         .text_input
