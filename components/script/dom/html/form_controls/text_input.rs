@@ -609,9 +609,18 @@ impl<T: ClipboardProvider> TextInput<T> {
         }
     }
 
+    /// Partii: whether the control already shows `text` as the open composition's preedit (the
+    /// selection the last compositionupdate left). Committing it then changes no text.
+    pub(crate) fn preedit_is(&self, text: &str) -> bool {
+        self.selection_content().as_deref() == Some(text)
+    }
+
     pub(crate) fn handle_compositionend(&mut self, event: &CompositionEvent) -> KeyReaction {
         let insertion = event.data().str();
-        if insertion.is_empty() {
+        // An empty end (a cancel), or the commit of the text the preedit already shows: keep the
+        // text, drop the preedit selection, leave the caret after it. No input event, as in
+        // Chromium (the last compositionupdate fired it).
+        if insertion.is_empty() || self.preedit_is(&*insertion) {
             self.clear_selection();
             return KeyReaction::RedrawSelection;
         }

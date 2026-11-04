@@ -413,6 +413,9 @@ impl WheelEvent {
 pub enum ImeEvent {
     Composition(CompositionEvent),
     Dismissed,
+    /// Partii: text the IME committed with no composition open (a direct commit). The focused
+    /// text control gets beforeinput/input with inputType "insertText", as in Chromium.
+    InsertText(String),
 }
 
 #[cfg(feature = "gamepad")]

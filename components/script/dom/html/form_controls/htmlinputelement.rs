@@ -1940,6 +1940,16 @@ impl HTMLInputElement {
         self.input_type().as_specific().update_shadow_tree(cx, self);
     }
 
+    /// Partii: an IME committed `text` with no composition open (see
+    /// [`TextControlElement::handle_ime_insert_text`]).
+    pub(crate) fn ime_insert_text(&self, cx: &mut JSContext, text: String) {
+        if !self.input_type().is_textual_or_password() {
+            return;
+        }
+        self.handle_ime_insert_text(cx, text);
+        self.value_changed(cx);
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#show-the-picker,-if-applicable>
     pub(crate) fn show_the_picker_if_applicable(&self) {
         // FIXME: Implement most of this algorithm
@@ -2329,10 +2339,15 @@ impl VirtualMethods for HTMLInputElement {
         {
             if let Some(compositionevent) = event.downcast::<CompositionEvent>() {
                 // <https://w3c.github.io/uievents/#events-composition-input-events>:
-                // beforeinput (insertCompositionText) before each change the composition makes
-                // (an empty compositionend, a cancel, changes nothing).
+                // beforeinput (insertCompositionText) before each change the composition makes.
+                // An empty compositionend (a cancel), or one that commits the text the preedit
+                // already shows, changes nothing (Chromium fires none either).
                 if event.type_() != atom!("compositionstart") &&
-                    !(event.type_() == atom!("compositionend") && compositionevent.data().is_empty())
+                    !(event.type_() == atom!("compositionend") &&
+                        (compositionevent.data().is_empty() ||
+                            self.text_input
+                                .borrow()
+                                .preedit_is(&compositionevent.data().str())))
                 {
                     self.fire_composition_beforeinput(
                         cx,
@@ -2345,7 +2360,7 @@ impl VirtualMethods for HTMLInputElement {
                         .text_input
                         .borrow_mut()
                         .handle_compositionend(compositionevent);
-                    self.handle_key_reaction(cx, action);
+                    self.handle_composition_reaction(cx, action);
                     self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                     self.update_placeholder_shown_state();
                 } else if event.type_() == atom!("compositionupdate") {
@@ -2353,7 +2368,7 @@ impl VirtualMethods for HTMLInputElement {
                         .text_input
                         .borrow_mut()
                         .handle_compositionupdate(compositionevent);
-                    self.handle_key_reaction(cx, action);
+                    self.handle_composition_reaction(cx, action);
                     self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                     self.update_placeholder_shown_state();
                 } else if event.type_() == atom!("compositionstart") {
