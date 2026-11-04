@@ -219,8 +219,11 @@ impl BaseAudioContext {
     }
 
     // https://webaudio.github.io/web-audio-api/#allowed-to-start
+    // Based on the [[control thread state]]: the state attribute can still read "running" right
+    // after a suspend(), which made the following resume() wait forever.
     pub(crate) fn is_allowed_to_start(&self) -> bool {
-        self.state.get() == AudioContextState::Suspended
+        self.audio_context_impl.lock().unwrap().state() != ProcessingState::Closed &&
+            self.state.get() != AudioContextState::Closed
     }
 
     pub(crate) fn push_pending_resume_promise(&self, promise: &RootedPromise) {
@@ -407,8 +410,15 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
             return promise;
         }
 
-        // Step 3.
-        if self.state.get() == AudioContextState::Running {
+        // Step 3. Decide on the [[control thread state]] (set synchronously by suspend() and
+        // resume()), not only the state attribute, which a queued task updates later: with the
+        // attribute alone, a resume() right after a suspend() saw "running" and never resumed the
+        // rendering thread. Resolve at once only when both say running, so that the attribute
+        // already reads "running" when the promise resolves (pages check it); otherwise take the
+        // normal path, which resolves after the attribute is updated.
+        let control_running =
+            self.audio_context_impl.lock().unwrap().state() == ProcessingState::Running;
+        if control_running && self.state.get() == AudioContextState::Running {
             promise.resolve_native(cx, &());
             return promise;
         }
