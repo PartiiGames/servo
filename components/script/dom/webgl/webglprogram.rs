@@ -188,6 +188,8 @@ pub(crate) struct WebGLProgram {
     active_uniforms: DomRefCell<Box<[ActiveUniformInfo]>>,
     #[no_trace]
     active_uniform_blocks: DomRefCell<Box<[ActiveUniformBlockInfo]>>,
+    /// UNIFORM_BLOCK_BINDING of each active uniform block (0 after a link).
+    uniform_block_bindings: DomRefCell<Box<[u32]>>,
     transform_feedback_varyings_length: Cell<i32>,
     transform_feedback_mode: Cell<i32>,
     transform_feedback_varying_bytes: DomRefCell<Box<[u32]>>,
@@ -215,6 +217,7 @@ impl WebGLProgram {
             active_attribs: DomRefCell::new(vec![].into()),
             active_uniforms: DomRefCell::new(vec![].into()),
             active_uniform_blocks: DomRefCell::new(vec![].into()),
+            uniform_block_bindings: DomRefCell::new(vec![].into()),
             transform_feedback_varyings_length: Default::default(),
             transform_feedback_mode: Default::default(),
             transform_feedback_varying_bytes: DomRefCell::new(vec![].into()),
@@ -318,6 +321,7 @@ impl WebGLProgram {
         *self.active_attribs.borrow_mut() = Box::new([]);
         *self.active_uniforms.borrow_mut() = Box::new([]);
         *self.active_uniform_blocks.borrow_mut() = Box::new([]);
+        *self.uniform_block_bindings.borrow_mut() = Box::new([]);
 
         match self.fragment_shader.get() {
             Some(ref shader) if shader.successfully_compiled() => {},
@@ -424,6 +428,8 @@ impl WebGLProgram {
             link_info.transform_feedback_varying_bytes;
         *self.active_attribs.borrow_mut() = link_info.active_attribs;
         *self.active_uniforms.borrow_mut() = link_info.active_uniforms;
+        *self.uniform_block_bindings.borrow_mut() =
+            vec![0; link_info.active_uniform_blocks.len()].into();
         *self.active_uniform_blocks.borrow_mut() = link_info.active_uniform_blocks;
     }
 
@@ -440,6 +446,12 @@ impl WebGLProgram {
     pub(crate) fn active_uniform_blocks(&self) -> Ref<'_, [ActiveUniformBlockInfo]> {
         self.resolve_link();
         Ref::map(self.active_uniform_blocks.borrow(), |blocks| &**blocks)
+    }
+
+    /// The binding point of each active uniform block, by block index.
+    pub(crate) fn uniform_block_bindings(&self) -> Ref<'_, [u32]> {
+        self.resolve_link();
+        Ref::map(self.uniform_block_bindings.borrow(), |bindings| &**bindings)
     }
 
     /// glValidateProgram
@@ -811,9 +823,12 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidValue);
         }
 
-        let mut active_uniforms = self.active_uniforms.borrow_mut();
-        if active_uniforms.len() > block_binding as usize {
-            active_uniforms[block_binding as usize].bind_index = Some(block_binding);
+        if let Some(binding) = self
+            .uniform_block_bindings
+            .borrow_mut()
+            .get_mut(block_index as usize)
+        {
+            *binding = block_binding;
         }
 
         self.upcast()
