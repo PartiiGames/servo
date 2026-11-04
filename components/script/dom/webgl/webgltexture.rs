@@ -658,6 +658,10 @@ impl ImageInfo {
         self.height
     }
 
+    pub(crate) fn depth(&self) -> u32 {
+        self.depth
+    }
+
     pub(crate) fn internal_format(&self) -> TexFormat {
         self.internal_format
     }
@@ -698,6 +702,8 @@ impl ImageInfo {
 pub(crate) enum TexCompressionValidation {
     None,
     S3TC,
+    /// No extra rule for full images; sub-images must be block-aligned (ASTC, BPTC, RGTC).
+    SubImageBlockAligned,
 }
 
 #[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf)]

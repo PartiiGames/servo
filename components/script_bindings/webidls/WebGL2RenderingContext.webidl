@@ -316,51 +316,51 @@ interface mixin WebGL2RenderingContextBase
   undefined texStorage3D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width,
                     GLsizei height, GLsizei depth);
 
-  //[Throws]
-  //void texImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
-  //                GLsizei depth, GLint border, GLenum format, GLenum type, GLintptr pboOffset);
-  //[Throws]
-  //void texImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
-  //                GLsizei depth, GLint border, GLenum format, GLenum type,
-  //                TexImageSource source); // May throw DOMException
   [Throws]
   undefined texImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
                   GLsizei depth, GLint border, GLenum format, GLenum type, /*[AllowShared]*/ ArrayBufferView? srcData);
-  //[Throws]
-  //void texImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
-  //                GLsizei depth, GLint border, GLenum format, GLenum type, [AllowShared] ArrayBufferView srcData,
-  //                GLuint srcOffset);
+  [Throws]
+  undefined texImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
+                  GLsizei depth, GLint border, GLenum format, GLenum type, GLintptr pboOffset);
+  [Throws]
+  undefined texImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
+                  GLsizei depth, GLint border, GLenum format, GLenum type,
+                  TexImageSource source); // May throw DOMException
+  [Throws]
+  undefined texImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
+                  GLsizei depth, GLint border, GLenum format, GLenum type, /*[AllowShared]*/ ArrayBufferView srcData,
+                  GLuint srcOffset);
 
-  //[Throws]
-  //void texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
-  //                   GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
-  //                   GLintptr pboOffset);
-  //[Throws]
-  //void texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
-  //                   GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
-  //                   TexImageSource source); // May throw DOMException
-  //[Throws]
-  //void texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
-  //                   GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
-  //                   [AllowShared] ArrayBufferView? srcData, optional GLuint srcOffset = 0);
+  [Throws]
+  undefined texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                     GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
+                     GLintptr pboOffset);
+  [Throws]
+  undefined texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                     GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
+                     TexImageSource source); // May throw DOMException
+  [Throws]
+  undefined texSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                     GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
+                     /*[AllowShared]*/ ArrayBufferView? srcData, optional GLuint srcOffset = 0);
 
-  //void copyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
-  //                       GLint x, GLint y, GLsizei width, GLsizei height);
+  undefined copyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                         GLint x, GLint y, GLsizei width, GLsizei height);
 
-  //void compressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
-  //                          GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, GLintptr offset);
-  //void compressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
-  //                          GLsizei height, GLsizei depth, GLint border, [AllowShared] ArrayBufferView srcData,
-  //                          optional GLuint srcOffset = 0, optional GLuint srcLengthOverride = 0);
+  undefined compressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, GLintptr offset);
+  undefined compressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLsizei depth, GLint border, /*[AllowShared]*/ ArrayBufferView srcData,
+                            optional GLuint srcOffset = 0, optional GLuint srcLengthOverride = 0);
 
-  //void compressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
-  //                             GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
-  //                             GLenum format, GLsizei imageSize, GLintptr offset);
-  //void compressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
-  //                             GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
-  //                             GLenum format, [AllowShared] ArrayBufferView srcData,
-  //                             optional GLuint srcOffset = 0,
-  //                             optional GLuint srcLengthOverride = 0);
+  undefined compressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                               GLenum format, GLsizei imageSize, GLintptr offset);
+  undefined compressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                               GLenum format, /*[AllowShared]*/ ArrayBufferView srcData,
+                               optional GLuint srcOffset = 0,
+                               optional GLuint srcLengthOverride = 0);
 
   /* Programs and shaders */
   [WebGLHandlesContextLoss] GLint getFragDataLocation(WebGLProgram program, DOMString name);
@@ -518,31 +518,31 @@ interface mixin WebGL2RenderingContextOverloads
                   GLint border, GLenum format, GLenum type, /*[AllowShared]*/ ArrayBufferView srcData,
                   GLuint srcOffset);
 
-  //[Throws]
-  //void texSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
-  //                   GLsizei height, GLenum format, GLenum type, GLintptr pboOffset);
-  //[Throws]
-  //void texSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
-  //                   GLsizei height, GLenum format, GLenum type,
-  //                   TexImageSource source); // May throw DOMException
-  //[Throws]
-  //void texSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
-  //                   GLsizei height, GLenum format, GLenum type, /*[AllowShared]*/ ArrayBufferView srcData,
-  //                   GLuint srcOffset);
+  [Throws]
+  undefined texSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
+                     GLsizei height, GLenum format, GLenum type, GLintptr pboOffset);
+  [Throws]
+  undefined texSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
+                     GLsizei height, GLenum format, GLenum type,
+                     TexImageSource source); // May throw DOMException
+  [Throws]
+  undefined texSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
+                     GLsizei height, GLenum format, GLenum type, /*[AllowShared]*/ ArrayBufferView srcData,
+                     GLuint srcOffset);
 
-  //void compressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
-  //                          GLsizei height, GLint border, GLsizei imageSize, GLintptr offset);
   undefined compressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
                             GLsizei height, GLint border, /*[AllowShared]*/ ArrayBufferView srcData,
                             optional GLuint srcOffset = 0, optional GLuint srcLengthOverride = 0);
+  undefined compressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width,
+                            GLsizei height, GLint border, GLsizei imageSize, GLintptr offset);
 
-  //void compressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
-  //                             GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, GLintptr offset);
   undefined compressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                                GLsizei width, GLsizei height, GLenum format,
                                /*[AllowShared]*/ ArrayBufferView srcData,
                                optional GLuint srcOffset = 0,
                                optional GLuint srcLengthOverride = 0);
+  undefined compressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, GLintptr offset);
 
   undefined uniform1fv(WebGLUniformLocation? location, Float32List data, optional GLuint srcOffset = 0,
                   optional GLuint srcLength = 0);

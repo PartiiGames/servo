@@ -239,6 +239,27 @@ impl WebGLMsgSender {
     }
 }
 
+/// The data of a compressed texture upload: client bytes, or a range of the bound
+/// PIXEL_UNPACK_BUFFER (WebGL 2).
+#[derive(Debug, Deserialize, Serialize)]
+pub enum CompressedTexData {
+    Bytes(TruncatedDebug<GenericSharedMemory>),
+    PixelUnpackBuffer { offset: u32, size: u32 },
+}
+
+impl CompressedTexData {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::PixelUnpackBuffer { size, .. } => *size as usize,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct TruncatedDebug<T>(T);
 
@@ -422,6 +443,59 @@ pub enum WebGLCommand {
         pixel_format: Option<PixelFormat>,
         data: TruncatedDebug<GenericSharedMemory>,
     },
+    TexImage3DPBO {
+        target: u32,
+        level: u32,
+        internal_format: TexFormat,
+        size: Size2D<u32>,
+        depth: u32,
+        format: TexFormat,
+        effective_data_type: u32,
+        unpacking_alignment: u32,
+        offset: i64,
+    },
+    TexSubImage3D {
+        target: u32,
+        level: u32,
+        xoffset: i32,
+        yoffset: i32,
+        zoffset: i32,
+        size: Size2D<u32>,
+        depth: u32,
+        format: TexFormat,
+        data_type: TexDataType,
+        effective_data_type: u32,
+        unpacking_alignment: u32,
+        alpha_treatment: Option<AlphaTreatment>,
+        y_axis_treatment: YAxisTreatment,
+        pixel_format: Option<PixelFormat>,
+        data: TruncatedDebug<GenericSharedMemory>,
+    },
+    TexSubImage3DPBO {
+        target: u32,
+        level: u32,
+        xoffset: i32,
+        yoffset: i32,
+        zoffset: i32,
+        size: Size2D<u32>,
+        depth: u32,
+        format: TexFormat,
+        effective_data_type: u32,
+        unpacking_alignment: u32,
+        offset: i64,
+    },
+    TexSubImage2DPBO {
+        target: u32,
+        level: u32,
+        xoffset: i32,
+        yoffset: i32,
+        size: Size2D<u32>,
+        format: TexFormat,
+        effective_data_type: u32,
+        unpacking_alignment: u32,
+        offset: i64,
+    },
+    CopyTexSubImage3D(u32, i32, i32, i32, i32, i32, i32, i32, i32),
     TexImage2D {
         target: u32,
         level: u32,
@@ -468,7 +542,7 @@ pub enum WebGLCommand {
         level: u32,
         internal_format: u32,
         size: Size2D<u32>,
-        data: TruncatedDebug<GenericSharedMemory>,
+        data: CompressedTexData,
     },
     CompressedTexSubImage2D {
         target: u32,
@@ -477,7 +551,26 @@ pub enum WebGLCommand {
         yoffset: i32,
         size: Size2D<u32>,
         format: u32,
-        data: TruncatedDebug<GenericSharedMemory>,
+        data: CompressedTexData,
+    },
+    CompressedTexImage3D {
+        target: u32,
+        level: u32,
+        internal_format: u32,
+        size: Size2D<u32>,
+        depth: u32,
+        data: CompressedTexData,
+    },
+    CompressedTexSubImage3D {
+        target: u32,
+        level: i32,
+        xoffset: i32,
+        yoffset: i32,
+        zoffset: i32,
+        size: Size2D<u32>,
+        depth: u32,
+        format: u32,
+        data: CompressedTexData,
     },
     DrawingBufferWidth(GenericSender<i32>),
     DrawingBufferHeight(GenericSender<i32>),
@@ -1025,8 +1118,47 @@ macro_rules! gl_enums {
 }
 
 // TODO(sagudev): These should come from glow
+#[allow(non_upper_case_globals)]
 mod gl_ext_constants {
     pub const COMPRESSED_RGB_ETC1_WEBGL: u32 = 0x8D64;
+
+    // KHR_texture_compression_astc_ldr, EXT_texture_compression_bptc, EXT_texture_compression_rgtc.
+    pub const COMPRESSED_RGBA_ASTC_4x4_KHR: u32 = 0x93B0;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR: u32 = 0x93D0;
+    pub const COMPRESSED_RGBA_ASTC_5x4_KHR: u32 = 0x93B1;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR: u32 = 0x93D1;
+    pub const COMPRESSED_RGBA_ASTC_5x5_KHR: u32 = 0x93B2;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR: u32 = 0x93D2;
+    pub const COMPRESSED_RGBA_ASTC_6x5_KHR: u32 = 0x93B3;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR: u32 = 0x93D3;
+    pub const COMPRESSED_RGBA_ASTC_6x6_KHR: u32 = 0x93B4;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR: u32 = 0x93D4;
+    pub const COMPRESSED_RGBA_ASTC_8x5_KHR: u32 = 0x93B5;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR: u32 = 0x93D5;
+    pub const COMPRESSED_RGBA_ASTC_8x6_KHR: u32 = 0x93B6;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR: u32 = 0x93D6;
+    pub const COMPRESSED_RGBA_ASTC_8x8_KHR: u32 = 0x93B7;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR: u32 = 0x93D7;
+    pub const COMPRESSED_RGBA_ASTC_10x5_KHR: u32 = 0x93B8;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR: u32 = 0x93D8;
+    pub const COMPRESSED_RGBA_ASTC_10x6_KHR: u32 = 0x93B9;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR: u32 = 0x93D9;
+    pub const COMPRESSED_RGBA_ASTC_10x8_KHR: u32 = 0x93BA;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR: u32 = 0x93DA;
+    pub const COMPRESSED_RGBA_ASTC_10x10_KHR: u32 = 0x93BB;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR: u32 = 0x93DB;
+    pub const COMPRESSED_RGBA_ASTC_12x10_KHR: u32 = 0x93BC;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR: u32 = 0x93DC;
+    pub const COMPRESSED_RGBA_ASTC_12x12_KHR: u32 = 0x93BD;
+    pub const COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR: u32 = 0x93DD;
+    pub const COMPRESSED_RGBA_BPTC_UNORM: u32 = 0x8E8C;
+    pub const COMPRESSED_SRGB_ALPHA_BPTC_UNORM: u32 = 0x8E8D;
+    pub const COMPRESSED_RGB_BPTC_SIGNED_FLOAT: u32 = 0x8E8E;
+    pub const COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT: u32 = 0x8E8F;
+    pub const COMPRESSED_RED_RGTC1: u32 = 0x8DBB;
+    pub const COMPRESSED_SIGNED_RED_RGTC1: u32 = 0x8DBC;
+    pub const COMPRESSED_RED_GREEN_RGTC2: u32 = 0x8DBD;
+    pub const COMPRESSED_SIGNED_RED_GREEN_RGTC2: u32 = 0x8DBE;
 
     pub const ALPHA16F_ARB: u32 = 0x881C;
     pub const ALPHA32F_ARB: u32 = 0x8816;
@@ -1062,6 +1194,42 @@ gl_enums! {
         CompressedRgbaS3tcDxt3 = gl::COMPRESSED_RGBA_S3TC_DXT3_EXT,
         CompressedRgbaS3tcDxt5 = gl::COMPRESSED_RGBA_S3TC_DXT5_EXT,
         CompressedRgbEtc1 = gl_ext_constants::COMPRESSED_RGB_ETC1_WEBGL,
+        CompressedRgbaAstc4x4 = gl_ext_constants::COMPRESSED_RGBA_ASTC_4x4_KHR,
+        CompressedSrgb8Alpha8Astc4x4 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR,
+        CompressedRgbaAstc5x4 = gl_ext_constants::COMPRESSED_RGBA_ASTC_5x4_KHR,
+        CompressedSrgb8Alpha8Astc5x4 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR,
+        CompressedRgbaAstc5x5 = gl_ext_constants::COMPRESSED_RGBA_ASTC_5x5_KHR,
+        CompressedSrgb8Alpha8Astc5x5 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR,
+        CompressedRgbaAstc6x5 = gl_ext_constants::COMPRESSED_RGBA_ASTC_6x5_KHR,
+        CompressedSrgb8Alpha8Astc6x5 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR,
+        CompressedRgbaAstc6x6 = gl_ext_constants::COMPRESSED_RGBA_ASTC_6x6_KHR,
+        CompressedSrgb8Alpha8Astc6x6 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR,
+        CompressedRgbaAstc8x5 = gl_ext_constants::COMPRESSED_RGBA_ASTC_8x5_KHR,
+        CompressedSrgb8Alpha8Astc8x5 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR,
+        CompressedRgbaAstc8x6 = gl_ext_constants::COMPRESSED_RGBA_ASTC_8x6_KHR,
+        CompressedSrgb8Alpha8Astc8x6 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR,
+        CompressedRgbaAstc8x8 = gl_ext_constants::COMPRESSED_RGBA_ASTC_8x8_KHR,
+        CompressedSrgb8Alpha8Astc8x8 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR,
+        CompressedRgbaAstc10x5 = gl_ext_constants::COMPRESSED_RGBA_ASTC_10x5_KHR,
+        CompressedSrgb8Alpha8Astc10x5 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR,
+        CompressedRgbaAstc10x6 = gl_ext_constants::COMPRESSED_RGBA_ASTC_10x6_KHR,
+        CompressedSrgb8Alpha8Astc10x6 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR,
+        CompressedRgbaAstc10x8 = gl_ext_constants::COMPRESSED_RGBA_ASTC_10x8_KHR,
+        CompressedSrgb8Alpha8Astc10x8 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR,
+        CompressedRgbaAstc10x10 = gl_ext_constants::COMPRESSED_RGBA_ASTC_10x10_KHR,
+        CompressedSrgb8Alpha8Astc10x10 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR,
+        CompressedRgbaAstc12x10 = gl_ext_constants::COMPRESSED_RGBA_ASTC_12x10_KHR,
+        CompressedSrgb8Alpha8Astc12x10 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR,
+        CompressedRgbaAstc12x12 = gl_ext_constants::COMPRESSED_RGBA_ASTC_12x12_KHR,
+        CompressedSrgb8Alpha8Astc12x12 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR,
+        CompressedRgbaBptcUnorm = gl_ext_constants::COMPRESSED_RGBA_BPTC_UNORM,
+        CompressedSrgbAlphaBptcUnorm = gl_ext_constants::COMPRESSED_SRGB_ALPHA_BPTC_UNORM,
+        CompressedRgbBptcSignedFloat = gl_ext_constants::COMPRESSED_RGB_BPTC_SIGNED_FLOAT,
+        CompressedRgbBptcUnsignedFloat = gl_ext_constants::COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT,
+        CompressedRedRgtc1 = gl_ext_constants::COMPRESSED_RED_RGTC1,
+        CompressedSignedRedRgtc1 = gl_ext_constants::COMPRESSED_SIGNED_RED_RGTC1,
+        CompressedRedGreenRgtc2 = gl_ext_constants::COMPRESSED_RED_GREEN_RGTC2,
+        CompressedSignedRedGreenRgtc2 = gl_ext_constants::COMPRESSED_SIGNED_RED_GREEN_RGTC2,
         R8 = gl::R8,
         R8SNorm = gl::R8_SNORM,
         R16f = gl::R16F,
@@ -1154,14 +1322,56 @@ impl TexFormat {
 
     /// Returns whether this format is a known texture compression format.
     pub fn is_compressed(&self) -> bool {
-        let gl_const = self.as_gl_constant();
         matches!(
-            gl_const,
-            gl::COMPRESSED_RGB_S3TC_DXT1_EXT |
-                gl::COMPRESSED_RGBA_S3TC_DXT1_EXT |
-                gl::COMPRESSED_RGBA_S3TC_DXT3_EXT |
-                gl::COMPRESSED_RGBA_S3TC_DXT5_EXT |
-                gl_ext_constants::COMPRESSED_RGB_ETC1_WEBGL
+            self,
+            TexFormat::CompressedRgbS3tcDxt1 |
+                TexFormat::CompressedRgbaS3tcDxt1 |
+                TexFormat::CompressedRgbaS3tcDxt3 |
+                TexFormat::CompressedRgbaS3tcDxt5 |
+                TexFormat::CompressedRgbEtc1
+        ) || self.is_astc_bptc_or_rgtc()
+    }
+
+    /// ASTC, BPTC and RGTC formats (WebGL 1 and 2 extensions).
+    pub fn is_astc_bptc_or_rgtc(&self) -> bool {
+        matches!(
+            self,
+            TexFormat::CompressedRgbaAstc4x4 |
+                TexFormat::CompressedSrgb8Alpha8Astc4x4 |
+                TexFormat::CompressedRgbaAstc5x4 |
+                TexFormat::CompressedSrgb8Alpha8Astc5x4 |
+                TexFormat::CompressedRgbaAstc5x5 |
+                TexFormat::CompressedSrgb8Alpha8Astc5x5 |
+                TexFormat::CompressedRgbaAstc6x5 |
+                TexFormat::CompressedSrgb8Alpha8Astc6x5 |
+                TexFormat::CompressedRgbaAstc6x6 |
+                TexFormat::CompressedSrgb8Alpha8Astc6x6 |
+                TexFormat::CompressedRgbaAstc8x5 |
+                TexFormat::CompressedSrgb8Alpha8Astc8x5 |
+                TexFormat::CompressedRgbaAstc8x6 |
+                TexFormat::CompressedSrgb8Alpha8Astc8x6 |
+                TexFormat::CompressedRgbaAstc8x8 |
+                TexFormat::CompressedSrgb8Alpha8Astc8x8 |
+                TexFormat::CompressedRgbaAstc10x5 |
+                TexFormat::CompressedSrgb8Alpha8Astc10x5 |
+                TexFormat::CompressedRgbaAstc10x6 |
+                TexFormat::CompressedSrgb8Alpha8Astc10x6 |
+                TexFormat::CompressedRgbaAstc10x8 |
+                TexFormat::CompressedSrgb8Alpha8Astc10x8 |
+                TexFormat::CompressedRgbaAstc10x10 |
+                TexFormat::CompressedSrgb8Alpha8Astc10x10 |
+                TexFormat::CompressedRgbaAstc12x10 |
+                TexFormat::CompressedSrgb8Alpha8Astc12x10 |
+                TexFormat::CompressedRgbaAstc12x12 |
+                TexFormat::CompressedSrgb8Alpha8Astc12x12 |
+                TexFormat::CompressedRgbaBptcUnorm |
+                TexFormat::CompressedSrgbAlphaBptcUnorm |
+                TexFormat::CompressedRgbBptcSignedFloat |
+                TexFormat::CompressedRgbBptcUnsignedFloat |
+                TexFormat::CompressedRedRgtc1 |
+                TexFormat::CompressedSignedRedRgtc1 |
+                TexFormat::CompressedRedGreenRgtc2 |
+                TexFormat::CompressedSignedRedGreenRgtc2
         )
     }
 
@@ -1355,6 +1565,7 @@ impl TexFormat {
             TexFormat::CompressedRgbaS3tcDxt1 |
             TexFormat::CompressedRgbaS3tcDxt3 |
             TexFormat::CompressedRgbaS3tcDxt5 => &[TexDataType::UnsignedByte][..],
+            format if format.is_astc_bptc_or_rgtc() => &[TexDataType::UnsignedByte][..],
             _ => &[][..],
         }
     }
@@ -1371,6 +1582,7 @@ impl TexFormat {
             TexFormat::CompressedRgbaS3tcDxt1 |
             TexFormat::CompressedRgbaS3tcDxt3 |
             TexFormat::CompressedRgbaS3tcDxt5 => WebGLVersion::WebGL1,
+            format if format.is_astc_bptc_or_rgtc() => WebGLVersion::WebGL1,
             _ => WebGLVersion::WebGL2,
         }
     }

@@ -422,7 +422,7 @@ pub(crate) struct CommonCompressedTexImage2DValidatorResult {
     pub(crate) compression: TexCompression,
 }
 
-fn valid_s3tc_dimension(level: u32, side_length: u32, block_size: u32) -> bool {
+pub(crate) fn valid_s3tc_dimension(level: u32, side_length: u32, block_size: u32) -> bool {
     side_length.is_multiple_of(block_size) || (level > 0 && [0, 1, 2].contains(&side_length))
 }
 
@@ -443,7 +443,7 @@ fn valid_compressed_data_len(
     data_len == required_bytes as usize
 }
 
-fn is_subimage_blockaligned(
+pub(crate) fn is_subimage_blockaligned(
     xoffset: u32,
     yoffset: u32,
     width: u32,
@@ -563,7 +563,7 @@ impl WebGLValidator for CompressedTexImage2DValidator<'_> {
                     valid_s3tc_dimension(level, height, compression.block_height as u32);
                 valid_width && valid_height
             },
-            TexCompressionValidation::None => true,
+            TexCompressionValidation::SubImageBlockAligned | TexCompressionValidation::None => true,
         };
         if !compression_valid {
             context.webgl_error(InvalidOperation);
@@ -663,14 +663,16 @@ impl WebGLValidator for CompressedTexSubImage2DValidator<'_> {
         // supported by the specific compressed internal format as specified
         // in the specific texture compression extension.
         let compression_valid = match compression.validation {
-            TexCompressionValidation::S3TC => is_subimage_blockaligned(
-                self.xoffset as u32,
-                self.yoffset as u32,
-                width,
-                height,
-                &compression,
-                &tex_info,
-            ),
+            TexCompressionValidation::S3TC | TexCompressionValidation::SubImageBlockAligned => {
+                is_subimage_blockaligned(
+                    self.xoffset as u32,
+                    self.yoffset as u32,
+                    width,
+                    height,
+                    &compression,
+                    &tex_info,
+                )
+            },
             TexCompressionValidation::None => true,
         };
         if !compression_valid {

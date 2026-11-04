@@ -33,11 +33,22 @@ impl WebGLExtension for EXTColorBufferHalfFloat {
     }
 
     fn spec() -> WebGLExtensionSpec {
-        WebGLExtensionSpec::Specific(WebGLVersion::WebGL1)
+        // Exposed in WebGL 2 too (as Chromium and Firefox do), where it makes R16F, RG16F and
+        // RGBA16F color-renderable without the rest of EXT_color_buffer_float.
+        WebGLExtensionSpec::All
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {
-        OESTextureHalfFloat::is_supported(ext)
+        match ext.webgl_version() {
+            WebGLVersion::WebGL1 => OESTextureHalfFloat::is_supported(ext),
+            WebGLVersion::WebGL2 => {
+                !ext.is_gles() ||
+                    ext.supports_any_gl_extension(&[
+                        "GL_EXT_color_buffer_half_float",
+                        "GL_EXT_color_buffer_float",
+                    ])
+            },
+        }
     }
 
     fn enable(_ext: &WebGLExtensions) {}

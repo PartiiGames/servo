@@ -242,6 +242,31 @@ impl WebGLRenderbuffer {
                     constants::RGB8
                 }
             },
+            // WebGL 2 with EXT_color_buffer_half_float or EXT_color_buffer_float.
+            constants::R16F | constants::RG16F if webgl_version == WebGLVersion::WebGL2 => {
+                if !context
+                    .extension_manager()
+                    .is_half_float_buffer_renderable()
+                {
+                    return Err(WebGLError::InvalidEnum);
+                }
+                internal_format
+            },
+            // WebGL 2 with EXT_color_buffer_float.
+            constants::R32F | constants::RG32F | constants::R11F_G11F_B10F
+                if webgl_version == WebGLVersion::WebGL2 =>
+            {
+                if !context.extension_manager().is_float_buffer_renderable() {
+                    return Err(WebGLError::InvalidEnum);
+                }
+                internal_format
+            },
+            // RGB16F is only renderable through the WebGL 1 extension.
+            EXTColorBufferHalfFloatConstants::RGB16F_EXT
+                if webgl_version == WebGLVersion::WebGL2 =>
+            {
+                return Err(WebGLError::InvalidEnum);
+            },
             EXTColorBufferHalfFloatConstants::RGBA16F_EXT |
             EXTColorBufferHalfFloatConstants::RGB16F_EXT => {
                 if !context

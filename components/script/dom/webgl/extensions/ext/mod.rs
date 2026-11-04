@@ -7,10 +7,14 @@ use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGL
 
 pub(crate) mod angleinstancedarrays;
 pub(crate) mod extblendminmax;
+pub(crate) mod extcolorbufferfloat;
 pub(crate) mod extcolorbufferhalffloat;
 pub(crate) mod extfragdepth;
 pub(crate) mod extshadertexturelod;
+pub(crate) mod exttexturecompressionbptc;
+pub(crate) mod exttexturecompressionrgtc;
 pub(crate) mod exttexturefilteranisotropic;
+pub(crate) mod khrparallelshadercompile;
 pub(crate) mod oeselementindexuint;
 pub(crate) mod oesstandardderivatives;
 pub(crate) mod oestexturefloat;
@@ -19,5 +23,6 @@ pub(crate) mod oestexturehalffloat;
 pub(crate) mod oestexturehalffloatlinear;
 pub(crate) mod oesvertexarrayobject;
 pub(crate) mod webglcolorbufferfloat;
+pub(crate) mod webglcompressedtextureastc;
 pub(crate) mod webglcompressedtextureetc1;
 pub(crate) mod webglcompressedtextures3tc;

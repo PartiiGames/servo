@@ -24,7 +24,9 @@ use crate::dom::bindings::codegen::Bindings::OESTextureHalfFloatBinding::OESText
 use crate::dom::bindings::codegen::Bindings::OESVertexArrayObjectBinding::OESVertexArrayObjectConstants;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::trace::JSTraceable;
+use crate::dom::webgl::extensions::extcolorbufferfloat::EXTColorBufferFloat;
 use crate::dom::webgl::extensions::extcolorbufferhalffloat::EXTColorBufferHalfFloat;
+use crate::dom::webgl::extensions::khrparallelshadercompile::KHRParallelShaderCompile;
 use crate::dom::webgl::extensions::oestexturefloat::OESTextureFloat;
 use crate::dom::webgl::extensions::oestexturehalffloat::OESTextureHalfFloat;
 use crate::dom::webgl::extensions::webglcolorbufferfloat::WEBGLColorBufferFloat;
@@ -241,6 +243,11 @@ impl WebGLExtensions {
         let Some(extension) = extensions.get(&name) else {
             return;
         };
+        if let WebGLExtensionSpec::Specific(version) = extension.spec() &&
+            version != self.webgl_version
+        {
+            return;
+        }
         if extension.is_supported(self) {
             extension.instance_or_init(cx, ctx, self, rval);
         }
@@ -417,10 +424,14 @@ impl WebGLExtensions {
     fn register_all_extensions(&self) {
         self.register::<ext::angleinstancedarrays::ANGLEInstancedArrays>();
         self.register::<ext::extblendminmax::EXTBlendMinmax>();
+        self.register::<ext::extcolorbufferfloat::EXTColorBufferFloat>();
         self.register::<ext::extcolorbufferhalffloat::EXTColorBufferHalfFloat>();
         self.register::<ext::extfragdepth::EXTFragDepth>();
         self.register::<ext::extshadertexturelod::EXTShaderTextureLod>();
+        self.register::<ext::exttexturecompressionbptc::EXTTextureCompressionBPTC>();
+        self.register::<ext::exttexturecompressionrgtc::EXTTextureCompressionRGTC>();
         self.register::<ext::exttexturefilteranisotropic::EXTTextureFilterAnisotropic>();
+        self.register::<ext::khrparallelshadercompile::KHRParallelShaderCompile>();
         self.register::<ext::oeselementindexuint::OESElementIndexUint>();
         self.register::<ext::oesstandardderivatives::OESStandardDerivatives>();
         self.register::<ext::oestexturefloat::OESTextureFloat>();
@@ -429,6 +440,7 @@ impl WebGLExtensions {
         self.register::<ext::oestexturehalffloatlinear::OESTextureHalfFloatLinear>();
         self.register::<ext::oesvertexarrayobject::OESVertexArrayObject>();
         self.register::<ext::webglcolorbufferfloat::WEBGLColorBufferFloat>();
+        self.register::<ext::webglcompressedtextureastc::WEBGLCompressedTextureASTC>();
         self.register::<ext::webglcompressedtextureetc1::WEBGLCompressedTextureETC1>();
         self.register::<ext::webglcompressedtextures3tc::WEBGLCompressedTextureS3TC>();
     }
@@ -450,7 +462,12 @@ impl WebGLExtensions {
     }
 
     pub(crate) fn is_float_buffer_renderable(&self) -> bool {
-        self.is_enabled::<WEBGLColorBufferFloat>() || self.is_enabled::<OESTextureFloat>()
+        match self.webgl_version {
+            WebGLVersion::WebGL1 => {
+                self.is_enabled::<WEBGLColorBufferFloat>() || self.is_enabled::<OESTextureFloat>()
+            },
+            WebGLVersion::WebGL2 => self.is_enabled::<EXTColorBufferFloat>(),
+        }
     }
 
     pub(crate) fn is_min_glsl_version_satisfied(&self, min_glsl_version: WebGLSLVersion) -> bool {
@@ -458,7 +475,24 @@ impl WebGLExtensions {
     }
 
     pub(crate) fn is_half_float_buffer_renderable(&self) -> bool {
-        self.is_enabled::<EXTColorBufferHalfFloat>() || self.is_enabled::<OESTextureHalfFloat>()
+        match self.webgl_version {
+            WebGLVersion::WebGL1 => {
+                self.is_enabled::<EXTColorBufferHalfFloat>() ||
+                    self.is_enabled::<OESTextureHalfFloat>()
+            },
+            WebGLVersion::WebGL2 => {
+                self.is_enabled::<EXTColorBufferHalfFloat>() ||
+                    self.is_enabled::<EXTColorBufferFloat>()
+            },
+        }
+    }
+
+    pub(crate) fn is_parallel_shader_compile_enabled(&self) -> bool {
+        self.is_enabled::<KHRParallelShaderCompile>()
+    }
+
+    pub(crate) fn webgl_version(&self) -> WebGLVersion {
+        self.webgl_version
     }
 
     pub(crate) fn effective_type(&self, type_: u32) -> u32 {

@@ -160,7 +160,7 @@ pub(crate) struct TexImage3DValidator<'a> {
     common_validator: CommonTexImage3DValidator<'a>,
     format: u32,
     data_type: u32,
-    data: &'a Option<ArrayBufferView>,
+    data: Option<&'a ArrayBufferView>,
 }
 
 impl<'a> TexImage3DValidator<'a> {
@@ -177,7 +177,7 @@ impl<'a> TexImage3DValidator<'a> {
         border: i32,
         format: u32,
         data_type: u32,
-        data: &'a Option<ArrayBufferView>,
+        data: Option<&'a ArrayBufferView>,
     ) -> Self {
         TexImage3DValidator {
             common_validator: CommonTexImage3DValidator::new(

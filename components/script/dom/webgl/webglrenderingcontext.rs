@@ -27,10 +27,10 @@ use servo_base::generic_channel::GenericSharedMemory;
 use servo_base::{Epoch, generic_channel};
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{
-    AlphaTreatment, GLContextAttributes, GLLimits, GlType, Parameter, SizedDataType, TexDataType,
-    TexFormat, TexParameter, WebGLCommand, WebGLCommandBacktrace, WebGLContextId, WebGLError,
-    WebGLFramebufferBindingRequest, WebGLMsg, WebGLMsgSender, WebGLProgramId, WebGLResult,
-    WebGLSLVersion, WebGLVersion, YAxisTreatment, webgl_channel,
+    AlphaTreatment, CompressedTexData, GLContextAttributes, GLLimits, GlType, Parameter,
+    SizedDataType, TexDataType, TexFormat, TexParameter, WebGLCommand, WebGLCommandBacktrace,
+    WebGLContextId, WebGLError, WebGLFramebufferBindingRequest, WebGLMsg, WebGLMsgSender,
+    WebGLProgramId, WebGLResult, WebGLSLVersion, WebGLVersion, YAxisTreatment, webgl_channel,
 };
 use servo_config::pref;
 use webrender_api::ImageKey;
@@ -41,6 +41,7 @@ use crate::dom::RootedPromise;
 use crate::dom::bindings::buffer_source::{create_buffer_source, get_buffer_source_slice};
 use crate::dom::bindings::codegen::Bindings::ANGLEInstancedArraysBinding::ANGLEInstancedArraysConstants;
 use crate::dom::bindings::codegen::Bindings::EXTBlendMinmaxBinding::EXTBlendMinmaxConstants;
+use crate::dom::bindings::codegen::Bindings::KHRParallelShaderCompileBinding::KHRParallelShaderCompileConstants;
 use crate::dom::bindings::codegen::Bindings::OESVertexArrayObjectBinding::OESVertexArrayObjectConstants;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::{
@@ -928,6 +929,37 @@ impl WebGLRenderingContext {
         unpacking_alignment: u32,
         pixels: TexPixels,
     ) {
+        let size = pixels.size();
+        self.tex_sub_image_2d_from_source(
+            texture,
+            target,
+            level,
+            xoffset,
+            yoffset,
+            size,
+            format,
+            data_type,
+            unpacking_alignment,
+            TexSource::Pixels(pixels),
+        )
+    }
+
+    /// texSubImage2D from client pixels or, in WebGL 2, from an offset into the
+    /// bound PIXEL_UNPACK_BUFFER.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tex_sub_image_2d_from_source(
+        &self,
+        texture: DomRoot<WebGLTexture>,
+        target: TexImageTarget,
+        level: u32,
+        xoffset: i32,
+        yoffset: i32,
+        size: Size2D<u32>,
+        format: TexFormat,
+        data_type: TexDataType,
+        unpacking_alignment: u32,
+        source: TexSource,
+    ) {
         // We have already validated level
         let image_info = match texture.image_info_for_target(&target, level) {
             Some(info) => info,
@@ -939,9 +971,9 @@ impl WebGLRenderingContext {
         //   - x offset plus the width is greater than the texture width
         //   - y offset plus the height is greater than the texture height
         if xoffset < 0 ||
-            (xoffset as u32 + pixels.size().width) > image_info.width() ||
+            (xoffset as u32 + size.width) > image_info.width() ||
             yoffset < 0 ||
-            (yoffset as u32 + pixels.size().height) > image_info.height()
+            (yoffset as u32 + size.height) > image_info.height()
         {
             return self.webgl_error(InvalidValue);
         }
@@ -963,22 +995,35 @@ impl WebGLRenderingContext {
             .extension_manager
             .effective_type(data_type.as_gl_constant());
 
-        // TODO(emilio): convert colorspace if requested.
-        self.send_command(WebGLCommand::TexSubImage2D {
-            target: target.as_gl_constant(),
-            level,
-            xoffset,
-            yoffset,
-            size: pixels.size(),
-            format,
-            data_type,
-            effective_data_type,
-            unpacking_alignment,
-            alpha_treatment: pixels.alpha_treatment,
-            y_axis_treatment: pixels.y_axis_treatment,
-            pixel_format: pixels.pixel_format,
-            data: pixels.data.into(),
-        });
+        match source {
+            // TODO(emilio): convert colorspace if requested.
+            TexSource::Pixels(pixels) => self.send_command(WebGLCommand::TexSubImage2D {
+                target: target.as_gl_constant(),
+                level,
+                xoffset,
+                yoffset,
+                size,
+                format,
+                data_type,
+                effective_data_type,
+                unpacking_alignment,
+                alpha_treatment: pixels.alpha_treatment,
+                y_axis_treatment: pixels.y_axis_treatment,
+                pixel_format: pixels.pixel_format,
+                data: pixels.data.into(),
+            }),
+            TexSource::BufferOffset(offset) => self.send_command(WebGLCommand::TexSubImage2DPBO {
+                target: target.as_gl_constant(),
+                level,
+                xoffset,
+                yoffset,
+                size,
+                format,
+                effective_data_type,
+                unpacking_alignment,
+                offset,
+            }),
+        }
     }
 
     fn get_gl_extensions(&self) -> String {
@@ -1634,7 +1679,7 @@ impl WebGLRenderingContext {
         width: i32,
         height: i32,
         border: i32,
-        data: &[u8],
+        data: CompressedSource,
     ) {
         let validator = CompressedTexImage2DValidator::new(
             self,
@@ -1663,7 +1708,7 @@ impl WebGLRenderingContext {
         }
 
         let size = Size2D::new(width, height);
-        let data = GenericSharedMemory::from_bytes(data);
+        let data = data.into_command_data();
 
         handle_potential_webgl_error!(
             self,
@@ -1683,7 +1728,7 @@ impl WebGLRenderingContext {
             level,
             internal_format,
             size: Size2D::new(width, height),
-            data: data.into(),
+            data,
         });
 
         if let Some(fb) = self.bound_draw_framebuffer.get() {
@@ -1701,7 +1746,7 @@ impl WebGLRenderingContext {
         width: i32,
         height: i32,
         format: u32,
-        data: &[u8],
+        data: CompressedSource,
     ) {
         let validator = CompressedTexSubImage2DValidator::new(
             self,
@@ -1726,8 +1771,6 @@ impl WebGLRenderingContext {
             Err(_) => return,
         };
 
-        let data = GenericSharedMemory::from_bytes(data);
-
         self.send_command(WebGLCommand::CompressedTexSubImage2D {
             target: target.as_gl_constant(),
             level: level as i32,
@@ -1735,7 +1778,7 @@ impl WebGLRenderingContext {
             yoffset,
             size: Size2D::new(width, height),
             format,
-            data: data.into(),
+            data: data.into_command_data(),
         });
     }
 
@@ -2809,7 +2852,15 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         data: CustomAutoRooterGuard<ArrayBufferView>,
     ) {
         let data = data.as_slice_safe(no_gc).unwrap_or(&[]);
-        self.compressed_tex_image_2d(target, level, internal_format, width, height, border, data)
+        self.compressed_tex_image_2d(
+            target,
+            level,
+            internal_format,
+            width,
+            height,
+            border,
+            CompressedSource::Bytes(data),
+        )
     }
 
     // https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.8
@@ -2827,7 +2878,14 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
     ) {
         let data = data.as_slice_safe(no_gc).unwrap_or(&[]);
         self.compressed_tex_sub_image_2d(
-            target, level, xoffset, yoffset, width, height, format, data,
+            target,
+            level,
+            xoffset,
+            yoffset,
+            width,
+            height,
+            format,
+            CompressedSource::Bytes(data),
         )
     }
 
@@ -3557,6 +3615,11 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             },
             constants::ACTIVE_ATTRIBUTES => Int32Value(program.active_attribs().len() as i32),
             constants::ACTIVE_UNIFORMS => Int32Value(program.active_uniforms().len() as i32),
+            KHRParallelShaderCompileConstants::COMPLETION_STATUS_KHR
+                if self.extension_manager.is_parallel_shader_compile_enabled() =>
+            {
+                BooleanValue(true)
+            },
             _ => {
                 self.webgl_error(InvalidEnum);
                 NullValue()
@@ -3591,6 +3654,11 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             constants::DELETE_STATUS => BooleanValue(shader.is_marked_for_deletion()),
             constants::COMPILE_STATUS => BooleanValue(shader.successfully_compiled()),
             constants::SHADER_TYPE => UInt32Value(shader.gl_type()),
+            KHRParallelShaderCompileConstants::COMPLETION_STATUS_KHR
+                if self.extension_manager.is_parallel_shader_compile_enabled() =>
+            {
+                BooleanValue(true)
+            },
             _ => {
                 self.webgl_error(InvalidEnum);
                 NullValue()
@@ -5245,6 +5313,67 @@ impl TexPixels {
     pub(crate) fn into_shared_memory(self) -> GenericSharedMemory {
         self.data
     }
+
+    /// Replaces the pixel data (same pixel format and treatments) with `f(data)`, of `size`.
+    pub(crate) fn map_data(self, size: Size2D<u32>, f: impl FnOnce(&[u8]) -> Vec<u8>) -> Self {
+        let data = GenericSharedMemory::from_vec(f(&self.data));
+        Self { data, size, ..self }
+    }
+
+    /// Crops (or zero-pads) an image source (RGBA8 or BGRA8, as every TexImageSource is) to
+    /// `width` x `height`, starting at its top-left corner. WebGL 2 uploads from a TexImageSource
+    /// with an explicit size read that window of the source; 3D uploads read `depth` slices stacked
+    /// vertically, so callers pass `height * depth`.
+    pub(crate) fn crop_image_source(self, width: u32, height: u32) -> Self {
+        if self.size.width == width && self.size.height == height {
+            return self;
+        }
+        debug_assert!(self.pixel_format.is_some());
+        let src = &*self.data;
+        let src_stride = self.size.width as usize * 4;
+        let dst_stride = width as usize * 4;
+        let copy = dst_stride.min(src_stride);
+        let mut out = vec![0u8; dst_stride * height as usize];
+        for row in 0..(height.min(self.size.height) as usize) {
+            out[row * dst_stride..row * dst_stride + copy]
+                .copy_from_slice(&src[row * src_stride..row * src_stride + copy]);
+        }
+        Self {
+            data: GenericSharedMemory::from_vec(out),
+            size: Size2D::new(width, height),
+            ..self
+        }
+    }
+}
+
+/// Where a compressed texture upload reads its data from.
+pub(crate) enum CompressedSource<'a> {
+    Bytes(&'a [u8]),
+    /// `size` bytes at `offset` in the bound PIXEL_UNPACK_BUFFER (WebGL 2; validated by the caller).
+    PixelUnpackBuffer {
+        offset: u32,
+        size: u32,
+    },
+}
+
+impl CompressedSource<'_> {
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::PixelUnpackBuffer { size, .. } => *size as usize,
+        }
+    }
+
+    pub(crate) fn into_command_data(self) -> CompressedTexData {
+        match self {
+            Self::Bytes(bytes) => {
+                CompressedTexData::Bytes(GenericSharedMemory::from_bytes(bytes).into())
+            },
+            Self::PixelUnpackBuffer { offset, size } => {
+                CompressedTexData::PixelUnpackBuffer { offset, size }
+            },
+        }
+    }
 }
 
 pub(crate) enum TexSource {
@@ -5252,7 +5381,7 @@ pub(crate) enum TexSource {
     BufferOffset(i64),
 }
 
-fn array_buffer_type_to_sized_type(type_: Type) -> Option<SizedDataType> {
+pub(crate) fn array_buffer_type_to_sized_type(type_: Type) -> Option<SizedDataType> {
     match type_ {
         Type::Uint8 | Type::Uint8Clamped => Some(SizedDataType::Uint8),
         Type::Uint16 => Some(SizedDataType::Uint16),

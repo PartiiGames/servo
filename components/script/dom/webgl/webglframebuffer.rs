@@ -496,9 +496,29 @@ impl WebGLFramebuffer {
             WebGLVersion::WebGL1 => empty_color_constrains,
             WebGLVersion::WebGL2 => webgl2_color_constraints,
         };
+        // Float color formats are renderable in WebGL 2 only with EXT_color_buffer_float
+        // (or EXT_color_buffer_half_float, for the 16-bit ones).
+        let (half_float_renderable, float_renderable) = match self.upcast().context() {
+            Some(context) => {
+                let extensions = context.extension_manager();
+                (
+                    extensions.is_half_float_buffer_renderable(),
+                    extensions.is_float_buffer_renderable(),
+                )
+            },
+            None => (false, false),
+        };
         let color_constraints = webgl1_color_constraints
             .iter()
-            .chain(extra_color_constraints.iter());
+            .chain(extra_color_constraints.iter())
+            .filter(move |format| match **format {
+                constants::R16F | constants::RG16F | constants::RGBA16F => half_float_renderable,
+                constants::R32F |
+                constants::RG32F |
+                constants::RGBA32F |
+                constants::R11F_G11F_B10F => float_renderable,
+                _ => true,
+            });
 
         let has_c = self.colors.iter().any(|att| att.borrow().is_some());
         for attachment in self.colors.iter() {
@@ -733,6 +753,18 @@ impl WebGLFramebuffer {
             .borrow()
             .as_ref()
             .map(WebGLFramebufferAttachment::root)
+    }
+
+    /// The sized or unsized internal format of what is attached at `attachment`, if anything.
+    pub(crate) fn attachment_internal_format(&self, attachment: u32) -> Option<u32> {
+        let binding = self.attachment_binding(attachment)?;
+        let binding = binding.borrow();
+        match binding.as_ref()? {
+            WebGLFramebufferAttachment::Renderbuffer(rb) => Some(rb.internal_format()),
+            WebGLFramebufferAttachment::Texture { texture, level } => texture
+                .image_info_at_face(0, *level as u32)
+                .map(|info| info.internal_format().as_gl_constant()),
+        }
     }
 
     pub(crate) fn texture2d(
