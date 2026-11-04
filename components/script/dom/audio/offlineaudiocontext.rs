@@ -14,7 +14,9 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_base::id::PipelineId;
 use servo_media::audio::block::FRAMES_PER_BLOCK_USIZE;
-use servo_media::audio::context::OfflineAudioContextOptions as ServoMediaOfflineAudioContextOptions;
+use servo_media::audio::context::{
+    OfflineAudioContextOptions as ServoMediaOfflineAudioContextOptions, ProcessingState,
+};
 
 use crate::dom::audio::audiobuffer::{AudioBuffer, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
 use crate::dom::audio::audionode::MAX_CHANNEL_COUNT;
@@ -142,7 +144,9 @@ impl OfflineAudioContextMethods<crate::DomTypeHolder> for OfflineAudioContext {
     /// <https://webaudio.github.io/web-audio-api/#dom-offlineaudiocontext-startrendering>
     fn StartRendering(&self, cx: &mut CurrentRealm) -> RootedPromise {
         let promise = Promise::new_in_realm(cx);
-        if self.rendering_started.get() {
+        // > If the [[control thread state]] on the OfflineAudioContext is closed, reject
+        // > promise with InvalidStateError.
+        if self.rendering_started.get() || self.context.State() == AudioContextState::Closed {
             promise.reject_error(cx, Error::InvalidState(None));
             return promise;
         }
@@ -251,6 +255,35 @@ impl OfflineAudioContextMethods<crate::DomTypeHolder> for OfflineAudioContext {
         // > Set the [[control thread state]] to running. Queue a control message to resume.
         self.context.push_pending_resume_promise(&promise);
         self.context.resume();
+        promise
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-offlineaudiocontext-close>
+    fn Close(&self, cx: &mut CurrentRealm) -> RootedPromise {
+        let promise = Promise::new_in_realm(cx);
+        // > If the [[control thread state]] flag on the OfflineAudioContext is closed reject the
+        // > promise with InvalidStateError, abort these steps, returning promise.
+        if self.context.State() == AudioContextState::Closed ||
+            self.context.control_thread_state() == ProcessingState::Closed
+        {
+            promise.reject_error(cx, Error::InvalidState(None));
+            return promise;
+        }
+        // > Set the [[control thread state]] flag to closed. Queue a control message to close
+        // > the OfflineAudioContext. (The rendering thread stops rendering.)
+        let _ = self.context.audio_context_impl().lock().unwrap().close();
+        let trusted_promise = TrustedPromise::new(&promise);
+        let this = Trusted::new(self);
+        self.global()
+            .task_manager()
+            .dom_manipulation_task_source()
+            .queue(task!(offline_close: move |cx| {
+                let this = this.root();
+                // > Resolve promise. If the state attribute is not already "closed": set it to
+                // > "closed" and fire statechange.
+                trusted_promise.root(cx).resolve_native(cx, &());
+                this.context.set_state_and_notify(AudioContextState::Closed);
+            }));
         promise
     }
 

@@ -30,13 +30,9 @@ use crate::realms::enter_auto_realm;
 pub(crate) const MIN_SAMPLE_RATE: f32 = 8000.;
 pub(crate) const MAX_SAMPLE_RATE: f32 = 192000.;
 
-/// The AudioBuffer keeps its data either in js_channels
-/// or in shared_channels if js_channels buffers are detached.
-///
-/// js_channels buffers are (re)attached right before calling GetChannelData
-/// and remain attached until its contents are needed by some other API
-/// implementation. Follow <https://webaudio.github.io/web-audio-api/#acquire-the-content>
-/// to know in which situations js_channels buffers must be detached.
+/// The AudioBuffer keeps its data in shared_channels until the first GetChannelData, then in
+/// js_channels. Unlike the spec's "acquire the content", nodes that use the buffer get a copy and
+/// the js_channels arrays stay attached (see `copy_contents`).
 ///
 #[dom_struct]
 pub(crate) struct AudioBuffer {
@@ -44,8 +40,8 @@ pub(crate) struct AudioBuffer {
     /// Float32Arrays returned by calls to GetChannelData.
     #[ignore_malloc_size_of = "mozjs"]
     js_channels: DomRefCell<Vec<HeapBufferSource<Float32>>>,
-    /// Aggregates the data from js_channels.
-    /// This is `Some<T>` iff the buffers in js_channels are detached.
+    /// The data, until GetChannelData creates the js_channels arrays.
+    /// This is `Some<T>` iff the buffers in js_channels are not initialized.
     #[no_trace]
     #[conditional_malloc_size_of]
     shared_channels: DomRefCell<Option<Arc<ServoMediaAudioBuffer>>>,
@@ -157,34 +153,41 @@ impl AudioBuffer {
         true
     }
 
-    /// <https://webaudio.github.io/web-audio-api/#acquire-the-content>
-    fn acquire_contents(&self, cx: &mut JSContext) -> Option<ServoMediaAudioBuffer> {
+    /// <https://webaudio.github.io/web-audio-api/#acquire-the-content>, Chrome style.
+    ///
+    /// DEVIATION FROM THE SPEC, on purpose (luzz lead, 2026-11-04): the spec detaches the
+    /// Float32Arrays returned by getChannelData() when a node acquires the buffer's content, so a
+    /// page that keeps one (games commonly fill or read a channel array after starting a source)
+    /// then reads NaN or an empty array. Chrome and Firefox copy instead and leave the arrays
+    /// attached; so do we. The node gets a snapshot of the data as it is now: writes to the
+    /// arrays afterwards reach later acquisitions (a new AudioBufferSourceNode, a new
+    /// ConvolverNode buffer), not a node that already has the buffer.
+    ///
+    /// Returns `None` if an array was detached by the page (e.g. transferred with postMessage).
+    fn copy_contents(&self) -> Option<ServoMediaAudioBuffer> {
         let mut result = ServoMediaAudioBuffer::new(
             self.number_of_channels as u8,
             self.length as usize,
             self.sample_rate,
         );
         for (i, channel) in self.js_channels.borrow().iter().enumerate() {
-            // Step 1.
             if !channel.is_initialized() {
                 return None;
             }
-
-            // Step 3.
-            result.buffers[i] = channel.acquire_data(cx).ok()?;
+            let array = channel.get_typed_array().ok()?;
+            result.buffers[i] = array.to_vec()?;
         }
-
         Some(result)
     }
 
-    pub(crate) fn get_channels(&self, cx: &mut JSContext) -> Option<Arc<ServoMediaAudioBuffer>> {
-        if self.shared_channels.borrow().is_none() {
-            let channels = self.acquire_contents(cx).map(Arc::new);
-            if channels.is_some() {
-                *self.shared_channels.safe_borrow_mut(cx.no_gc()) = channels;
-            }
+    /// The buffer's content for the rendering thread.
+    pub(crate) fn get_channels(&self, _cx: &mut JSContext) -> Option<Arc<ServoMediaAudioBuffer>> {
+        // No getChannelData() yet: the data only lives in `shared_channels`.
+        if let Some(shared) = self.shared_channels.borrow().as_ref() {
+            return Some(shared.clone());
         }
-        self.shared_channels.borrow().clone()
+        // The page has the channel arrays: snapshot them, leaving them attached.
+        self.copy_contents().map(Arc::new)
     }
 }
 

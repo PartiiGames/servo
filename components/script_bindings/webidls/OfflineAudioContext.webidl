@@ -22,4 +22,5 @@ interface OfflineAudioContext : BaseAudioContext {
   Promise<AudioBuffer> startRendering();
   Promise<undefined> resume();
   Promise<undefined> suspend(double suspendTime);
+  Promise<undefined> close();
 };
