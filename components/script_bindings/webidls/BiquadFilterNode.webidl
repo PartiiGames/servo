@@ -33,7 +33,7 @@ interface BiquadFilterNode : AudioNode {
   readonly attribute AudioParam detune;
   readonly attribute AudioParam Q;
   readonly attribute AudioParam gain;
-  // the AudioParam model of https://github.com/servo/servo/issues/21659 needs to
-  // be implemented before we implement this
-  // void getFrequencyResponse (Float32Array frequencyHz, Float32Array magResponse, Float32Array phaseResponse);
+  [Throws] undefined getFrequencyResponse (Float32Array frequencyHz,
+                                           Float32Array magResponse,
+                                           Float32Array phaseResponse);
 };

@@ -144,198 +144,222 @@ impl BiquadFilterNode {
         changed
     }
 
-    /// Set to the constant z-transform y[n] = b0 * x[n]
-    fn constant_z_transform(&mut self, b0: f64) {
-        self.b0 = b0;
-        self.b1 = 0.;
-        self.b2 = 0.;
-        self.a1 = 0.;
-        self.a2 = 0.;
-    }
-
     /// Update the coefficients a1, a2, b0, b1, b2, given the sample_rate
     ///
     /// See <https://webaudio.github.io/web-audio-api/#filters-characteristics>
     fn update_coefficients(&mut self, fs: f32) {
-        let g: f64 = self.gain.value().into();
-        let q: f64 = self.q.value().into();
-        let freq: f64 = self.frequency.value().into();
-        let f0: f64 = freq * (2.0_f64).powf(self.detune.value() as f64 / 1200.);
-        let fs: f64 = fs.into();
-        // clamp to nominal range
-        // https://webaudio.github.io/web-audio-api/#biquadfilternode
-        let f0 = if f0 > fs / 2. || !f0.is_finite() {
-            fs / 2.
-        } else if f0 < 0. {
-            0.
-        } else {
-            f0
-        };
-
-        let normalized = f0 / fs;
-        let a = 10.0_f64.powf(g / 40.);
-
-        // the boundary values sometimes need limits to
-        // be taken
-        match self.filter {
-            FilterType::LowPass => {
-                if normalized == 1. {
-                    self.constant_z_transform(1.);
-                    return;
-                } else if normalized == 0. {
-                    self.constant_z_transform(0.);
-                    return;
-                }
-            },
-            FilterType::HighPass => {
-                if normalized == 1. {
-                    self.constant_z_transform(0.);
-                    return;
-                } else if normalized == 0. {
-                    self.constant_z_transform(1.);
-                    return;
-                }
-            },
-            FilterType::LowShelf => {
-                if normalized == 1. {
-                    self.constant_z_transform(a * a);
-                    return;
-                } else if normalized == 0. {
-                    self.constant_z_transform(1.);
-                    return;
-                }
-            },
-            FilterType::HighShelf => {
-                if normalized == 1. {
-                    self.constant_z_transform(1.);
-                    return;
-                } else if normalized == 0. {
-                    self.constant_z_transform(a * a);
-                    return;
-                }
-            },
-            FilterType::Peaking => {
-                if normalized == 0. || normalized == 1. {
-                    self.constant_z_transform(1.);
-                    return;
-                } else if q <= 0. {
-                    self.constant_z_transform(a * a);
-                    return;
-                }
-            },
-            FilterType::AllPass => {
-                if normalized == 0. || normalized == 1. {
-                    self.constant_z_transform(1.);
-                    return;
-                } else if q <= 0. {
-                    self.constant_z_transform(-1.);
-                    return;
-                }
-            },
-            FilterType::Notch => {
-                if normalized == 0. || normalized == 1. {
-                    self.constant_z_transform(1.);
-                    return;
-                } else if q <= 0. {
-                    self.constant_z_transform(0.);
-                    return;
-                }
-            },
-            FilterType::BandPass => {
-                if normalized == 0. || normalized == 1. {
-                    self.constant_z_transform(0.);
-                    return;
-                } else if q <= 0. {
-                    self.constant_z_transform(1.);
-                    return;
-                }
-            },
-        }
-
-        let omega0 = 2. * PI * normalized;
-        let sin_omega = omega0.sin();
-        let cos_omega = omega0.cos();
-        let alpha_q = sin_omega / (2. * q);
-        let alpha_q_db = sin_omega / (2. * 10.0_f64.powf(q / 20.));
-        let alpha_s = sin_omega / SQRT_2;
-
-        // we predivide by a0
-        let a0;
-
-        match self.filter {
-            FilterType::LowPass => {
-                self.b0 = (1. - cos_omega) / 2.;
-                self.b1 = 1. - cos_omega;
-                self.b2 = self.b1 / 2.;
-                a0 = 1. + alpha_q_db;
-                self.a1 = -2. * cos_omega;
-                self.a2 = 1. - alpha_q_db;
-            },
-            FilterType::HighPass => {
-                self.b0 = (1. + cos_omega) / 2.;
-                self.b1 = -(1. + cos_omega);
-                self.b2 = -self.b1 / 2.;
-                a0 = 1. + alpha_q_db;
-                self.a1 = -2. * cos_omega;
-                self.a2 = 1. - alpha_q_db;
-            },
-            FilterType::BandPass => {
-                self.b0 = alpha_q;
-                self.b1 = 0.;
-                self.b2 = -alpha_q;
-                a0 = 1. + alpha_q;
-                self.a1 = -2. * cos_omega;
-                self.a2 = 1. - alpha_q;
-            },
-            FilterType::Notch => {
-                self.b0 = 1.;
-                self.b1 = -2. * cos_omega;
-                self.b2 = 1.;
-                a0 = 1. + alpha_q;
-                self.a1 = -2. * cos_omega;
-                self.a2 = 1. - alpha_q;
-            },
-            FilterType::AllPass => {
-                self.b0 = 1. - alpha_q;
-                self.b1 = -2. * cos_omega;
-                self.b2 = 1. + alpha_q;
-                a0 = 1. + alpha_q;
-                self.a1 = -2. * cos_omega;
-                self.a2 = 1. - alpha_q;
-            },
-            FilterType::Peaking => {
-                self.b0 = 1. + alpha_q * a;
-                self.b1 = -2. * cos_omega;
-                self.b2 = 1. - alpha_q * a;
-                a0 = 1. + alpha_q / a;
-                self.a1 = -2. * cos_omega;
-                self.a2 = 1. - alpha_q / a;
-            },
-            FilterType::LowShelf => {
-                let alpha_rt_a = 2. * alpha_s * a.sqrt();
-                self.b0 = a * ((a + 1.) - (a - 1.) * cos_omega + alpha_rt_a);
-                self.b1 = 2. * a * ((a - 1.) - (a + 1.) * cos_omega);
-                self.b2 = a * ((a + 1.) - (a - 1.) * cos_omega - alpha_rt_a);
-                a0 = (a + 1.) + (a - 1.) * cos_omega + alpha_rt_a;
-                self.a1 = -2. * ((a - 1.) + (a + 1.) * cos_omega);
-                self.a2 = (a + 1.) + (a - 1.) * cos_omega - alpha_rt_a;
-            },
-            FilterType::HighShelf => {
-                let alpha_rt_a = 2. * alpha_s * a.sqrt();
-                self.b0 = a * ((a + 1.) + (a - 1.) * cos_omega + alpha_rt_a);
-                self.b1 = -2. * a * ((a - 1.) + (a + 1.) * cos_omega);
-                self.b2 = a * ((a + 1.) + (a - 1.) * cos_omega - alpha_rt_a);
-                a0 = (a + 1.) - (a - 1.) * cos_omega + alpha_rt_a;
-                self.a1 = 2. * ((a - 1.) - (a + 1.) * cos_omega);
-                self.a2 = (a + 1.) - (a - 1.) * cos_omega - alpha_rt_a;
-            },
-        }
-        self.b0 /= a0;
-        self.b1 /= a0;
-        self.b2 /= a0;
-        self.a1 /= a0;
-        self.a2 /= a0;
+        [self.b0, self.b1, self.b2, self.a1, self.a2] = biquad_coefficients(
+            self.filter,
+            self.frequency.value().into(),
+            self.detune.value().into(),
+            self.q.value().into(),
+            self.gain.value().into(),
+            fs.into(),
+        );
     }
+}
+
+/// <https://webaudio.github.io/web-audio-api/#dom-biquadfilternode-getfrequencyresponse>,
+/// for the given current parameter values.
+pub fn biquad_frequency_response(
+    options: &BiquadFilterNodeOptions,
+    sample_rate: f32,
+    frequency_hz: &[f32],
+    mag_response: &mut [f32],
+    phase_response: &mut [f32],
+) {
+    let [b0, b1, b2, a1, a2] = biquad_coefficients(
+        options.filter,
+        options.frequency.into(),
+        options.detune.into(),
+        options.q.into(),
+        options.gain.into(),
+        sample_rate.into(),
+    );
+    crate::iir_filter_node::IIRFilterNode::get_frequency_response(
+        &[b0, b1, b2],
+        &[1., a1, a2],
+        frequency_hz,
+        mag_response,
+        phase_response,
+        sample_rate,
+    );
+}
+
+/// The filter's coefficients [b0, b1, b2, a1, a2], each divided by a0.
+///
+/// See <https://webaudio.github.io/web-audio-api/#filters-characteristics>
+pub fn biquad_coefficients(
+    filter: FilterType,
+    freq: f64,
+    detune: f64,
+    q: f64,
+    g: f64,
+    fs: f64,
+) -> [f64; 5] {
+    // The constant z-transform y[n] = b0 * x[n]
+    let constant = |b0: f64| [b0, 0., 0., 0., 0.];
+    let f0: f64 = freq * (2.0_f64).powf(detune / 1200.);
+    // clamp to nominal range
+    // https://webaudio.github.io/web-audio-api/#biquadfilternode
+    let f0 = if f0 > fs / 2. || !f0.is_finite() {
+        fs / 2.
+    } else if f0 < 0. {
+        0.
+    } else {
+        f0
+    };
+
+    let normalized = f0 / fs;
+    let a = 10.0_f64.powf(g / 40.);
+
+    // the boundary values sometimes need limits to
+    // be taken
+    match filter {
+        FilterType::LowPass => {
+            if normalized == 1. {
+                return constant(1.);
+            } else if normalized == 0. {
+                return constant(0.);
+            }
+        },
+        FilterType::HighPass => {
+            if normalized == 1. {
+                return constant(0.);
+            } else if normalized == 0. {
+                return constant(1.);
+            }
+        },
+        FilterType::LowShelf => {
+            if normalized == 1. {
+                return constant(a * a);
+            } else if normalized == 0. {
+                return constant(1.);
+            }
+        },
+        FilterType::HighShelf => {
+            if normalized == 1. {
+                return constant(1.);
+            } else if normalized == 0. {
+                return constant(a * a);
+            }
+        },
+        FilterType::Peaking => {
+            if normalized == 0. || normalized == 1. {
+                return constant(1.);
+            } else if q <= 0. {
+                return constant(a * a);
+            }
+        },
+        FilterType::AllPass => {
+            if normalized == 0. || normalized == 1. {
+                return constant(1.);
+            } else if q <= 0. {
+                return constant(-1.);
+            }
+        },
+        FilterType::Notch => {
+            if normalized == 0. || normalized == 1. {
+                return constant(1.);
+            } else if q <= 0. {
+                return constant(0.);
+            }
+        },
+        FilterType::BandPass => {
+            if normalized == 0. || normalized == 1. {
+                return constant(0.);
+            } else if q <= 0. {
+                return constant(1.);
+            }
+        },
+    }
+
+    let omega0 = 2. * PI * normalized;
+    let sin_omega = omega0.sin();
+    let cos_omega = omega0.cos();
+    let alpha_q = sin_omega / (2. * q);
+    let alpha_q_db = sin_omega / (2. * 10.0_f64.powf(q / 20.));
+    let alpha_s = sin_omega / SQRT_2;
+
+    let (b0, b1, b2, a0, a1, a2) = match filter {
+        FilterType::LowPass => {
+            let b1 = 1. - cos_omega;
+            (
+                (1. - cos_omega) / 2.,
+                b1,
+                b1 / 2.,
+                1. + alpha_q_db,
+                -2. * cos_omega,
+                1. - alpha_q_db,
+            )
+        },
+        FilterType::HighPass => {
+            let b1 = -(1. + cos_omega);
+            (
+                (1. + cos_omega) / 2.,
+                b1,
+                -b1 / 2.,
+                1. + alpha_q_db,
+                -2. * cos_omega,
+                1. - alpha_q_db,
+            )
+        },
+        FilterType::BandPass => (
+            alpha_q,
+            0.,
+            -alpha_q,
+            1. + alpha_q,
+            -2. * cos_omega,
+            1. - alpha_q,
+        ),
+        FilterType::Notch => (
+            1.,
+            -2. * cos_omega,
+            1.,
+            1. + alpha_q,
+            -2. * cos_omega,
+            1. - alpha_q,
+        ),
+        FilterType::AllPass => (
+            1. - alpha_q,
+            -2. * cos_omega,
+            1. + alpha_q,
+            1. + alpha_q,
+            -2. * cos_omega,
+            1. - alpha_q,
+        ),
+        FilterType::Peaking => (
+            1. + alpha_q * a,
+            -2. * cos_omega,
+            1. - alpha_q * a,
+            1. + alpha_q / a,
+            -2. * cos_omega,
+            1. - alpha_q / a,
+        ),
+        FilterType::LowShelf => {
+            let alpha_rt_a = 2. * alpha_s * a.sqrt();
+            (
+                a * ((a + 1.) - (a - 1.) * cos_omega + alpha_rt_a),
+                2. * a * ((a - 1.) - (a + 1.) * cos_omega),
+                a * ((a + 1.) - (a - 1.) * cos_omega - alpha_rt_a),
+                (a + 1.) + (a - 1.) * cos_omega + alpha_rt_a,
+                -2. * ((a - 1.) + (a + 1.) * cos_omega),
+                (a + 1.) + (a - 1.) * cos_omega - alpha_rt_a,
+            )
+        },
+        FilterType::HighShelf => {
+            let alpha_rt_a = 2. * alpha_s * a.sqrt();
+            (
+                a * ((a + 1.) + (a - 1.) * cos_omega + alpha_rt_a),
+                -2. * a * ((a - 1.) + (a + 1.) * cos_omega),
+                a * ((a + 1.) + (a - 1.) * cos_omega - alpha_rt_a),
+                (a + 1.) - (a - 1.) * cos_omega + alpha_rt_a,
+                2. * ((a - 1.) - (a + 1.) * cos_omega),
+                (a + 1.) - (a - 1.) * cos_omega - alpha_rt_a,
+            )
+        },
+    };
+    [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]
 }
 
 impl AudioNodeEngine for BiquadFilterNode {
@@ -420,5 +444,31 @@ impl AudioNodeEngine for BiquadFilterNode {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lowpass_response_passes_dc_and_is_nan_past_nyquist() {
+        let options = BiquadFilterNodeOptions {
+            filter: FilterType::LowPass,
+            frequency: 1000.,
+            detune: 0.,
+            q: 1.,
+            gain: 0.,
+        };
+        let freqs = [0., 1000., 24000., 24001., -1.];
+        let mut mag = [0.; 5];
+        let mut phase = [0.; 5];
+        biquad_frequency_response(&options, 48000., &freqs, &mut mag, &mut phase);
+        assert!((mag[0] - 1.).abs() < 1e-6, "{}", mag[0]);
+        assert!(phase[0].abs() < 1e-6, "{}", phase[0]);
+        // Q = 1 dB at the cutoff: |H| = 10^(1/20).
+        assert!((mag[1] - 10f32.powf(1. / 20.)).abs() < 1e-3, "{}", mag[1]);
+        assert!(mag[2] < 1e-6, "{}", mag[2]);
+        assert!(mag[3].is_nan() && mag[4].is_nan());
     }
 }

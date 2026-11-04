@@ -6,12 +6,14 @@ use std::cell::Cell;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use js::gc::CustomAutoRooterGuard;
 use js::rust::HandleObject;
+use js::typedarray::Float32Array;
 use script_bindings::codegen::GenericBindings::BaseAudioContextBinding::BaseAudioContextMethods;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_media::audio::audio_node::{AudioNodeInit, AudioNodeMessage, AudioNodeType};
 use servo_media::audio::biquad_filter_node::{
-    BiquadFilterNodeMessage, BiquadFilterNodeOptions, FilterType,
+    BiquadFilterNodeMessage, BiquadFilterNodeOptions, FilterType, biquad_frequency_response,
 };
 use servo_media::audio::param::ParamType;
 
@@ -20,13 +22,15 @@ use crate::dom::audio::audionode::{AudioNode, AudioNodeOptionsHelper};
 use crate::dom::audio::audioparam::AudioParam;
 use crate::dom::audio::baseaudiocontext::BaseAudioContext;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
-    ChannelCountMode, ChannelInterpretation,
+    AudioNodeMethods, ChannelCountMode, ChannelInterpretation,
 };
-use crate::dom::bindings::codegen::Bindings::AudioParamBinding::AutomationRate;
+use crate::dom::bindings::codegen::Bindings::AudioParamBinding::{
+    AudioParamMethods, AutomationRate,
+};
 use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::{
     BiquadFilterNodeMethods, BiquadFilterOptions, BiquadFilterType,
 };
-use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
 
@@ -196,6 +200,40 @@ impl BiquadFilterNodeMethods<crate::DomTypeHolder> for BiquadFilterNode {
         self.node.message(AudioNodeMessage::BiquadFilterNode(
             BiquadFilterNodeMessage::SetFilterType(filter.convert()),
         ));
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-biquadfilternode-getfrequencyresponse>:
+    /// from the AudioParams' current values.
+    fn GetFrequencyResponse(
+        &self,
+        frequency_hz: CustomAutoRooterGuard<Float32Array>,
+        mut mag_response: CustomAutoRooterGuard<Float32Array>,
+        mut phase_response: CustomAutoRooterGuard<Float32Array>,
+    ) -> Result<(), Error> {
+        let len = frequency_hz.len();
+        if len != mag_response.len() || len != phase_response.len() {
+            return Err(Error::InvalidAccess(None));
+        }
+        let frequency_hz_vec = frequency_hz.to_vec().unwrap_or_default();
+        let mut mag_response_vec = vec![0.; len];
+        let mut phase_response_vec = vec![0.; len];
+        let options = BiquadFilterNodeOptions {
+            filter: self.filter.get().convert(),
+            frequency: *self.frequency.Value(),
+            detune: *self.detune.Value(),
+            q: *self.q.Value(),
+            gain: *self.gain.Value(),
+        };
+        biquad_frequency_response(
+            &options,
+            *self.node.Context().SampleRate(),
+            &frequency_hz_vec,
+            &mut mag_response_vec,
+            &mut phase_response_vec,
+        );
+        mag_response.update(&mag_response_vec);
+        phase_response.update(&phase_response_vec);
+        Ok(())
     }
 }
 
