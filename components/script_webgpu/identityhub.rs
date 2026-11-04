@@ -73,7 +73,7 @@ impl IdentityHub {
     }
 
     #[expect(unused)]
-    fn free_queue_id(&self, id: QueueId) {
+    pub fn free_queue_id(&self, id: QueueId) {
         self.queues.free(id);
     }
 
