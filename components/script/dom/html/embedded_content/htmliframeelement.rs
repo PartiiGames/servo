@@ -825,7 +825,7 @@ impl HTMLIFrameElement {
     /// features this fork enforces (`PolicyFeature`), for a navigation of this frame to `url`.
     /// A feature the embedding document may not use is never granted; a feature the `allow`
     /// attribute declares gets its allowlist; `allowfullscreen` means `fullscreen *`; anything
-    /// else gets the default allowlist 'self' (the embedding document's origin).
+    /// else is not granted (Partii: undeclared means no, even for a same-origin frame).
     fn container_policy(&self) -> ContainerPolicy {
         let document = self.owner_document();
         let self_origin = document.origin().immutable().clone();
@@ -868,7 +868,9 @@ impl HTMLIFrameElement {
             } else if feature == PolicyFeature::Fullscreen && allowfullscreen {
                 Allowlist::All
             } else {
-                Allowlist::Origins(vec![self_origin.clone()])
+                // Partii: a frame gets these features only when it declares them (as other
+                // engines do for fullscreen without allowfullscreen), same-origin or not.
+                Allowlist::None
             };
         }
         policy

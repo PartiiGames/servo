@@ -3717,9 +3717,8 @@ impl Document {
 
     /// <https://w3c.github.io/webappsec-permissions-policy/#is-feature-enabled>, for this
     /// document's own origin, for the features this fork enforces. A top-level document has
-    /// them all; a nested one has what its `<iframe allow>` grants its origin. A nested document
-    /// that came without a container policy (one script made in-process, such as an iframe's
-    /// initial about:blank) gets the default allowlist 'self' against its parent.
+    /// them all; a nested one has what its `<iframe allow>` grants its origin, and nothing
+    /// when it came without a container policy.
     pub(crate) fn is_feature_enabled(&self, feature: PolicyFeature) -> bool {
         if let Some(policy) = self.container_policy.borrow().as_ref() {
             return policy.allowlist(feature).matches(
@@ -3728,17 +3727,7 @@ impl Document {
                 policy.src_url.as_ref(),
             );
         }
-        if self.window.is_top_level() {
-            return true;
-        }
-        match self.window.GetFrameElement() {
-            Some(frame_element) => {
-                let parent = frame_element.owner_document();
-                parent.is_feature_enabled(feature) &&
-                    parent.origin().same_origin(&self.origin())
-            },
-            None => false,
-        }
+        self.window.is_top_level()
     }
 
     /// Partii: the check point for pointer lock (requestPointerLock; the w5-input stream calls
@@ -3747,8 +3736,7 @@ impl Document {
     /// - `<iframe sandbox="... allow-pointer-lock">` (the standard switch; the launcher's game
     ///   frames use this one),
     ///
-    /// and a sandbox without `allow-pointer-lock` always forbids it. Top-level documents and
-    /// same-origin frames get the default allowlist 'self'.
+    /// and a sandbox without `allow-pointer-lock` always forbids it. Top-level documents may.
     pub(crate) fn allowed_to_use_pointer_lock(&self) -> bool {
         if !self.has_browsing_context || !self.is_fully_active() {
             return false;
