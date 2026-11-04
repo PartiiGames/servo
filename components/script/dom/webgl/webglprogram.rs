@@ -4,7 +4,7 @@
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -196,6 +196,9 @@ pub(crate) struct WebGLProgram {
     #[no_trace]
     #[ignore_malloc_size_of = "channel"]
     pending_link: RefCell<Option<GenericReceiver<ProgramLinkInfo>>>,
+    /// Texture units set on sampler uniforms (uniform location -> unit), for the WebGL 2
+    /// draw-time sampler type check. Unset samplers use unit 0.
+    sampler_units: DomRefCell<HashMap<i32, i32>>,
     droppable: RefCell<DroppableWebGLProgram>,
 }
 
@@ -214,6 +217,7 @@ impl WebGLProgram {
             transform_feedback_varyings_length: Default::default(),
             transform_feedback_mode: Default::default(),
             pending_link: RefCell::new(None),
+            sampler_units: Default::default(),
             droppable: RefCell::new(DroppableWebGLProgram::new(id, context)),
         }
     }
@@ -305,6 +309,7 @@ impl WebGLProgram {
     pub(crate) fn link(&self) -> WebGLResult<()> {
         // A previous link still in flight is superseded; take its answer off the channel.
         self.resolve_link();
+        self.sampler_units.borrow_mut().clear();
         self.linked.set(false);
         self.link_generation
             .set(self.link_generation.get().checked_add(1).unwrap());
@@ -327,6 +332,24 @@ impl WebGLProgram {
             .send_command(WebGLCommand::LinkProgram(self.id(), sender));
         *self.pending_link.borrow_mut() = Some(receiver);
         Ok(())
+    }
+
+    /// Records the units given to a sampler uniform (array elements at consecutive locations).
+    pub(crate) fn set_sampler_units(&self, location: i32, units: &[i32]) {
+        let mut sampler_units = self.sampler_units.borrow_mut();
+        for (i, &unit) in units.iter().enumerate() {
+            sampler_units.insert(location + i as i32, unit);
+        }
+    }
+
+    /// The texture unit of a sampler uniform at `location` (0 until set).
+    pub(crate) fn sampler_unit(&self, location: i32) -> u32 {
+        self.sampler_units
+            .borrow()
+            .get(&location)
+            .copied()
+            .unwrap_or(0)
+            .max(0) as u32
     }
 
     /// Waits for and applies the answer to a pending linkProgram, if there is one.

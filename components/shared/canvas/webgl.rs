@@ -901,6 +901,8 @@ pub struct ActiveUniformInfo {
     pub type_: u32,
     /// The index of the indexed uniform buffer binding, if it is bound.
     pub bind_index: Option<u32>,
+    /// The uniform's location (of element 0 for arrays), as getUniformLocation reports it.
+    pub location: Option<i32>,
 }
 
 impl ActiveUniformInfo {

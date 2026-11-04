@@ -57,6 +57,8 @@ impl Drop for DroppableWebGLSampler {
 pub(crate) struct WebGLSampler {
     webgl_object: WebGLObject,
     droppable: DroppableWebGLSampler,
+    /// TEXTURE_COMPARE_MODE, for the draw-time sampler type check.
+    compare_mode: Cell<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -118,7 +120,12 @@ impl WebGLSampler {
                 gl_id: id,
                 marked_for_deletion: Cell::new(false),
             },
+            compare_mode: Cell::new(constants::NONE),
         }
+    }
+
+    pub(crate) fn compare_mode(&self) -> u32 {
+        self.compare_mode.get()
     }
 
     pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
@@ -168,6 +175,9 @@ impl WebGLSampler {
         }
         if !validate_params(pname, value) {
             return Err(InvalidEnum);
+        }
+        if let (constants::TEXTURE_COMPARE_MODE, WebGLSamplerValue::GLenum(mode)) = (pname, value) {
+            self.compare_mode.set(mode);
         }
         let command = match value {
             WebGLSamplerValue::GLenum(value) => {

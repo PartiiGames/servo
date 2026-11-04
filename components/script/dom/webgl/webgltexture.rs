@@ -125,6 +125,8 @@ pub(crate) struct WebGLTexture {
     attached_framebuffer: MutNullableDom<WebGLFramebuffer>,
     /// Number of immutable levels.
     immutable_levels: Cell<Option<u32>>,
+    /// TEXTURE_COMPARE_MODE, for the draw-time sampler type check.
+    compare_mode: Cell<u32>,
     droppable: DroppableWebGLTexture,
 }
 
@@ -138,6 +140,7 @@ impl WebGLTexture {
             webgl_object: WebGLObject::new_inherited(context),
             target: Cell::new(None),
             immutable_levels: Cell::new(None),
+            compare_mode: Cell::new(constants::NONE),
             face_count: Cell::new(0),
             base_mipmap_level: 0,
             min_filter: Cell::new(constants::NEAREST_MIPMAP_LINEAR),
@@ -344,6 +347,15 @@ impl WebGLTexture {
         self.droppable.is_deleted.get()
     }
 
+    pub(crate) fn compare_mode(&self) -> u32 {
+        self.compare_mode.get()
+    }
+
+    /// The internal format of the base level image (face 0 for cube maps), if defined.
+    pub(crate) fn base_internal_format(&self) -> Option<TexFormat> {
+        self.base_image_info().map(|info| info.internal_format)
+    }
+
     pub(crate) fn is_immutable(&self) -> bool {
         self.immutable_levels.get().is_some()
     }
@@ -409,7 +421,8 @@ impl WebGLTexture {
                     _ => return Err(WebGLError::InvalidEnum),
                 },
                 constants::TEXTURE_COMPARE_MODE => match int_value as u32 {
-                    constants::COMPARE_REF_TO_TEXTURE | constants::NONE => {
+                    mode @ (constants::COMPARE_REF_TO_TEXTURE | constants::NONE) => {
+                        self.compare_mode.set(mode);
                         context.send_command(WebGLCommand::TexParameteri(target, param, int_value));
                         return Ok(());
                     },
