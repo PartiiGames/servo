@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::conversions::Convert;
 use crate::dom::audio::analysernode::AnalyserNode;
-use crate::dom::audio::audiobuffer::AudioBuffer;
+use crate::dom::audio::audiobuffer::{AudioBuffer, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
 use crate::dom::audio::audiobuffersourcenode::AudioBufferSourceNode;
 use crate::dom::audio::audiodestinationnode::AudioDestinationNode;
 use crate::dom::audio::audiolistener::AudioListener;
@@ -627,7 +627,7 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
         if number_of_channels == 0 ||
             number_of_channels > MAX_CHANNEL_COUNT ||
             length == 0 ||
-            *sample_rate <= 0.
+            !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&*sample_rate)
         {
             return Err(Error::NotSupported(None));
         }
