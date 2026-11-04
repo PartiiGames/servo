@@ -390,6 +390,18 @@ impl WebGLRenderingContext {
         })
     }
 
+    /// Whether the bound WebGL 2 vertex array binds `buffer` (without creating the default
+    /// vertex array, which binds nothing until it exists).
+    pub(crate) fn current_vao_webgl2_binds_buffer(&self, buffer: &WebGLBuffer) -> bool {
+        match self.current_vao_webgl2.get() {
+            Some(vao) => vao.binds_buffer(buffer),
+            None => self
+                .default_vao_webgl2
+                .get()
+                .is_some_and(|vao| vao.binds_buffer(buffer)),
+        }
+    }
+
     pub(crate) fn current_vertex_attribs(&self) -> RefMut<'_, Box<[VertexAttrib]>> {
         self.current_vertex_attribs.borrow_mut()
     }
@@ -3945,8 +3957,12 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn IsBuffer(&self, buffer: Option<&WebGLBuffer>) -> bool {
+        // deleteBuffer frees the name at once, even while the buffer stays attached (to a
+        // vertex array or transform feedback object): isBuffer is false from then on.
         buffer.is_some_and(|buf| {
-            self.validate_ownership(buf).is_ok() && buf.target().is_some() && !buf.is_deleted()
+            self.validate_ownership(buf).is_ok() &&
+                buf.target().is_some() &&
+                !buf.is_marked_for_deletion()
         })
     }
 

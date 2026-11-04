@@ -94,6 +94,10 @@ impl WebGLVertexArrayObject {
         self.array_object.enabled_vertex_attrib_array(index, value);
     }
 
+    pub(crate) fn binds_buffer(&self, buffer: &WebGLBuffer) -> bool {
+        self.array_object.binds_buffer(buffer)
+    }
+
     pub(crate) fn unbind_buffer(&self, buffer: &WebGLBuffer) {
         self.array_object.unbind_buffer(buffer);
     }

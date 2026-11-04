@@ -1784,6 +1784,52 @@ impl WebGL2RenderingContext {
         Ok(())
     }
 
+    /// WebGL 2.0 5.1: a buffer bound to an indexed binding point of the bound transform feedback
+    /// object and also to a binding point outside transform feedback (a generic target other than
+    /// TRANSFORM_FEEDBACK_BUFFER, an indexed uniform buffer binding, or the bound vertex array) may
+    /// not be read or written through the API: INVALID_OPERATION.
+    fn is_double_bound_with_transform_feedback(&self, buffer: &WebGLBuffer) -> bool {
+        let is_buffer =
+            |slot: &MutNullableDom<WebGLBuffer>| slot.get().is_some_and(|b| buffer == &*b);
+        if !self
+            .indexed_transform_feedback_buffer_bindings
+            .iter()
+            .any(|binding| is_buffer(&binding.buffer))
+        {
+            return false;
+        }
+        [
+            self.base.array_buffer_slot(),
+            &self.bound_copy_read_buffer,
+            &self.bound_copy_write_buffer,
+            &self.bound_pixel_pack_buffer,
+            &self.bound_pixel_unpack_buffer,
+            &self.bound_uniform_buffer,
+        ]
+        .into_iter()
+        .any(is_buffer) ||
+            self.indexed_uniform_buffer_bindings
+                .iter()
+                .any(|binding| is_buffer(&binding.buffer)) ||
+            self.base.current_vao_webgl2_binds_buffer(buffer)
+    }
+
+    /// `bound_buffer` for bufferData, bufferSubData, getBufferSubData and copyBufferSubData: a
+    /// buffer double bound with transform feedback is INVALID_OPERATION.
+    fn bound_buffer_for_data(
+        &self,
+        cx: &mut JSContext,
+        target: u32,
+    ) -> WebGLResult<Option<DomRoot<WebGLBuffer>>> {
+        let buffer = self.bound_buffer(cx, target)?;
+        if let Some(buffer) = &buffer &&
+            self.is_double_bound_with_transform_feedback(buffer)
+        {
+            return Err(InvalidOperation);
+        }
+        Ok(buffer)
+    }
+
     /// Issues a draw after the transform feedback checks, counting the recorded vertices
     /// when the draw goes through.
     fn draw_with_transform_feedback(
@@ -1900,11 +1946,7 @@ impl WebGL2RenderingContext {
             self.base.webgl_error(InvalidOperation);
             return false;
         };
-        if self
-            .bound_transform_feedback_buffer
-            .get()
-            .is_some_and(|tf_buffer| tf_buffer == buffer)
-        {
+        if self.is_double_bound_with_transform_feedback(&buffer) {
             self.base.webgl_error(InvalidOperation);
             return false;
         }
@@ -2918,8 +2960,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         usage: u32,
     ) {
         let usage = handle_potential_webgl_error!(self.base, self.buffer_usage(usage), return);
-        let bound_buffer =
-            handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
+        let bound_buffer = handle_potential_webgl_error!(
+            self.base,
+            self.bound_buffer_for_data(cx, target),
+            return
+        );
         self.base
             .buffer_data(cx.no_gc(), target, data, usage, bound_buffer)
     }
@@ -2927,8 +2972,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
     fn BufferData(&self, cx: &mut JSContext, target: u32, size: i64, usage: u32) {
         let usage = handle_potential_webgl_error!(self.base, self.buffer_usage(usage), return);
-        let bound_buffer =
-            handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
+        let bound_buffer = handle_potential_webgl_error!(
+            self.base,
+            self.bound_buffer_for_data(cx, target),
+            return
+        );
         self.base.buffer_data_(target, size, usage, bound_buffer)
     }
 
@@ -2943,8 +2991,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         length: u32,
     ) {
         let usage = handle_potential_webgl_error!(self.base, self.buffer_usage(usage), return);
-        let bound_buffer =
-            handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
+        let bound_buffer = handle_potential_webgl_error!(
+            self.base,
+            self.bound_buffer_for_data(cx, target),
+            return
+        );
         let bound_buffer =
             handle_potential_webgl_error!(self.base, bound_buffer.ok_or(InvalidOperation), return);
 
@@ -2985,8 +3036,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         offset: i64,
         data: ArrayBufferViewOrArrayBuffer,
     ) {
-        let bound_buffer =
-            handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
+        let bound_buffer = handle_potential_webgl_error!(
+            self.base,
+            self.bound_buffer_for_data(cx, target),
+            return
+        );
         self.base
             .buffer_sub_data(cx.no_gc(), target, offset, data, bound_buffer)
     }
@@ -3001,8 +3055,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_elem_offset: u32,
         length: u32,
     ) {
-        let bound_buffer =
-            handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
+        let bound_buffer = handle_potential_webgl_error!(
+            self.base,
+            self.bound_buffer_for_data(cx, target),
+            return
+        );
         let bound_buffer =
             handle_potential_webgl_error!(self.base, bound_buffer.ok_or(InvalidOperation), return);
 
@@ -3059,13 +3116,19 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return self.base.webgl_error(InvalidValue);
         }
 
-        let read_buffer =
-            handle_potential_webgl_error!(self.base, self.bound_buffer(cx, read_target), return);
+        let read_buffer = handle_potential_webgl_error!(
+            self.base,
+            self.bound_buffer_for_data(cx, read_target),
+            return
+        );
         let read_buffer =
             handle_potential_webgl_error!(self.base, read_buffer.ok_or(InvalidOperation), return);
 
-        let write_buffer =
-            handle_potential_webgl_error!(self.base, self.bound_buffer(cx, write_target), return);
+        let write_buffer = handle_potential_webgl_error!(
+            self.base,
+            self.bound_buffer_for_data(cx, write_target),
+            return
+        );
         let write_buffer =
             handle_potential_webgl_error!(self.base, write_buffer.ok_or(InvalidOperation), return);
 
@@ -3112,8 +3175,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         dst_elem_offset: u32,
         length: u32,
     ) {
-        let bound_buffer =
-            handle_potential_webgl_error!(self.base, self.bound_buffer(cx, target), return);
+        let bound_buffer = handle_potential_webgl_error!(
+            self.base,
+            self.bound_buffer_for_data(cx, target),
+            return
+        );
         let bound_buffer =
             handle_potential_webgl_error!(self.base, bound_buffer.ok_or(InvalidOperation), return);
 
@@ -3136,7 +3202,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         }
         let copy_bytes = copy_count * dst_elem_size;
 
-        // TODO(mmatyas): Transform Feedback
+        // WebGL 2.0 3.7.3: reading the TRANSFORM_FEEDBACK_BUFFER target while transform feedback
+        // is active is an error, whatever buffer is bound there.
+        if target == constants::TRANSFORM_FEEDBACK_BUFFER &&
+            self.with_current_transform_feedback(|tf| tf.is_active())
+        {
+            return self.base.webgl_error(InvalidOperation);
+        }
 
         let src_byte_offset = src_byte_offset as usize;
         if src_byte_offset + copy_bytes > bound_buffer.capacity() ||
@@ -3935,6 +4007,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             Some(buffer) => buffer,
             None => return self.base.webgl_error(InvalidOperation),
         };
+        if self.is_double_bound_with_transform_feedback(&dst) {
+            return self.base.webgl_error(InvalidOperation);
+        }
 
         if dst_byte_offset < 0 {
             return self.base.webgl_error(InvalidValue);

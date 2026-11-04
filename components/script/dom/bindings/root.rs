@@ -240,6 +240,12 @@ where
         assert_in_script();
         self.ptr.get_or_init(|| Dom::from_ref(&cb()))
     }
+
+    /// The inner value, if it has been initialized.
+    pub(crate) fn get(&self) -> Option<&T> {
+        assert_in_script();
+        self.ptr.get().map(|ptr| &**ptr)
+    }
 }
 
 impl<T: DomObject> Default for DomOnceCell<T> {
