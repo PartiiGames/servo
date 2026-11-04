@@ -1821,22 +1821,15 @@ impl WebGLRenderingContext {
     ) {
         self.with_location(location, |location| {
             match location.type_() {
-                constants::BOOL |
-                constants::INT |
-                constants::SAMPLER_2D |
-                WebGL2RenderingContextConstants::SAMPLER_2D_ARRAY |
-                WebGL2RenderingContextConstants::SAMPLER_3D |
-                constants::SAMPLER_CUBE => {},
+                constants::BOOL | constants::INT => {},
+                sampler if is_sampler_type(sampler) => {},
                 _ => return Err(InvalidOperation),
             }
 
             let val = self.uniform_vec_section_int(val, src_offset, src_length, 1, location)?;
 
             match location.type_() {
-                constants::SAMPLER_2D |
-                constants::SAMPLER_CUBE |
-                WebGL2RenderingContextConstants::SAMPLER_2D_ARRAY |
-                WebGL2RenderingContextConstants::SAMPLER_3D => {
+                sampler if is_sampler_type(sampler) => {
                     for &v in val
                         .iter()
                         .take(cmp::min(location.size().unwrap_or(1) as usize, val.len()))
@@ -4256,10 +4249,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         self.with_location(location, |location| {
             match location.type_() {
                 constants::BOOL | constants::INT => {},
-                constants::SAMPLER_2D |
-                WebGL2RenderingContextConstants::SAMPLER_3D |
-                WebGL2RenderingContextConstants::SAMPLER_2D_ARRAY |
-                constants::SAMPLER_CUBE => {
+                sampler if is_sampler_type(sampler) => {
                     if val < 0 || val as u32 >= self.limits.max_combined_texture_image_units {
                         return Err(InvalidValue);
                     }
@@ -4459,11 +4449,10 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             constants::BOOL_VEC4 => {
                 uniform_get(triple, WebGLCommand::GetUniformBool4).to_jsval(cx, rval)
             },
-            constants::INT |
-            constants::SAMPLER_2D |
-            constants::SAMPLER_CUBE |
-            WebGL2RenderingContextConstants::SAMPLER_2D_ARRAY |
-            WebGL2RenderingContextConstants::SAMPLER_3D => {
+            constants::INT => {
+                rval.set(Int32Value(uniform_get(triple, WebGLCommand::GetUniformInt)))
+            },
+            sampler if is_sampler_type(sampler) => {
                 rval.set(Int32Value(uniform_get(triple, WebGLCommand::GetUniformInt)))
             },
             constants::INT_VEC2 => {
@@ -5484,6 +5473,30 @@ fn copy_tex_image_compatible(source: TexFormat, destination: TexFormat) -> bool 
             (source_bits[c] != 0 &&
                 (unsized_destination || source_bits[c] == destination_bits[c]))
     })
+}
+
+/// Whether a uniform type is a sampler (set with uniform1i / uniform1iv, read back as an int):
+/// WebGL 1's 2D and cube samplers and WebGL 2's 3D, array, shadow and integer ones.
+pub(crate) fn is_sampler_type(type_: u32) -> bool {
+    use WebGL2RenderingContextConstants as c2;
+    matches!(
+        type_,
+        constants::SAMPLER_2D |
+            constants::SAMPLER_CUBE |
+            c2::SAMPLER_3D |
+            c2::SAMPLER_2D_ARRAY |
+            c2::SAMPLER_2D_SHADOW |
+            c2::SAMPLER_2D_ARRAY_SHADOW |
+            c2::SAMPLER_CUBE_SHADOW |
+            c2::INT_SAMPLER_2D |
+            c2::INT_SAMPLER_3D |
+            c2::INT_SAMPLER_CUBE |
+            c2::INT_SAMPLER_2D_ARRAY |
+            c2::UNSIGNED_INT_SAMPLER_2D |
+            c2::UNSIGNED_INT_SAMPLER_3D |
+            c2::UNSIGNED_INT_SAMPLER_CUBE |
+            c2::UNSIGNED_INT_SAMPLER_2D_ARRAY
+    )
 }
 
 /// Where a compressed texture upload reads its data from.

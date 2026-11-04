@@ -71,7 +71,7 @@ use crate::dom::webgl::webglquery::WebGLQuery;
 use crate::dom::webgl::webglrenderbuffer::WebGLRenderbuffer;
 use crate::dom::webgl::webglrenderingcontext::{
     CompressedSource, Operation, TexPixels, TexSource, VertexAttrib, WebGLRenderingContext,
-    array_buffer_type_to_sized_type, uniform_get, uniform_typed,
+    array_buffer_type_to_sized_type, is_sampler_type, uniform_get, uniform_typed,
 };
 use crate::dom::webgl::webglsampler::{WebGLSampler, WebGLSamplerValue};
 use crate::dom::webgl::webglshader::WebGLShader;
@@ -4312,7 +4312,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 &uniform_get(triple, WebGLCommand::GetUniformFloat4x3),
                 retval,
             ),
-            constants::SAMPLER_3D | constants::SAMPLER_2D_ARRAY => {
+            sampler if is_sampler_type(sampler) => {
                 retval.set(Int32Value(uniform_get(triple, WebGLCommand::GetUniformInt)))
             },
             _ => self.base.GetUniform(cx, program, location, retval),
