@@ -3668,7 +3668,9 @@ impl Window {
     pub(crate) fn set_throttled(&self, throttled: bool) {
         self.throttled.set(throttled);
         if throttled {
-            self.as_global_scope().slow_down_timers();
+            if pref!(js_timers_throttle_hidden) {
+                self.as_global_scope().slow_down_timers();
+            }
         } else {
             self.as_global_scope().speed_up_timers();
         }

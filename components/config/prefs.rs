@@ -308,6 +308,9 @@ pub struct Preferences {
     pub js_native_regex_enabled: bool,
     pub js_offthread_compilation_enabled: bool,
     pub js_timers_minimum_duration: i64,
+    /// Partii: throttle a hidden webview's timers to `js_timers_minimum_duration`. Off keeps
+    /// timers at their normal rate while hidden (a jam's sync must not pause). rAF still pauses.
+    pub js_timers_throttle_hidden: bool,
     pub js_wasm_baseline_enabled: bool,
     pub js_wasm_enabled: bool,
     pub js_wasm_ion_enabled: bool,
@@ -565,6 +568,7 @@ impl Preferences {
             js_native_regex_enabled: true,
             js_offthread_compilation_enabled: true,
             js_timers_minimum_duration: 1000,
+            js_timers_throttle_hidden: true,
             js_wasm_baseline_enabled: true,
             js_wasm_enabled: true,
             js_wasm_ion_enabled: true,
