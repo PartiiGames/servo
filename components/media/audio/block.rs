@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::f32::consts::SQRT_2;
+use std::f32::consts::FRAC_1_SQRT_2;
 use std::mem;
 use std::ops::*;
 
@@ -365,7 +365,7 @@ impl Block {
                         // output = sqrt(0.5) * (input.L + input.R) + input.C + 0.5 * (input.SL + input.SR)
                         let o =
                             // sqrt(0.5) * (input.L + input.R)
-                            SQRT_2 * (self.data_chan_frame(frame, 0) +
+                            FRAC_1_SQRT_2 * (self.data_chan_frame(frame, 0) +
                                       self.data_chan_frame(frame, 1)) +
                             // input.C
                             self.data_chan_frame(frame, 2) +
@@ -403,12 +403,12 @@ impl Block {
                     for frame in 0..FRAMES_PER_BLOCK_USIZE {
                         // output.L = L + sqrt(0.5) * (input.C + input.SL)
                         v[frame] = self.data_chan_frame(frame, 0) +
-                            SQRT_2 *
+                            FRAC_1_SQRT_2 *
                                 (self.data_chan_frame(frame, 2) +
                                     self.data_chan_frame(frame, 4));
                         // output.R = R + sqrt(0.5) * (input.C + input.SR)
                         v[frame + FRAMES_PER_BLOCK_USIZE] = self.data_chan_frame(frame, 1) +
-                            SQRT_2 *
+                            FRAC_1_SQRT_2 *
                                 (self.data_chan_frame(frame, 2) +
                                     self.data_chan_frame(frame, 5));
                     }
@@ -419,15 +419,15 @@ impl Block {
 
                 // quad
                 (6, 4) => {
-                    let mut v = Vec::with_capacity(6 * FRAMES_PER_BLOCK_USIZE);
-                    v.resize(6 * FRAMES_PER_BLOCK_USIZE, 0.);
+                    let mut v = Vec::with_capacity(4 * FRAMES_PER_BLOCK_USIZE);
+                    v.resize(4 * FRAMES_PER_BLOCK_USIZE, 0.);
                     for frame in 0..FRAMES_PER_BLOCK_USIZE {
                         // output.L = L + sqrt(0.5) * input.C
                         v[frame] = self.data_chan_frame(frame, 0) +
-                            SQRT_2 * self.data_chan_frame(frame, 2);
+                            FRAC_1_SQRT_2 * self.data_chan_frame(frame, 2);
                         // output.R = R + sqrt(0.5) * input.C
                         v[frame + FRAMES_PER_BLOCK_USIZE] = self.data_chan_frame(frame, 1) +
-                            SQRT_2 * self.data_chan_frame(frame, 2);
+                            FRAC_1_SQRT_2 * self.data_chan_frame(frame, 2);
                         // output.SL = input.SL
                         v[frame + 2 * FRAMES_PER_BLOCK_USIZE] = self.data_chan_frame(frame, 4);
                         // output.SR = input.SR
@@ -660,5 +660,40 @@ impl Tick {
 
     pub fn advance(&mut self) {
         self.0 += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 5.1 with L=1, R=2, C=3, LFE=4, SL=5, SR=6 in every frame.
+    fn five_one() -> Block {
+        let mut data = Vec::with_capacity(6 * FRAMES_PER_BLOCK_USIZE);
+        for c in 0..6 {
+            data.extend(std::iter::repeat_n((c + 1) as f32, FRAMES_PER_BLOCK_USIZE));
+        }
+        Block {
+            channels: 6,
+            repeat: false,
+            buffer: data,
+        }
+    }
+
+    #[test]
+    fn speakers_down_mix_from_5_1() {
+        let h = FRAC_1_SQRT_2;
+        let mut mono = five_one();
+        mono.mix(1, ChannelInterpretation::Speakers);
+        assert!((mono.data_chan_frame(0, 0) - (h * 3. + 3. + 0.5 * 11.)).abs() < 1e-5);
+        let mut stereo = five_one();
+        stereo.mix(2, ChannelInterpretation::Speakers);
+        assert!((stereo.data_chan_frame(0, 0) - (1. + h * 8.)).abs() < 1e-5);
+        assert!((stereo.data_chan_frame(0, 1) - (2. + h * 9.)).abs() < 1e-5);
+        let mut quad = five_one();
+        quad.mix(4, ChannelInterpretation::Speakers);
+        assert_eq!(quad.buffer.len(), 4 * FRAMES_PER_BLOCK_USIZE);
+        assert!((quad.data_chan_frame(0, 1) - (2. + h * 3.)).abs() < 1e-5);
+        assert_eq!(quad.data_chan_frame(0, 3), 6.);
     }
 }
