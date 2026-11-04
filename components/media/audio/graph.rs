@@ -12,7 +12,7 @@ use petgraph::algo::tarjan_scc;
 use petgraph::graph::DefaultIx;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 use petgraph::visit::{EdgeFiltered, EdgeRef};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::audio_node::{
@@ -370,7 +370,7 @@ impl AudioGraph {
     /// <https://webaudio.github.io/web-audio-api/#rendering-loop>
     pub fn process(&mut self, info: &BlockInfo) -> Chunk {
         // Step 4.2. Order the AudioNodes of the BaseAudioContext to be processed.
-        let (cycle_breakers, cycle_nodes) = self.detect_cycles();
+        let (cycle_breakers, cycle_nodes, scc_of) = self.detect_cycles();
 
         // Post order: a node comes after every node it reads from, except that the inputs of
         // a cycle-breaking DelayNode are not followed from it: its DelayReader half has no
@@ -392,7 +392,7 @@ impl AudioGraph {
                 roots.push(edge.source());
             }
         }
-        let order = self.processing_order(&roots, &cycle_breakers);
+        let order = self.processing_order(&roots, &cycle_breakers, &scc_of);
 
         for ix in order {
             let mut curr = self.graph[ix].node.borrow_mut();
@@ -415,7 +415,9 @@ impl AudioGraph {
 
             if cycle_breakers.contains(&ix) {
                 // Step 4.2.6: the DelayReader. Its output comes only from frames written in
-                // earlier render quanta.
+                // earlier render quanta. AudioParam inputs from outside its cycle have run
+                // already (see `processing_order`): use them for this quantum's delayTime.
+                self.gather_ready_param_inputs(ix, &mut curr);
                 let out = curr
                     .as_delay_node()
                     .expect("cycle breakers are DelayNodes")
@@ -455,10 +457,15 @@ impl AudioGraph {
 
     /// Depth-first post order from `roots` over the edges into each node (its inputs), not
     /// following the inputs of `cut` nodes. Each node appears once.
+    ///
+    /// For a cut node, the sources of its AudioParam inputs that are outside its own cycle
+    /// (`scc_of`) are still followed: they do not depend on the node, and running them first
+    /// lets a cycle-breaking DelayNode read a modulated delayTime in the same quantum.
     fn processing_order(
         &self,
         roots: &[NodeIndex<DefaultIx>],
         cut: &FxHashSet<NodeIndex<DefaultIx>>,
+        scc_of: &FxHashMap<NodeIndex<DefaultIx>, usize>,
     ) -> Vec<NodeIndex<DefaultIx>> {
         let mut order = Vec::with_capacity(self.graph.node_count());
         let mut seen: FxHashSet<NodeIndex<DefaultIx>> = FxHashSet::default();
@@ -475,10 +482,19 @@ impl AudioGraph {
                     continue;
                 }
                 stack.push((ix, true));
-                if cut.contains(&ix) {
-                    continue;
-                }
+                let is_cut = cut.contains(&ix);
                 for edge in self.graph.edges_directed(ix, Direction::Incoming) {
+                    if is_cut {
+                        let param_input = edge
+                            .weight()
+                            .connections
+                            .iter()
+                            .any(|c| matches!(c.input_idx, PortIndex::Param(_)));
+                        let same_cycle = scc_of.get(&edge.source()) == scc_of.get(&ix);
+                        if !param_input || same_cycle {
+                            continue;
+                        }
+                    }
                     if !seen.contains(&edge.source()) {
                         stack.push((edge.source(), false));
                     }
@@ -515,11 +531,14 @@ impl AudioGraph {
         for edge in self.graph.edges_directed(ix, Direction::Incoming) {
             let edge = edge.weight();
             for connection in &edge.connections {
-                let mut block = connection
-                    .cache
-                    .borrow_mut()
-                    .take()
-                    .expect("Cache should have been filled from traversal");
+                let Some(mut block) = connection.cache.borrow_mut().take() else {
+                    // A DelayReader may have taken an AudioParam input already.
+                    assert!(
+                        matches!(connection.input_idx, PortIndex::Param(_)),
+                        "Cache should have been filled from traversal"
+                    );
+                    continue;
+                };
 
                 match connection.input_idx {
                     PortIndex::Port(idx) => {
@@ -578,6 +597,24 @@ impl AudioGraph {
             }
         }
         chunk
+    }
+
+    /// Hand the AudioParam inputs of `ix` whose sources have already run to its params.
+    fn gather_ready_param_inputs(
+        &self,
+        ix: NodeIndex<DefaultIx>,
+        curr: &mut RefMut<'_, Box<dyn AudioNodeEngine>>,
+    ) {
+        for edge in self.graph.edges_directed(ix, Direction::Incoming) {
+            for connection in &edge.weight().connections {
+                if let PortIndex::Param(param) = connection.input_idx &&
+                    let Some(mut block) = connection.cache.borrow_mut().take()
+                {
+                    block.mix(1, ChannelInterpretation::Speakers);
+                    curr.get_param(param).add_block(block);
+                }
+            }
+        }
     }
 
     /// Make the output blocks of `ix` available for reading by the nodes it connects to.
@@ -641,19 +678,22 @@ impl AudioGraph {
     /// >       quantum when in a cycle.
     /// > 7. If nodes contains cycles, mute all the AudioNodes that are part of this cycle, and
     /// >    remove them from nodes.
+    ///
+    /// Also returns, for every node in a cycle, an id of its strongly connected component.
     #[allow(clippy::type_complexity)]
     fn detect_cycles(
         &self,
     ) -> (
         FxHashSet<NodeIndex<DefaultIx>>,
         FxHashSet<NodeIndex<DefaultIx>>,
+        FxHashMap<NodeIndex<DefaultIx>, usize>,
     ) {
         let mut breakers = FxHashSet::default();
-        let mut any_cycle = false;
-        for component in tarjan_scc(&self.graph) {
+        let mut scc_of = FxHashMap::default();
+        for (id, component) in tarjan_scc(&self.graph).into_iter().enumerate() {
             if self.is_cycle(&component) {
-                any_cycle = true;
                 for ix in component {
+                    scc_of.insert(ix, id);
                     if self.graph[ix].node.borrow().node_type() == AudioNodeType::DelayNode {
                         breakers.insert(ix);
                     }
@@ -661,8 +701,8 @@ impl AudioGraph {
             }
         }
         let mut cycle_nodes = FxHashSet::default();
-        if !any_cycle {
-            return (breakers, cycle_nodes);
+        if scc_of.is_empty() {
+            return (breakers, cycle_nodes, scc_of);
         }
         // The cycles left once the breakers' inputs are cut.
         let cut = EdgeFiltered::from_fn(&self.graph, |edge| !breakers.contains(&edge.target()));
@@ -679,7 +719,7 @@ impl AudioGraph {
         }
         // Breakers inside a muted cycle are muted with it.
         breakers.retain(|ix| !cycle_nodes.contains(ix));
-        (breakers, cycle_nodes)
+        (breakers, cycle_nodes, scc_of)
     }
 
     /// A strongly connected component with several nodes is a cycle; a single node is a cycle
@@ -867,6 +907,60 @@ mod tests {
         graph.add_edge(src.output(0), meter.input(0));
         render(&mut graph, 2);
         assert_eq!(seen.get(), 1);
+    }
+
+    /// A source of a constant value.
+    #[derive(AudioNodeCommon)]
+    struct Constant {
+        channel_info: ChannelInfo,
+        value: f32,
+    }
+
+    impl AudioNodeEngine for Constant {
+        fn node_type(&self) -> AudioNodeType {
+            AudioNodeType::ConstantSourceNode
+        }
+        fn input_count(&self) -> u32 {
+            0
+        }
+        fn process(&mut self, _: Chunk, _: &BlockInfo) -> Chunk {
+            let mut chunk = Chunk::default();
+            chunk
+                .blocks
+                .push(Block::for_vec(vec![self.value; FRAMES_PER_BLOCK_USIZE]));
+            chunk
+        }
+    }
+
+    #[test]
+    fn modulated_delay_time_in_a_cycle_applies_in_the_same_quantum() {
+        let mut graph = AudioGraph::new(2);
+        let src = graph.add_node(impulse());
+        let delay = graph.add_node(Box::new(DelayNode::new(
+            DelayNodeOptions::default(),
+            ChannelInfo::default(),
+        )));
+        let feedback = graph.add_node(Box::new(GainNode::new(
+            GainNodeOptions { gain: 0.5 },
+            ChannelInfo::default(),
+        )));
+        // delayTime = 0 + 0.004 s from the modulator: 192 frames at 48 kHz.
+        let modulator = graph.add_node(Box::new(Constant {
+            channel_info: ChannelInfo::default(),
+            value: 0.004,
+        }));
+        let dest = graph.dest_id();
+        graph.add_edge(src.output(0), delay.input(0));
+        graph.add_edge(delay.output(0), feedback.input(0));
+        graph.add_edge(feedback.output(0), delay.input(0));
+        graph.add_edge(modulator.output(0), delay.param(ParamType::DelayTime));
+        graph.add_edge(delay.output(0), dest.input(0));
+        let out = render(&mut graph, 4);
+        let first = out.iter().position(|v| *v != 0.).unwrap();
+        assert_eq!(first, 192);
+        // 0.004 s is 192.00001 frames in f32: the interpolation is off by ~1e-5.
+        assert!((out[192] - 1.).abs() < 1e-4, "{}", out[192]);
+        assert!((out[384] - 0.5).abs() < 1e-4, "{}", out[384]);
     }
 
     #[test]
