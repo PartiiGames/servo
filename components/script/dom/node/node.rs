@@ -930,6 +930,11 @@ impl Node {
         };
         for address in invalidated {
             let node = unsafe { from_untrusted_node_address(address) };
+            // Stylo's invalidator may have set this element's dirty-descendants bit (on the way
+            // to an invalidated descendant) while it isn't connected to the document's dirty
+            // root; `dirty` would then stop at it and the traversal would never reach it.
+            // Clear it so that `dirty` walks up and sets the bits (and the dirty root) right.
+            node.set_flag(NodeFlags::HAS_DIRTY_DESCENDANTS, false);
             node.dirty(no_gc, NodeDamage::Other);
         }
     }
