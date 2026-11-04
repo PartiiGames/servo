@@ -49,6 +49,7 @@ use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::serializable::{Serializable, StorageKey};
 use crate::dom::bindings::transferable::Transferable;
+use crate::dom::bindings::wasm_module::WasmModuleRef;
 use crate::dom::blob::Blob;
 #[cfg(feature = "webcrypto")]
 use crate::dom::cryptokey::CryptoKey;
@@ -56,7 +57,6 @@ use crate::dom::dompoint::DOMPoint;
 use crate::dom::dompointreadonly::DOMPointReadOnly;
 use crate::dom::file::File;
 use crate::dom::filelist::FileList;
-use crate::dom::bindings::wasm_module::WasmModuleRef;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::imagebitmap::ImageBitmap;
 use crate::dom::imagedata::ImageData;
@@ -359,7 +359,9 @@ unsafe extern "C" fn write_callback(
         }
         let index = sc_writer.wasm_modules.len() as u32;
         sc_writer.wasm_modules.push(module);
-        return unsafe { JS_WriteUint32PairUnchecked(w, StructuredCloneTags::WasmModule as u32, index) };
+        return unsafe {
+            JS_WriteUint32PairUnchecked(w, StructuredCloneTags::WasmModule as u32, index)
+        };
     }
 
     let mut realm = CurrentRealm::assert(cx);

@@ -14,9 +14,9 @@
 //!
 //! mozjs only has a bindgen declaration of `GetWasmModule` returning `RefPtr<WasmModule>` by
 //! value, which doesn't match the C++ ABI (a class with a destructor is returned through a hidden
-//! pointer), so it is called here with that pointer made explicit: the first argument on x86-64
-//! (SysV and Windows), x8 on AArch64. The refcount (`js::AtomicRefCounted`, an atomic word after
-//! the vtable pointer) is managed directly.
+//! pointer), so it is called through a declaration whose return type every 64-bit C ABI also
+//! returns through a hidden pointer (see `GetWasmModuleReturn`). The refcount
+//! (`js::AtomicRefCounted`, an atomic word after the vtable pointer) is managed directly.
 
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,7 +32,8 @@ struct RawWasmModule {
 }
 
 /// The vtable slot of `createObject(JSContext*) const`: after the complete-object and deleting
-/// destructors on the Itanium ABI; after the scalar deleting destructor on MSVC.
+/// destructors on the Itanium ABI; after the scalar deleting destructor on MSVC (clang++ puts it at
+/// vtable offset 16 for x86_64-linux and aarch64-apple-darwin, 8 for x86_64-pc-windows-msvc).
 #[cfg(not(target_env = "msvc"))]
 const CREATE_OBJECT_SLOT: usize = 2;
 #[cfg(target_env = "msvc")]
@@ -76,7 +77,9 @@ impl WasmModuleRef {
 impl Clone for WasmModuleRef {
     #[expect(unsafe_code)]
     fn clone(&self) -> WasmModuleRef {
-        unsafe { self.0.as_ref() }.refcount.fetch_add(1, Ordering::Relaxed);
+        unsafe { self.0.as_ref() }
+            .refcount
+            .fetch_add(1, Ordering::Relaxed);
         WasmModuleRef(self.0)
     }
 }
@@ -97,35 +100,38 @@ impl Drop for WasmModuleRef {
     }
 }
 
-/// Call `JS::GetWasmModule(obj)`, which returns `RefPtr<JS::WasmModule>` through a hidden
-/// pointer, storing the raw pointer in `out`.
+/// What `JS::GetWasmModule` returns, as the C ABI must see it. `RefPtr<WasmModule>` isn't trivially
+/// copyable (it has a destructor), so C++ returns it through a hidden pointer the caller passes:
+/// rdi on x86-64 SysV, rcx on Windows x64 (free functions), x8 on AArch64 (AAPCS64 and Windows
+/// ARM64). A `repr(C)` aggregate larger than 16 bytes is returned through that same hidden pointer
+/// by every 64-bit C ABI, so declaring the return as this 24-byte struct makes rustc emit the C++
+/// call sequence on each target, with no per-architecture code. The callee writes only the first
+/// word (the RefPtr's pointer); the rest is padding. Checked against clang++'s callee for
+/// x86_64-linux, aarch64-apple-darwin, aarch64-linux and x86_64-pc-windows-msvc (2026-11-04).
+#[repr(C)]
+struct GetWasmModuleReturn {
+    module: *mut RawWasmModule,
+    _indirect: [usize; 2],
+}
+
+/// Call `JS::GetWasmModule(obj)`, storing the reference its RefPtr owned in `out`.
 #[expect(unsafe_code)]
 unsafe fn call_get_wasm_module(out: &mut *mut RawWasmModule, obj: HandleObject) -> Option<()> {
-    // bindgen's declaration has the right symbol on every platform; only its signature is wrong,
-    // so take its address and call it with the real one.
-    let f = js::jsapi::JS::GetWasmModule as *const ();
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        // SysV and Windows x64: the hidden result pointer is the first argument.
-        let f: extern "C" fn(*mut *mut RawWasmModule, HandleObject) = std::mem::transmute(f);
-        f(out, obj);
-        return Some(());
-    }
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        // AAPCS64: the hidden result pointer goes in x8; the Handle (one pointer) in x0.
-        std::arch::asm!(
-            "blr {f}",
-            f = in(reg) f,
-            in("x8") out as *mut *mut RawWasmModule,
-            in("x0") obj.ptr,
-            clobber_abi("C"),
-        );
-        return Some(());
-    }
-    #[allow(unreachable_code)]
+    #[cfg(not(target_pointer_width = "64"))]
     {
-        let _ = (f, out, obj);
-        None
+        // 32-bit ABIs differ (e.g. x86 MSVC returns small non-POD classes differently).
+        let _ = (out, obj);
+        return None;
+    }
+    #[cfg(target_pointer_width = "64")]
+    unsafe {
+        // bindgen's declaration has the right symbol on every platform; only its signature is
+        // wrong (it returns the RefPtr by value), so take its address and call it with the real one.
+        let f: unsafe extern "C" fn(HandleObject) -> GetWasmModuleReturn =
+            std::mem::transmute(js::jsapi::JS::GetWasmModule as *const ());
+        *out = f(obj).module;
+        // The WebAssembly.Module object holds a reference too, so a sane result has >= 2.
+        debug_assert!(out.is_null() || (**out).refcount.load(Ordering::Relaxed) >= 2);
+        Some(())
     }
 }
