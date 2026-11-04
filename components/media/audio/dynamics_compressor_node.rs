@@ -86,6 +86,19 @@ pub(crate) fn db_to_linear(v: f32) -> f32 {
     10f32.powf(v / 20.)
 }
 
+/// The value stored in [[internal reduction]] for a compressor gain.
+///
+/// DEVIATION FROM THE SPEC, on purpose (luzz lead, 2026-11-04): step 5.10 defines the metering
+/// gain as `reduction gain` (compressor gain times makeup gain) in dB, which reads +makeup dB
+/// (about +5.3 dB with the default parameters) once a signal has passed and the compressor has
+/// released. Chrome and Firefox report the compressor gain alone, so `reduction` is 0 dB when
+/// nothing is being compressed and negative while compressing, which matches the attribute's
+/// prose ("If fed no signal the value will be 0 (no gain reduction)") and what games and
+/// libraries are written against. The makeup gain still applies to the audio.
+pub(crate) fn metering_db(compressor_gain: f32) -> f32 {
+    linear_to_db(compressor_gain)
+}
+
 /// The compression curve for one block's k-rate threshold, knee and ratio.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CompressorCurve {
@@ -358,8 +371,7 @@ impl AudioNodeEngine for DynamicsCompressorNode {
             // Nothing in the delay lines and the follower at rest: zeros in give zeros out,
             // and the follower would not move. Keep [[internal reduction]] where the
             // algorithm would leave it.
-            self.reduction
-                .set(linear_to_db(self.follower.compressor_gain * makeup_gain));
+            self.reduction.set(metering_db(self.follower.compressor_gain));
             return inputs;
         }
 
@@ -412,10 +424,9 @@ impl AudioNodeEngine for DynamicsCompressorNode {
         }
         self.delay_pos = (start + FRAMES_PER_BLOCK_USIZE) % self.delay_frames;
 
-        // Steps 6 to 8 (the follower's slots live in `self.follower`). Step 5.10 and 8:
-        // [[internal reduction]] is the last frame's metering gain.
-        self.reduction
-            .set(linear_to_db(self.follower.compressor_gain * makeup_gain));
+        // Steps 6 to 8 (the follower's slots live in `self.follower`). Step 8:
+        // [[internal reduction]] is the last frame's metering gain (see `metering_db`).
+        self.reduction.set(metering_db(self.follower.compressor_gain));
         inputs
     }
 
@@ -616,9 +627,16 @@ mod tests {
         let expected = curve.apply(1.) * curve.makeup_gain();
         let last = *out.last().unwrap();
         assert!((last - expected).abs() < 1e-3, "{last} vs {expected}");
-        // [[internal reduction]] is the metering gain, in dB.
+        // [[internal reduction]] is the compressor's gain reduction, in dB (browser parity:
+        // without the makeup gain).
         let r = reduction.get();
-        assert!((r - linear_to_db(expected)).abs() < 0.02, "{r}");
+        assert!((r - linear_to_db(curve.apply(1.))).abs() < 0.02, "{r}");
+        assert!(r < 0.);
+        // Once the input stops and the compressor releases, the reduction returns to 0 dB.
+        for n in 400..1000 {
+            run(&mut node, Block::default(), n);
+        }
+        assert!(reduction.get().abs() < 0.01, "{}", reduction.get());
     }
 
     #[test]
