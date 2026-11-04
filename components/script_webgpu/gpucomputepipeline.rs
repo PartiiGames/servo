@@ -12,7 +12,9 @@ use script_bindings::codegen::GenericBindings::WebGPUBinding::{
     GPUComputePipelineDescriptor, GPUComputePipelineMethods, GPUComputePipelineWrap,
 };
 use script_bindings::interfaces::PromiseHelpers;
-use script_bindings::reflector::{DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap};
+use script_bindings::reflector::{
+    AssociatedMemory, DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap,
+};
 use servo_base::generic_channel::GenericCallback;
 use webgpu_traits::{
     ComputePipelineDescriptor, WebGPU, WebGPUBindGroupLayout, WebGPUComputePipeline,
@@ -52,7 +54,9 @@ impl Drop for DroppableGPUComputePipeline {
 
 #[dom_struct]
 pub struct GPUComputePipeline<D: DomTypes> {
-    reflector_: Reflector,
+    /// Carries an estimate of the memory behind a compiled compute pipeline (in wgpu and the driver,
+    /// freed only when this object is finalized), so the JS GC collects these.
+    reflector_: Reflector<AssociatedMemory>,
     label: DomRefCell<USVString>,
     device: Dom<D::GPUDevice>,
     droppable: DroppableGPUComputePipeline,
@@ -85,7 +89,7 @@ where
         label: USVString,
         device: &D::GPUDevice,
     ) -> DomRoot<Self> {
-        reflect_dom_object_with_wrap::<D, _, _>(
+        let object = reflect_dom_object_with_wrap::<D, _, _>(
             cx,
             Box::new(GPUComputePipeline::new_inherited(
                 compute_pipeline,
@@ -94,7 +98,9 @@ where
             )),
             global,
             GPUComputePipelineWrap::<D>,
-        )
+        );
+        object.reflector_.update_memory_size(&*object, 1 << 20);
+        object
     }
 }
 

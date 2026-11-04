@@ -27,7 +27,9 @@ use script_bindings::codegen::GenericUnionTypes::{
 };
 use script_bindings::error::{Error, Fallible};
 use script_bindings::interfaces::{GlobalScopeHelpers, PromiseHelpers};
-use script_bindings::reflector::{DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap};
+use script_bindings::reflector::{
+    AssociatedMemory, DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap,
+};
 use script_bindings::root::DomRoot;
 use script_bindings::routed_promise::RoutedPromiseListener;
 use servo_base::generic_channel::GenericSharedMemory;
@@ -48,7 +50,10 @@ use crate::traits::{
 
 #[dom_struct]
 pub struct GPUQueue<D: DomTypes> {
-    reflector_: Reflector,
+    /// Carries an estimate of a device's memory in wgpu and the driver. A device is freed
+    /// only when its GPUDevice and GPUQueue are collected, and nothing else told the JS GC
+    /// it was worth collecting them: pages that make and destroy devices grew without bound.
+    reflector_: Reflector<AssociatedMemory>,
     #[ignore_malloc_size_of = "defined in webgpu"]
     #[no_trace]
     channel: WebGPU,
@@ -75,12 +80,14 @@ impl<D: Equivalence> GPUQueue<D> {
         channel: WebGPU,
         queue: WebGPUQueue,
     ) -> DomRoot<Self> {
-        reflect_dom_object_with_wrap::<D, _, _>(
+        let queue = reflect_dom_object_with_wrap::<D, _, _>(
             cx,
             Box::new(GPUQueue::new_inherited(channel, queue)),
             global,
             GPUQueueWrap::<D>,
-        )
+        );
+        queue.reflector_.update_memory_size(&*queue, 8 << 20);
+        queue
     }
 }
 

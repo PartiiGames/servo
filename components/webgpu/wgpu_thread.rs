@@ -47,17 +47,18 @@ pub(crate) struct DeviceScope {
     ///
     /// Is `None` if device is lost
     pub error_scope_stack: Option<Vec<ErrorScope>>,
-    // TODO:
-    // Queue for this device (to remove transmutes)
-    // queue_id: QueueId,
+    /// The device's queue: dropped with the device. wgpu-core's queue holds the device, so
+    /// without that the device (and on a software adapter, its memory) would never be freed.
+    pub queue_id: id::QueueId,
     // Poller for this device
     // poller: Poller,
 }
 
 impl DeviceScope {
-    pub fn new(device_id: DeviceId, pipeline_id: PipelineId) -> Self {
+    pub fn new(device_id: DeviceId, queue_id: id::QueueId, pipeline_id: PipelineId) -> Self {
         Self {
             device_id,
+            queue_id,
             pipeline_id,
             error_scope_stack: Some(Vec::new()),
         }
@@ -534,8 +535,11 @@ impl WGPU {
                             .unwrap()
                             .remove(&device_id)
                             .expect("Device should not be dropped by this point");
+                        // The queue holds the device too: drop both, or neither is freed.
+                        global.queue_drop(device_scope.queue_id);
                         if let Err(e) = self.script_sender.send(WebGPUMsg::FreeDevice {
                             device_id,
+                            queue_id: device_scope.queue_id,
                             pipeline_id: device_scope.pipeline_id,
                         }) {
                             warn!("Unable to send FreeDevice({:?}) ({:?})", device_id, e);
@@ -611,7 +615,7 @@ impl WGPU {
                                 {
                                     self.devices.lock().unwrap().insert(
                                         device_id,
-                                        DeviceScope::new(device_id, pipeline_id),
+                                        DeviceScope::new(device_id, queue_id, pipeline_id),
                                     );
                                 }
                                 let script_sender = self.script_sender.clone();

@@ -10,7 +10,7 @@ use servo_base::id::PipelineId;
 use crate::id::{
     AdapterId, BindGroupId, BindGroupLayoutId, BufferId, CommandBufferId, CommandEncoderId,
     ComputePassEncoderId, ComputePipelineId, DeviceId, ExternalTextureId, PipelineLayoutId,
-    QuerySetId, RenderBundleEncoderId, RenderBundleId, RenderPassEncoderId, RenderPipelineId,
+    QuerySetId, QueueId, RenderBundleEncoderId, RenderBundleId, RenderPassEncoderId, RenderPipelineId,
     SamplerId, ShaderModuleId, TextureId, TextureViewId,
 };
 use crate::{DeviceLostReason, Error, WebGPUDevice};
@@ -20,6 +20,7 @@ pub enum WebGPUMsg {
     FreeAdapter(AdapterId),
     FreeDevice {
         device_id: DeviceId,
+        queue_id: QueueId,
         pipeline_id: PipelineId,
     },
     FreeBuffer(BufferId),

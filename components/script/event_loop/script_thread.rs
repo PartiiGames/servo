@@ -2131,9 +2131,11 @@ impl ScriptThread {
             WebGPUMsg::FreeAdapter(id) => self.gpu_id_hub.free_adapter_id(id),
             WebGPUMsg::FreeDevice {
                 device_id,
+                queue_id,
                 pipeline_id,
             } => {
                 self.gpu_id_hub.free_device_id(device_id);
+                self.gpu_id_hub.free_queue_id(queue_id);
                 if let Some(global) = self.documents.borrow().find_global(pipeline_id) {
                     global.remove_gpu_device(WebGPUDevice(device_id));
                 } // page can already be destroyed

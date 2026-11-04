@@ -15,7 +15,9 @@ use script_bindings::codegen::GenericBindings::WebGPUBinding::{
 use script_bindings::interfaces::{
     HeapTracedPromiseHelpers, PromiseHelpers, StackRootPromiseHelpers,
 };
-use script_bindings::reflector::{DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap};
+use script_bindings::reflector::{
+    AssociatedMemory, DomGlobalGeneric, Reflector, reflect_dom_object_with_wrap,
+};
 use script_bindings::routed_promise::RoutedPromiseListener;
 use webgpu_traits::{ShaderCompilationInfo, WebGPU, WebGPURequest, WebGPUShaderModule};
 
@@ -50,7 +52,9 @@ impl Drop for DroppableGPUShaderModule {
 
 #[dom_struct]
 pub struct GPUShaderModule<D: DomTypes> {
-    reflector_: Reflector,
+    /// Carries an estimate of the memory behind a parsed and validated shader module (in wgpu and the driver,
+    /// freed only when this object is finalized), so the JS GC collects these.
+    reflector_: Reflector<AssociatedMemory>,
     label: DomRefCell<USVString>,
     compilation_info_promise: <D::Promise as PromiseHelpers<D>>::HeapTraced,
     droppable: DroppableGPUShaderModule,
@@ -82,7 +86,7 @@ impl<D: Equivalence> GPUShaderModule<D> {
         label: USVString,
         promise: &<D::Promise as PromiseHelpers<D>>::StackRoot,
     ) -> DomRoot<Self> {
-        reflect_dom_object_with_wrap::<D, _, _>(
+        let object = reflect_dom_object_with_wrap::<D, _, _>(
             cx,
             Box::new(GPUShaderModule::new_inherited(
                 channel,
@@ -92,7 +96,9 @@ impl<D: Equivalence> GPUShaderModule<D> {
             )),
             global,
             GPUShaderModuleWrap::<D>,
-        )
+        );
+        object.reflector_.update_memory_size(&*object, 256 << 10);
+        object
     }
 }
 
