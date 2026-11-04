@@ -61,6 +61,7 @@ use crate::dom::gamepad::gamepad::{Gamepad, contains_user_gesture};
 #[cfg(feature = "gamepad")]
 use crate::dom::gamepad::gamepadevent::GamepadEventType;
 use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
+use crate::dom::html::form_controls::htmltextareaelement::HTMLTextAreaElement;
 use crate::dom::inputevent::HitTestResult;
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::keyboardevent::KeyboardEvent;
@@ -1812,6 +1813,22 @@ impl DocumentEventHandler {
                 document.focus_handler().focus(cx, &FocusableArea::Viewport);
                 return Default::default();
             },
+            ImeEvent::InsertText(text) => {
+                // Root the element: listeners may move focus (the focus Ref must not be held).
+                let element = document
+                    .focus_handler()
+                    .focused_area()
+                    .element()
+                    .map(DomRoot::from_ref);
+                if let Some(element) = element {
+                    if let Some(input) = element.downcast::<HTMLInputElement>() {
+                        input.ime_insert_text(cx, text);
+                    } else if let Some(textarea) = element.downcast::<HTMLTextAreaElement>() {
+                        textarea.ime_insert_text(cx, text);
+                    }
+                }
+                return Default::default();
+            },
             ImeEvent::Composition(composition_event) => composition_event,
         };
 
@@ -1819,8 +1836,14 @@ impl DocumentEventHandler {
         // spec: https://w3c.github.io/uievents/#compositionupdate
         // spec: https://w3c.github.io/uievents/#compositionend
         // > Event.target : focused element processing the composition
-        let focused_area = document.focus_handler().focused_area();
-        let Some(focused_element) = focused_area.element() else {
+        // Partii: root the element and drop the focus Ref, since the text control's listeners
+        // (beforeinput/input now fire synchronously during a composition) may move focus.
+        let focused_element = document
+            .focus_handler()
+            .focused_area()
+            .element()
+            .map(DomRoot::from_ref);
+        let Some(focused_element) = focused_element else {
             // Event is only dispatched if there is a focused element.
             return Default::default();
         };

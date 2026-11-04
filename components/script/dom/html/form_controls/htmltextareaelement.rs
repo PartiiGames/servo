@@ -349,6 +349,14 @@ impl TextControlElement for HTMLTextAreaElement {
     }
 }
 
+impl HTMLTextAreaElement {
+    /// Partii: an IME committed `text` with no composition open (see
+    /// [`TextControlElement::handle_ime_insert_text`]).
+    pub(crate) fn ime_insert_text(&self, cx: &mut JSContext, text: String) {
+        self.handle_ime_insert_text(cx, text);
+    }
+}
+
 impl HTMLTextAreaElementMethods<crate::DomTypeHolder> for HTMLTextAreaElement {
     // TODO A few of these attributes have default values and additional
     // constraints
@@ -784,10 +792,15 @@ impl VirtualMethods for HTMLTextAreaElement {
         {
             if let Some(compositionevent) = event.downcast::<CompositionEvent>() {
                 // <https://w3c.github.io/uievents/#events-composition-input-events>:
-                // beforeinput (insertCompositionText) before each change the composition makes
-                // (an empty compositionend, a cancel, changes nothing).
+                // beforeinput (insertCompositionText) before each change the composition makes.
+                // An empty compositionend (a cancel), or one that commits the text the preedit
+                // already shows, changes nothing (Chromium fires none either).
                 if event.type_() != atom!("compositionstart") &&
-                    !(event.type_() == atom!("compositionend") && compositionevent.data().is_empty())
+                    !(event.type_() == atom!("compositionend") &&
+                        (compositionevent.data().is_empty() ||
+                            self.text_input
+                                .borrow()
+                                .preedit_is(&compositionevent.data().str())))
                 {
                     self.fire_composition_beforeinput(
                         cx,
@@ -800,14 +813,14 @@ impl VirtualMethods for HTMLTextAreaElement {
                         .text_input
                         .borrow_mut()
                         .handle_compositionend(compositionevent);
-                    self.handle_key_reaction(cx, action);
+                    self.handle_composition_reaction(cx, action);
                     self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                 } else if event.type_() == atom!("compositionupdate") {
                     let action = self
                         .text_input
                         .borrow_mut()
                         .handle_compositionupdate(compositionevent);
-                    self.handle_key_reaction(cx, action);
+                    self.handle_composition_reaction(cx, action);
                     self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                 }
                 self.maybe_update_shared_selection();

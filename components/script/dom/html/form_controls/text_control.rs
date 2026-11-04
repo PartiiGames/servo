@@ -70,7 +70,31 @@ pub(crate) trait TextControlElement {
     /// `beforeinput` for a composition step, fired synchronously just before the control
     /// applies it. Not cancelable: <https://w3c.github.io/input-events/#interface-InputEvent-Attributes>
     /// (insertCompositionText). `data` is the composition's text.
-    fn fire_composition_beforeinput(&self, cx: &mut JSContext, data: DOMString, is_composing: bool) {
+    fn fire_composition_beforeinput(
+        &self,
+        cx: &mut JSContext,
+        data: DOMString,
+        is_composing: bool,
+    ) {
+        self.fire_beforeinput(
+            cx,
+            data,
+            is_composing,
+            InputEventType::InsertCompositionText,
+            false,
+        );
+    }
+
+    /// Partii: fire `beforeinput` now. Returns false if it was cancelable and a listener
+    /// cancelled it.
+    fn fire_beforeinput(
+        &self,
+        cx: &mut JSContext,
+        data: DOMString,
+        is_composing: bool,
+        input_type: InputEventType,
+        cancelable: bool,
+    ) -> bool {
         let element = self.as_element();
         let window = element.owner_window();
         let event = InputEvent::new(
@@ -79,17 +103,86 @@ pub(crate) trait TextControlElement {
             None,
             atom!("beforeinput"),
             true,
-            false,
+            cancelable,
             Some(&window),
             0,
             Some(data),
             is_composing,
-            InputEventType::InsertCompositionText.as_str().into(),
+            input_type.as_str().into(),
+        );
+        let event = event.upcast::<Event>();
+        event.set_trusted(true);
+        event.set_composed(true);
+        event.fire(cx, element.upcast())
+    }
+
+    /// Partii: fire `input` now rather than as a queued task. Used for IME input, so that a
+    /// composition's events arrive in Chromium's order (compositionupdate, beforeinput, input,
+    /// then compositionend) and a committed text's `input` is not left behind compositionend.
+    fn fire_input_event_now(
+        &self,
+        cx: &mut JSContext,
+        data: Option<String>,
+        is_composing: IsComposing,
+        input_type: InputEventType,
+    ) {
+        let element = self.as_element();
+        let window = element.owner_window();
+        let event = InputEvent::new(
+            cx,
+            &window,
+            None,
+            atom!("input"),
+            true,
+            false,
+            Some(&window),
+            0,
+            data.map(DOMString::from),
+            is_composing.into(),
+            input_type.as_str().into(),
         );
         let event = event.upcast::<Event>();
         event.set_trusted(true);
         event.set_composed(true);
         event.fire(cx, element.upcast());
+    }
+
+    /// Partii: apply a composition step's reaction like a key's, but fire its `input` event now.
+    fn handle_composition_reaction(&self, cx: &mut JSContext, action: KeyReaction) {
+        match action {
+            KeyReaction::DispatchInput(text, is_composing, input_type) => {
+                self.set_dirty_value_flag(true);
+                self.handle_text_content_changed(cx);
+                self.fire_input_event_now(cx, text, is_composing, input_type);
+            },
+            other => self.handle_key_reaction(cx, other),
+        }
+    }
+
+    /// Partii: text an IME committed with no composition open (a direct commit): what Chromium
+    /// does for insertText, a cancelable beforeinput (insertText), the insertion, then input.
+    fn handle_ime_insert_text(&self, cx: &mut JSContext, text: String) {
+        if text.is_empty() || self.read_only_or_disabled() {
+            return;
+        }
+        if !self.fire_beforeinput(
+            cx,
+            DOMString::from(text.clone()),
+            false,
+            InputEventType::InsertText,
+            true,
+        ) {
+            return;
+        }
+        self.text_input_mut().insert(text.clone());
+        self.handle_composition_reaction(
+            cx,
+            KeyReaction::DispatchInput(
+                Some(text),
+                IsComposing::NotComposing,
+                InputEventType::InsertText,
+            ),
+        );
     }
 
     /// <https://w3c.github.io/uievents/#event-type-input>
