@@ -134,6 +134,8 @@ pub struct Preferences {
     pub dom_allow_preloading_module_descendants: bool,
     // feature: Clipboard API | #36084 | Web/API/Clipboard_API
     pub dom_async_clipboard_enabled: bool,
+    /// Partii: navigator.getBattery() (the embedder reports the battery).
+    pub dom_battery_enabled: bool,
     pub dom_bluetooth_enabled: bool,
     pub dom_bluetooth_testing_enabled: bool,
     pub dom_allow_scripts_to_close_windows: bool,
@@ -474,6 +476,7 @@ impl Preferences {
             dom_allow_preloading_module_descendants: false,
             dom_allow_scripts_to_close_windows: false,
             dom_async_clipboard_enabled: false,
+            dom_battery_enabled: false,
             dom_bluetooth_enabled: false,
             dom_bluetooth_testing_enabled: false,
             dom_canvas_capture_enabled: false,

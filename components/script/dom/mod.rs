@@ -333,6 +333,8 @@ pub(crate) mod userscripts;
 pub(crate) mod values;
 pub(crate) mod visualviewport;
 pub(crate) mod wakelock;
+pub(crate) mod battery;
+pub(crate) use self::battery::*;
 pub(crate) use self::wakelock::*;
 #[cfg(feature = "webgl")]
 pub(crate) mod webgl;
