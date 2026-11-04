@@ -2959,7 +2959,26 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return self.webgl_error(InvalidOperation);
         }
 
+        // WebGL 2: the GL ES 3.0 rules, against the read framebuffer's read buffer.
+        if self.webgl_version() == WebGLVersion::WebGL2 {
+            let source = match self.bound_read_framebuffer.get() {
+                Some(fb) => fb
+                    .attachment_internal_format(fb.read_buffer())
+                    .and_then(TexFormat::from_gl_constant),
+                None => Some(if self.GetContextAttributes().unwrap().alpha {
+                    TexFormat::RGBA8
+                } else {
+                    TexFormat::RGB8
+                }),
+            };
+            if !source.is_some_and(|source| copy_tex_image_compatible(source, internal_format)) {
+                return self.webgl_error(InvalidOperation);
+            }
+        }
+
+        // (WebGL 2 was checked above; the comparison below is WebGL 1's.)
         let framebuffer_format = match self.bound_draw_framebuffer.get() {
+            _ if self.webgl_version() == WebGLVersion::WebGL2 => Some(internal_format),
             Some(fb) => match fb.attachment(constants::COLOR_ATTACHMENT0) {
                 Some(WebGLFramebufferAttachmentRoot::Renderbuffer(rb)) => {
                     TexFormat::from_gl_constant(rb.internal_format())
@@ -5390,6 +5409,81 @@ impl TexPixels {
             ..self
         }
     }
+}
+
+/// Component type and bits (red, green, blue, alpha) of a colour format, for copyTexImage2D.
+/// Unsized formats count as 8-bit normalized.
+fn copy_format_info(format: TexFormat) -> Option<(u8, [u8; 4])> {
+    use TexFormat::*;
+    const N: u8 = 0; // normalized fixed point
+    const S: u8 = 1; // sRGB
+    const F: u8 = 2; // float
+    const I: u8 = 3; // signed integer
+    const U: u8 = 4; // unsigned integer
+    Some(match format {
+        R8 => (N, [8, 0, 0, 0]),
+        RG8 => (N, [8, 8, 0, 0]),
+        RGB8 | RGB => (N, [8, 8, 8, 0]),
+        RGBA8 | RGBA => (N, [8, 8, 8, 8]),
+        Alpha => (N, [0, 0, 0, 8]),
+        Luminance => (N, [8, 0, 0, 0]),
+        LuminanceAlpha => (N, [8, 0, 0, 8]),
+        RGB565 => (N, [5, 6, 5, 0]),
+        RGBA4 => (N, [4, 4, 4, 4]),
+        RGB5A1 => (N, [5, 5, 5, 1]),
+        RGB10A2 => (N, [10, 10, 10, 2]),
+        SRGB8 => (S, [8, 8, 8, 0]),
+        SRGB8Alpha8 => (S, [8, 8, 8, 8]),
+        R16f => (F, [16, 0, 0, 0]),
+        RG16f => (F, [16, 16, 0, 0]),
+        RGB16f => (F, [16, 16, 16, 0]),
+        RGBA16f => (F, [16, 16, 16, 16]),
+        R32f => (F, [32, 0, 0, 0]),
+        RG32f => (F, [32, 32, 0, 0]),
+        RGB32f => (F, [32, 32, 32, 0]),
+        RGBA32f => (F, [32, 32, 32, 32]),
+        R11fG11fB10f => (F, [11, 11, 10, 0]),
+        R8i => (I, [8, 0, 0, 0]),
+        RG8i => (I, [8, 8, 0, 0]),
+        RGBA8i => (I, [8, 8, 8, 8]),
+        R16i => (I, [16, 0, 0, 0]),
+        RG16i => (I, [16, 16, 0, 0]),
+        RGBA16i => (I, [16, 16, 16, 16]),
+        R32i => (I, [32, 0, 0, 0]),
+        RG32i => (I, [32, 32, 0, 0]),
+        RGBA32i => (I, [32, 32, 32, 32]),
+        R8ui => (U, [8, 0, 0, 0]),
+        RG8ui => (U, [8, 8, 0, 0]),
+        RGBA8ui => (U, [8, 8, 8, 8]),
+        R16ui => (U, [16, 0, 0, 0]),
+        RG16ui => (U, [16, 16, 0, 0]),
+        RGBA16ui => (U, [16, 16, 16, 16]),
+        R32ui => (U, [32, 0, 0, 0]),
+        RG32ui => (U, [32, 32, 0, 0]),
+        RGBA32ui => (U, [32, 32, 32, 32]),
+        RGB10A2ui => (U, [10, 10, 10, 2]),
+        _ => return None,
+    })
+}
+
+/// GL ES 3.0 copyTexImage2D: the destination's components must exist in the source, with the
+/// same component type, and a sized destination must match the source's bits exactly.
+/// Unsized destinations take any normalized source.
+fn copy_tex_image_compatible(source: TexFormat, destination: TexFormat) -> bool {
+    let (Some((source_type, source_bits)), Some((destination_type, destination_bits))) =
+        (copy_format_info(source), copy_format_info(destination))
+    else {
+        return false;
+    };
+    if source_type != destination_type {
+        return false;
+    }
+    let unsized_destination = !destination.is_sized();
+    (0..4).all(|c| {
+        destination_bits[c] == 0 ||
+            (source_bits[c] != 0 &&
+                (unsized_destination || source_bits[c] == destination_bits[c]))
+    })
 }
 
 /// Where a compressed texture upload reads its data from.
