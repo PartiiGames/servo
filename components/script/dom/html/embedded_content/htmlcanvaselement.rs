@@ -204,6 +204,21 @@ impl HTMLCanvasElement {
         Ref::filter_map(self.context_mode.borrow(), |ctx| ctx.as_ref()).ok()
     }
 
+    /// Partii: a 2D canvas whose last computed style hides it (opacity 0 or display none), so
+    /// sending its image to WebRender every frame shows nothing. Common in games that draw a
+    /// 2D canvas and show it through WebGL post effects (texImage2D reads the canvas directly).
+    /// An unstyled canvas counts as shown.
+    pub(crate) fn is_hidden_2d(&self) -> bool {
+        if !matches!(self.context().as_deref(), Some(RenderingContext::Context2d(_))) {
+            return false;
+        }
+        self.upcast::<Element>()
+            .style_without_reflow()
+            .is_some_and(|style| {
+                style.clone_opacity() == 0.0 || style.get_box().clone_display().is_none()
+            })
+    }
+
     fn set_rendering_context(
         &self,
         no_gc: &NoGC,

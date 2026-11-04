@@ -609,6 +609,12 @@ pub(crate) struct Document {
     /// A set of dirty HTML canvas elements that need their WebRender images updated the
     /// next time the rendering is updated.
     dirty_canvases: DomRefCell<Vec<Dom<HTMLCanvasElement>>>,
+    /// Partii: dirty 2D canvases whose image wasn't sent because their style hides them
+    /// (HTMLCanvasElement::is_hidden_2d). Sent once they show, and every
+    /// HIDDEN_CANVAS_FLUSH_EVERY rendering updates (which also renders the canvas's queued
+    /// drawing, so it can't pile up).
+    hidden_dirty_canvases: DomRefCell<Vec<Dom<HTMLCanvasElement>>>,
+    hidden_canvas_updates: Cell<u32>,
     /// Whether or not animated images need to have their contents updated.
     has_pending_animated_image_update: Cell<bool>,
     /// <https://w3c.github.io/slection-api/#dfn-selection>
@@ -3328,13 +3334,36 @@ impl Document {
         // Placeholders of OffscreenCanvases have had their image sent already (from
         // whichever thread the OffscreenCanvas is on), under that canvas's own epoch.
         let mut placeholder_frames = Vec::new();
-        let image_keys: Vec<_> = self
+        // Partii: every HIDDEN_CANVAS_FLUSH_EVERY updates, hidden canvases are sent too.
+        const HIDDEN_CANVAS_FLUSH_EVERY: u32 = 30;
+        let updates = self.hidden_canvas_updates.get().wrapping_add(1);
+        self.hidden_canvas_updates.set(updates);
+        let flush_hidden = updates % HIDDEN_CANVAS_FLUSH_EVERY == 0;
+        let mut dirty: Vec<DomRoot<HTMLCanvasElement>> = self
             .dirty_canvases
             .borrow_mut()
             .drain(..)
+            .map(|canvas| DomRoot::from_ref(&*canvas))
+            .collect();
+        if flush_hidden {
+            for canvas in self.hidden_dirty_canvases.borrow_mut().drain(..) {
+                if !dirty.iter().any(|d| std::ptr::eq(&**d, &*canvas)) {
+                    dirty.push(DomRoot::from_ref(&*canvas));
+                }
+            }
+        }
+        let image_keys: Vec<_> = dirty
+            .into_iter()
             .filter_map(|canvas| {
                 if let Some(frame) = canvas.take_placeholder_frame() {
                     placeholder_frames.push(frame);
+                    return None;
+                }
+                if !flush_hidden && canvas.is_hidden_2d() {
+                    let mut hidden = self.hidden_dirty_canvases.borrow_mut();
+                    if !hidden.iter().any(|h| std::ptr::eq(&**h, &*canvas)) {
+                        hidden.push(Dom::from_ref(&*canvas));
+                    }
                     return None;
                 }
                 canvas.update_rendering(current_rendering_epoch)
@@ -3369,7 +3398,35 @@ impl Document {
         }
 
         let (reflow_phases, statistics) = self.window().reflow(cx, ReflowGoal::UpdateTheRendering);
-        let phases = phases.union(reflow_phases);
+        let mut phases = phases.union(reflow_phases);
+
+        // Partii: a hidden canvas that this reflow showed gets its image in this frame.
+        let shown: Vec<DomRoot<HTMLCanvasElement>> = {
+            let mut hidden = self.hidden_dirty_canvases.borrow_mut();
+            let mut shown = Vec::new();
+            hidden.retain(|canvas| {
+                if canvas.is_hidden_2d() {
+                    return true;
+                }
+                shown.push(DomRoot::from_ref(&**canvas));
+                false
+            });
+            shown
+        };
+        let shown_keys: Vec<_> = shown
+            .iter()
+            .filter_map(|canvas| canvas.update_rendering(current_rendering_epoch))
+            .collect();
+        if !shown_keys.is_empty() {
+            phases.insert(ReflowPhasesRun::UpdatedImageData);
+            self.waiting_on_canvas_image_updates.set(true);
+            self.window().paint_api().delay_new_frame_for_canvas(
+                self.webview_id(),
+                pipeline_id,
+                current_rendering_epoch,
+                shown_keys,
+            );
+        }
 
         self.window().paint_api().update_epoch(
             self.webview_id(),
@@ -4404,6 +4461,8 @@ impl Document {
             shadow_roots_styles_changed: Cell::new(false),
             media_controls: DomRefCell::new(HashMap::new()),
             dirty_canvases: DomRefCell::new(Default::default()),
+            hidden_dirty_canvases: DomRefCell::new(Default::default()),
+            hidden_canvas_updates: Cell::new(0),
             has_pending_animated_image_update: Cell::new(false),
             selection: MutNullableDom::new(None),
             timeline: Dom::from_ref(timeline),
