@@ -12,6 +12,7 @@ use crate::dom::bindings::codegen::Bindings::IdleDeadlineBinding::IdleDeadlineMe
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::window::Window;
+use crate::event_loop::script_thread::ScriptThread;
 
 /// <https://w3c.github.io/requestidlecallback/#the-idledeadline-interface>
 #[dom_struct]
@@ -45,8 +46,16 @@ impl IdleDeadline {
 impl IdleDeadlineMethods<crate::DomTypeHolder> for IdleDeadline {
     /// <https://w3c.github.io/requestidlecallback/#dom-idledeadline-timeremaining>
     fn TimeRemaining(&self) -> Finite<f64> {
+        // > Let deadline be the result of getting the deadline (timers and frames scheduled
+        // > since the idle period began can only bring it closer).
         // > Let timeRemaining be deadline minus now; if negative, 0.
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        let mut deadline = self.deadline;
+        if !self.did_timeout &&
+            let Some(limit) = ScriptThread::idle_deadline_limit()
+        {
+            deadline = deadline.min(limit);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
         Finite::wrap(remaining.as_secs_f64() * 1000.0)
     }
 

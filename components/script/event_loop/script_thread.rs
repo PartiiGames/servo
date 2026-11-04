@@ -1379,8 +1379,8 @@ impl ScriptThread {
     fn run_an_idle_period(&self, cx: &mut js::context::JSContext) -> bool {
         let now = Instant::now();
         let mut deadline = now + Duration::from_millis(50);
-        if let Some(next_timer) = self.timer_scheduler.borrow().next_deadline() {
-            deadline = deadline.min(next_timer);
+        if let Some(limit) = self.idle_deadline_limit_now() {
+            deadline = deadline.min(limit);
         }
         let documents: Vec<_> = self
             .documents
@@ -1388,15 +1388,6 @@ impl ScriptThread {
             .iter()
             .map(|(_, document)| document)
             .collect();
-        let animating = documents.iter().any(|document| {
-            document.is_fully_active()
-                && (document.has_active_request_animation_frame_callbacks()
-                    || document.animation_manager().running_animation_count() != 0)
-        });
-        if animating {
-            let last_frame = self.last_render_opportunity_time.get().unwrap_or(now);
-            deadline = deadline.min(last_frame + Duration::from_micros(16_667));
-        }
         if deadline <= now {
             return false;
         }
@@ -1411,6 +1402,40 @@ impl ScriptThread {
             self.idle_period_end.set(Some(deadline));
         }
         ran
+    }
+
+    /// The latest an idle period may run to right now: the next timer, and while a page animates
+    /// (or has asked for a frame), the next frame.
+    /// <https://w3c.github.io/requestidlecallback/#dfn-get-deadline>
+    fn idle_deadline_limit_now(&self) -> Option<Instant> {
+        let mut limit = self.timer_scheduler.borrow().next_deadline();
+        let animating = self.documents.borrow().iter().any(|(_, document)| {
+            document.is_fully_active() &&
+                (document.has_active_request_animation_frame_callbacks() ||
+                    document.animation_manager().running_animation_count() != 0)
+        });
+        if animating {
+            let last_frame = self
+                .last_render_opportunity_time
+                .get()
+                .unwrap_or_else(Instant::now);
+            // With no frame for a while (a rAF was only just requested), the next one is
+            // about a frame from now.
+            let frame = Duration::from_micros(16_667);
+            let now = Instant::now();
+            let mut next_frame = last_frame + frame;
+            if next_frame <= now {
+                next_frame = now + frame;
+            }
+            limit = Some(limit.map_or(next_frame, |limit| limit.min(next_frame)));
+        }
+        limit
+    }
+
+    /// For `IdleDeadline.timeRemaining()`: timers and frames scheduled after an idle period
+    /// began can only bring its deadline closer. `None` when nothing limits it.
+    pub(crate) fn idle_deadline_limit() -> Option<Instant> {
+        with_script_thread(|script_thread| script_thread.idle_deadline_limit_now())
     }
 
     /// Handle incoming messages from other tasks and the task queue.

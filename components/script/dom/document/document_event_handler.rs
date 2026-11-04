@@ -27,7 +27,7 @@ use layout_api::{HitTestFlags, ScrollContainerQueryFlags, node_id_from_scroll_id
 use rustc_hash::FxHashMap;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
-use script_bindings::codegen::GenericBindings::ElementBinding::ScrollLogicalPosition;
+use script_bindings::codegen::GenericBindings::ElementBinding::{ElementMethods, ScrollLogicalPosition};
 use script_bindings::codegen::GenericBindings::EventBinding::EventMethods;
 use script_bindings::codegen::GenericBindings::HTMLElementBinding::HTMLElementMethods;
 use script_bindings::codegen::GenericBindings::HTMLLabelElementBinding::HTMLLabelElementMethods;
@@ -1863,7 +1863,9 @@ impl DocumentEventHandler {
             return Default::default();
         };
         // While the pointer is locked, wheel events go to the lock target.
-        let el = self.window.Document().pointer_lock_element().unwrap_or(el);
+        let lock_target = self.window.Document().pointer_lock_element();
+        let locked = lock_target.is_some();
+        let el = lock_target.unwrap_or(el);
 
         let node = el.upcast::<Node>();
         debug!(
@@ -1919,7 +1921,47 @@ impl DocumentEventHandler {
         dom_event.set_composed(true);
         dom_event.fire(cx, node.upcast());
 
-        dom_event.flags().into()
+        let mut result: InputEventResult = dom_event.flags().into();
+        // While the pointer is locked, the lock target is where scrolling starts (and chains
+        // from), not the box under the frozen cursor, so script scrolls here and tells the
+        // renderer not to scroll at the cursor.
+        // <https://w3c.github.io/pointerlock/#pointer-lock-and-mouse-events>
+        if locked && !result.contains(InputEventResult::DefaultPrevented) {
+            let (dx, dy) = Self::wheel_delta_in_css_pixels(&self.window, &event);
+            self.scroll_from_element(cx, &el, dx, dy);
+            result |= InputEventResult::DefaultPrevented;
+        }
+        result
+    }
+
+    /// A wheel delta (embedder convention: positive reveals content up/left) as a scroll
+    /// offset in CSS pixels (positive scrolls down/right).
+    fn wheel_delta_in_css_pixels(window: &Window, event: &EmbedderWheelEvent) -> (f64, f64) {
+        let (unit_x, unit_y) = match event.delta.mode {
+            embedder_traits::WheelMode::DeltaPixel => (1.0, 1.0),
+            embedder_traits::WheelMode::DeltaLine => (40.0, 40.0),
+            embedder_traits::WheelMode::DeltaPage => {
+                (window.InnerWidth() as f64, window.InnerHeight() as f64)
+            },
+        };
+        (-event.delta.x * unit_x, -event.delta.y * unit_y)
+    }
+
+    /// Scroll the nearest inclusive ancestor of `element` that can still scroll by (dx, dy), or
+    /// else the viewport.
+    fn scroll_from_element(&self, cx: &mut JSContext, element: &Element, dx: f64, dy: f64) {
+        for ancestor in element
+            .upcast::<Node>()
+            .inclusive_ancestors(ShadowIncluding::Yes)
+            .filter_map(DomRoot::downcast::<Element>)
+        {
+            let before = (ancestor.ScrollLeft(), ancestor.ScrollTop());
+            ancestor.ScrollBy_(cx, dx, dy);
+            if (ancestor.ScrollLeft(), ancestor.ScrollTop()) != before {
+                return;
+            }
+        }
+        self.window.ScrollBy_(cx, dx, dy);
     }
 
     #[cfg(feature = "gamepad")]
