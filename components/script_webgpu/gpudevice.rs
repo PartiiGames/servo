@@ -109,7 +109,13 @@ macro_rules! define_event_handler(
     )
 );
 
+thread_local! {
+    /// Whether a GC after a device destroy() is already queued on this thread.
+    static GC_AFTER_DEVICE_DESTROY_QUEUED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(JSTraceable, MallocSizeOf)]
+
 struct DroppableGPUDevice {
     #[no_trace]
     channel: WebGPU,
@@ -707,6 +713,20 @@ where
                 .send(WebGPURequest::DestroyDevice(self.id().0))
             {
                 warn!("Failed to send DestroyDevice ({:?}) ({})", self.id().0, e);
+            }
+
+            // A destroyed device's memory (in wgpu and, on a software adapter, the process)
+            // is freed only when its GPUDevice and the objects made on it are collected.
+            // Pages that make many devices (the CTS) outran the GC by gigabytes, so ask for
+            // a collection soon after a destroy: one at a time, at most.
+            if !GC_AFTER_DEVICE_DESTROY_QUEUED.replace(true) {
+                let global: DomRoot<D::GlobalScope> = self.global_from_reflector();
+                global.queue_webgpu_task_source(task!(gc_after_device_destroy: move |cx| {
+                    GC_AFTER_DEVICE_DESTROY_QUEUED.set(false);
+                    unsafe {
+                        js::jsapi::JS_GC(cx.raw_cx(), js::jsapi::GCReason::API);
+                    }
+                }));
             }
         }
     }
