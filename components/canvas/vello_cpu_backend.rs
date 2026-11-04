@@ -128,6 +128,70 @@ impl VelloCPUDrawTarget {
         Size2D::new(self.ctx.width(), self.ctx.height()).cast()
     }
 
+    /// Partii: copy `source` of `surface` to `destination` in the backing pixmap, row by row
+    /// (both are premultiplied RGBA8). Pending drawing is rendered first. Returns false if the
+    /// rectangles don't fit the expected shapes (then the caller draws instead).
+    fn copy_into_pixmap(
+        &mut self,
+        surface: &vello_cpu::Pixmap,
+        source: Rect<i32>,
+        destination: Point2D<i32>,
+    ) -> bool {
+        let (sw, sh) = (i32::from(surface.width()), i32::from(surface.height()));
+        if source.origin.x < 0 ||
+            source.origin.y < 0 ||
+            source.max_x() > sw ||
+            source.max_y() > sh
+        {
+            return false;
+        }
+        let _ = self.pixmap(); // render pending drawing; state is Rendered now
+        let (dw, dh) = (
+            i32::from(self.pixmap.width()),
+            i32::from(self.pixmap.height()),
+        );
+        // Clip to the canvas.
+        let x0 = destination.x.max(0);
+        let y0 = destination.y.max(0);
+        let x1 = (destination.x + source.size.width).min(dw);
+        let y1 = (destination.y + source.size.height).min(dh);
+        if x0 >= x1 || y0 >= y1 {
+            return true;
+        }
+        let n = (x1 - x0) as usize;
+        let src = surface.data();
+        let dst = self.pixmap.data_mut();
+        for y in y0..y1 {
+            let sy = source.origin.y + (y - destination.y);
+            let sx = source.origin.x + (x0 - destination.x);
+            let s0 = (sy * sw + sx) as usize;
+            let d0 = (y * dw + x0) as usize;
+            dst[d0..d0 + n].copy_from_slice(&src[s0..s0 + n]);
+        }
+        self.pixmap.set_may_have_transparency(true);
+        true
+    }
+
+    /// Partii: whether filling `rect` with this paint covers every pixel of the canvas with an
+    /// opaque colour, so whatever was drawn before can't show (the usual first call of a game's
+    /// frame: fillStyle = background; fillRect(0, 0, w, h)).
+    fn fill_covers_canvas(
+        &mut self,
+        rect: &Rect<f32>,
+        paint: &vello_cpu::PaintType,
+        composition_options: &CompositionOptions,
+        transform: &Transform2D<f64>,
+    ) -> bool {
+        let opaque = matches!(paint, vello_cpu::PaintType::Solid(c) if c.components[3] >= 1.0);
+        opaque &&
+            composition_options.composition_operation ==
+                CompositionOrBlending::Composition(CompositionStyle::SourceOver) &&
+            // Axis-aligned: the bounding box of a rotated rect is more than the rect.
+            transform.m12 == 0.0 &&
+            transform.m21 == 0.0 &&
+            self.is_viewport_cleared(rect, *transform)
+    }
+
     fn is_viewport_cleared(&mut self, rect: &Rect<f32>, transform: Transform2D<f64>) -> bool {
         let transformed_rect = transform.outer_transformed_rect(&rect.cast());
         if transformed_rect.is_empty() {
@@ -220,6 +284,13 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
         source: Rect<i32>,
         destination: Point2D<i32>,
     ) {
+        // Partii: putImageData (the only caller) replaces pixels, ignoring the clip, transform,
+        // global alpha and compositing. Copy the rows into the backing pixmap instead of drawing
+        // the data as an image fill: no re-rasterizing the old content plus the new one, and
+        // translucent pixels replace rather than blend, as the spec says.
+        if self.copy_into_pixmap(&surface, source, destination) {
+            return;
+        }
         self.ensure_drawing();
         let destination: kurbo::Point = destination.cast::<f64>().into();
         let rect = kurbo::Rect::from_origin_size(destination, source.size.cast());
@@ -374,10 +445,18 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
-        self.ensure_drawing();
+        let paint = paint(style, composition_options.alpha);
+        if self.fill_covers_canvas(rect, &paint, &composition_options, &transform) {
+            // Partii: drop the old content and everything queued, instead of re-drawing the
+            // whole previous frame as an image under this fill (ensure_drawing).
+            self.ignore_clips(|self_| self_.ctx.reset());
+            self.state = State::Drawing;
+        } else {
+            self.ensure_drawing();
+        }
         self.with_composition(composition_options.composition_operation, |self_| {
             self_.ctx.set_transform(transform.cast().into());
-            self_.ctx.set_paint(paint(style, composition_options.alpha));
+            self_.ctx.set_paint(paint);
             self_.ctx.fill_rect(&rect.cast().into());
         })
     }
