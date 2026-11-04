@@ -133,12 +133,16 @@ impl IIRFilterNode {
         }
     }
 
+    /// <https://webaudio.github.io/web-audio-api/#dom-iirfilternode-getfrequencyresponse>:
+    /// H(z) = sum(b[k] z^-k) / sum(a[k] z^-k) at z = e^(j pi f / nyquist). Frequencies outside
+    /// [0, nyquist] give NaN.
     pub fn get_frequency_response(
         feedforward: &[f64],
         feedback: &[f64],
         frequency_hz: &[f32],
         mag_response: &mut [f32],
         phase_response: &mut [f32],
+        sample_rate: f32,
     ) {
         debug_assert!(
             frequency_hz.len() == mag_response.len() && frequency_hz.len() == phase_response.len(),
@@ -146,11 +150,12 @@ impl IIRFilterNode {
         );
 
         frequency_hz.iter().enumerate().for_each(|(idx, &f)| {
-            if !(0.0..1.0).contains(&f) {
+            let nyquist = sample_rate as f64 / 2.;
+            if !(0.0..=nyquist).contains(&(f as f64)) {
                 mag_response[idx] = f32::NAN;
                 phase_response[idx] = f32::NAN;
             } else {
-                let f = (-f as f64) * std::f64::consts::PI;
+                let f = -(f as f64) / nyquist * std::f64::consts::PI;
                 let z = Complex64::new(f64::cos(f), f64::sin(f));
                 let numerator = Self::sum(feedforward, z);
                 let denominator = Self::sum(feedback, z);
@@ -162,8 +167,9 @@ impl IIRFilterNode {
         });
     }
 
+    /// sum(coeffs[k] * z^k), by Horner's rule from the highest power.
     fn sum(coeffs: &[f64], z: Complex64) -> Complex64 {
-        coeffs.iter().fold(Complex64::new(0.0, 0.0), |acc, &coeff| {
+        coeffs.iter().rev().fold(Complex64::new(0.0, 0.0), |acc, &coeff| {
             acc * z + Complex64::new(coeff, 0.0)
         })
     }

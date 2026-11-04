@@ -18,8 +18,9 @@ use crate::conversions::Convert;
 use crate::dom::audio::audionode::{AudioNode, AudioNodeOptionsHelper};
 use crate::dom::audio::baseaudiocontext::BaseAudioContext;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
-    ChannelCountMode, ChannelInterpretation,
+    AudioNodeMethods, ChannelCountMode, ChannelInterpretation,
 };
+use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContextMethods;
 use crate::dom::bindings::codegen::Bindings::IIRFilterNodeBinding::{
     IIRFilterNodeMethods, IIRFilterOptions,
 };
@@ -135,6 +136,7 @@ impl IIRFilterNodeMethods<crate::DomTypeHolder> for IIRFilterNode {
             &frequency_hz_vec,
             &mut mag_response_vec,
             &mut phase_response_vec,
+            *self.node.Context().SampleRate(),
         );
 
         mag_response.update(&mag_response_vec);

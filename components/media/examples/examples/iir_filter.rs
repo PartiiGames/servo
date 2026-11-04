@@ -76,6 +76,8 @@ fn run_example(servo_media: Arc<ServoMedia>) {
             &freqs,
             &mut mag,
             &mut phase,
+            // Normalized frequencies (fractions of Nyquist).
+            2.,
         );
         print!(
             "GetFrequencyResponse for freqs: {:?}\n mag: {:?}\n phase: {:?}",
