@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::{Block, Chunk};
+use crate::block::{Block, Chunk, Tick};
 use crate::param::{Param, ParamDir, ParamType};
 
 /// AudioListeners are fake nodes; from the user's point of view they're
@@ -50,6 +50,11 @@ impl AudioListenerNode {
 impl AudioNodeEngine for AudioListenerNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::AudioListenerNode
+    }
+
+    /// Driven from outside the graph (or the graph's own endpoint): never removed here.
+    fn removable(&self, _now: Tick) -> bool {
+        false
     }
 
     fn process(&mut self, mut inputs: Chunk, info: &BlockInfo) -> Chunk {

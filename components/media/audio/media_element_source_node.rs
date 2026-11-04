@@ -11,7 +11,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use player::audio::AudioRenderer;
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::{Block, Chunk, FRAMES_PER_BLOCK};
+use crate::block::{Block, Chunk, FRAMES_PER_BLOCK, Tick};
 
 #[derive(Debug, Clone, MallocSizeOf)]
 pub enum MediaElementSourceNodeMessage {
@@ -52,6 +52,11 @@ impl MediaElementSourceNode {
 impl AudioNodeEngine for MediaElementSourceNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::MediaElementSourceNode
+    }
+
+    /// Driven from outside the graph (or the graph's own endpoint): never removed here.
+    fn removable(&self, _now: Tick) -> bool {
+        false
     }
 
     fn process(&mut self, mut inputs: Chunk, _info: &BlockInfo) -> Chunk {

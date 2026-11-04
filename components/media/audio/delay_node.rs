@@ -265,6 +265,11 @@ impl AudioNodeEngine for DelayNode {
         AudioNodeType::DelayNode
     }
 
+    /// Tail: until the delay line holds no input any more.
+    fn removable(&self, _now: Tick) -> bool {
+        self.live_frames == 0
+    }
+
     fn process(&mut self, mut inputs: Chunk, info: &BlockInfo) -> Chunk {
         debug_assert!(inputs.len() == 1);
         self.ensure_lines(info.sample_rate);

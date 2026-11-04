@@ -338,6 +338,14 @@ impl AudioNodeEngine for DynamicsCompressorNode {
         AudioNodeType::DynamicsCompressionNode
     }
 
+    /// Tail: the look-ahead delay line, and the follower releasing back to no reduction (so
+    /// `reduction` returns to 0 dB before the node goes idle).
+    fn removable(&self, _now: Tick) -> bool {
+        self.delay_live_frames == 0 &&
+            self.follower.compressor_gain >= 1. &&
+            self.follower.detector_average >= 1.
+    }
+
     fn process(&mut self, mut inputs: Chunk, info: &BlockInfo) -> Chunk {
         debug_assert!(inputs.len() == 1);
 

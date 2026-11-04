@@ -343,6 +343,15 @@ impl AudioNodeEngine for BiquadFilterNode {
         AudioNodeType::BiquadFilterNode
     }
 
+    /// Tail: the filter rings after its input stops; removable once its memory has decayed
+    /// below audibility.
+    fn removable(&self, _now: Tick) -> bool {
+        const QUIET: f64 = 1e-6;
+        self.state
+            .iter()
+            .all(|s| s.x1.abs() < QUIET && s.x2.abs() < QUIET && s.y1.abs() < QUIET && s.y2.abs() < QUIET)
+    }
+
     fn process(&mut self, mut inputs: Chunk, info: &BlockInfo) -> Chunk {
         debug_assert!(inputs.len() == 1);
         self.state

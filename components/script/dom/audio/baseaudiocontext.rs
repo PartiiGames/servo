@@ -5,7 +5,7 @@
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -17,8 +17,8 @@ use script_bindings::cformat;
 use script_bindings::codegen::GenericBindings::PeriodicWaveBinding::PeriodicWaveMethods;
 use servo_base::id::PipelineId;
 use servo_media::audio::context::{
-    AudioContext, AudioContextOptions, OfflineAudioContextOptions, ProcessingState,
-    RealTimeAudioContextOptions,
+    AudioContext, AudioContextOptions, NodeUnreferencedOnDrop, OfflineAudioContextOptions,
+    ProcessingState, RealTimeAudioContextOptions,
 };
 use servo_media::audio::decoder::AudioDecoderCallbacksBuilder;
 use servo_media::audio::graph::NodeId;
@@ -139,6 +139,14 @@ pub(crate) struct BaseAudioContext {
     /// been "closed()".
     state: Cell<AudioContextState>,
     channel_count: u32,
+    /// Node lifetime: for each live engine node, the value that tells the render thread the
+    /// node is unreferenced once the AudioNode and all its AudioParams have been finalized.
+    /// Weak, so this map doesn't keep nodes alive; dead entries are pruned as it grows.
+    #[no_trace]
+    #[ignore_malloc_size_of = "servo_media"]
+    node_lifetimes: DomRefCell<HashMap<NodeId, Weak<NodeUnreferencedOnDrop>>>,
+    /// Engine nodes created since the last GC nudge (see `register_node_lifetime`).
+    nodes_since_gc_nudge: Cell<u32>,
 }
 
 impl BaseAudioContext {
@@ -172,6 +180,8 @@ impl BaseAudioContext {
             sample_rate,
             state: Cell::new(AudioContextState::Suspended),
             channel_count: channel_count.into(),
+            node_lifetimes: Default::default(),
+            nodes_since_gc_nudge: Cell::new(0),
         })
     }
 
@@ -313,6 +323,44 @@ impl BaseAudioContext {
                     }));
             },
         }
+    }
+
+    /// A new engine node: returns the value its AudioNode keeps (see `node_lifetimes`).
+    pub(crate) fn register_node_lifetime(&self, node: NodeId) -> Arc<NodeUnreferencedOnDrop> {
+        let lifetime = Arc::new(self.audio_context_impl.lock().unwrap().unreferenced_on_drop(node));
+        let mut lifetimes = self.node_lifetimes.borrow_mut();
+        // Prune finalized nodes now and then (the engine reuses ids of removed nodes).
+        if lifetimes.len() >= 256 && lifetimes.len().is_power_of_two() {
+            lifetimes.retain(|_, weak| weak.strong_count() > 0);
+        }
+        lifetimes.insert(node, Arc::downgrade(&lifetime));
+        drop(lifetimes);
+
+        // Engine nodes are freed only once their DOM objects are collected, but the GC doesn't
+        // see the engine's memory or render cost, so a page that makes many short-lived voices
+        // and little other garbage could go a long time without a collection. Every
+        // GC_NUDGE_NODES nodes, queue one GC.
+        const GC_NUDGE_NODES: u32 = 4096;
+        let created = self.nodes_since_gc_nudge.get() + 1;
+        if created >= GC_NUDGE_NODES {
+            self.nodes_since_gc_nudge.set(0);
+            let window = Trusted::new(self.global().as_window());
+            self.global()
+                .task_manager()
+                .dom_manipulation_task_source()
+                .queue(task!(audio_node_gc_nudge: move |cx| {
+                    window.root().gc(cx);
+                }));
+        } else {
+            self.nodes_since_gc_nudge.set(created);
+        }
+        lifetime
+    }
+
+    /// For an AudioParam of `node`: shares the node's lifetime, so the engine node stays while
+    /// the page holds any of its AudioParams.
+    pub(crate) fn node_lifetime(&self, node: NodeId) -> Option<Arc<NodeUnreferencedOnDrop>> {
+        self.node_lifetimes.borrow().get(&node).and_then(Weak::upgrade)
     }
 
     /// Set the control thread state and, if it changed, fire `statechange`.

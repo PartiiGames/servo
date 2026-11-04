@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::sync::Arc;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -10,6 +11,7 @@ use log::warn;
 use script_bindings::codegen::InheritTypes::{
     AudioNodeTypeId, AudioScheduledSourceNodeTypeId, EventTargetTypeId,
 };
+use servo_media::audio::context::NodeUnreferencedOnDrop;
 use servo_media::audio::audio_node::{
     AudioNodeInit, AudioNodeMessage, ChannelCountMode as ServoMediaChannelCountMode, ChannelInfo,
     ChannelInterpretation as ServoMediaChannelInterpretation,
@@ -45,6 +47,11 @@ pub(crate) struct AudioNode {
     channel_count: Cell<u32>,
     channel_count_mode: Cell<ChannelCountMode>,
     channel_interpretation: Cell<ChannelInterpretation>,
+    /// Node lifetime: tells the engine this node is unreferenced when this AudioNode (and its
+    /// AudioParams, which share it) are finalized. None for the destination node.
+    #[no_trace]
+    #[ignore_malloc_size_of = "servo_media"]
+    lifetime: Option<Arc<NodeUnreferencedOnDrop>>,
 }
 
 impl AudioNode {
@@ -79,13 +86,15 @@ impl AudioNode {
             Console::internal_warn(cx, &context.global(), MESSAGE.to_string());
         }
 
-        Ok(AudioNode::new_inherited_for_id(
+        let mut node = AudioNode::new_inherited_for_id(
             node_id,
             context,
             options,
             number_of_inputs,
             number_of_outputs,
-        ))
+        );
+        node.lifetime = node_id.map(|id| context.register_node_lifetime(id));
+        Ok(node)
     }
 
     pub(crate) fn new_inherited_for_id(
@@ -104,6 +113,7 @@ impl AudioNode {
             channel_count: Cell::new(options.count),
             channel_count_mode: Cell::new(options.mode),
             channel_interpretation: Cell::new(options.interpretation),
+            lifetime: None,
         }
     }
 

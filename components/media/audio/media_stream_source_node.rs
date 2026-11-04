@@ -4,7 +4,7 @@
 
 use crate::AudioStreamReader;
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::Chunk;
+use crate::block::{Chunk, Tick};
 use crate::param::{Param, ParamType};
 
 #[derive(AudioNodeCommon)]
@@ -27,6 +27,11 @@ impl MediaStreamSourceNode {
 impl AudioNodeEngine for MediaStreamSourceNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::MediaStreamSourceNode
+    }
+
+    /// Driven from outside the graph (or the graph's own endpoint): never removed here.
+    fn removable(&self, _now: Tick) -> bool {
+        false
     }
 
     fn process(&mut self, mut inputs: Chunk, _: &BlockInfo) -> Chunk {

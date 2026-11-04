@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelCountMode, ChannelInfo};
-use crate::block::Chunk;
+use crate::block::{Chunk, Tick};
 
 #[derive(AudioNodeCommon)]
 pub(crate) struct DestinationNode {
@@ -27,6 +27,11 @@ impl DestinationNode {
 impl AudioNodeEngine for DestinationNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::DestinationNode
+    }
+
+    /// Driven from outside the graph (or the graph's own endpoint): never removed here.
+    fn removable(&self, _now: Tick) -> bool {
+        false
     }
 
     fn process(&mut self, inputs: Chunk, _: &BlockInfo) -> Chunk {

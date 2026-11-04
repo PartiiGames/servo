@@ -90,6 +90,13 @@ fn impl_audio_scheduled_source_node(ast: &syn::DeriveInput) -> proc_macro2::Toke
                 true
             }
 
+            #[allow(dead_code)]
+            /// For `AudioNodeEngine::removable`: never started (and, being unreferenced,
+            /// never will be) or stopped by now.
+            fn scheduled_source_removable(&self, now: Tick) -> bool {
+                self.start_at.is_none() || self.stop_at.is_some_and(|stop| stop <= now)
+            }
+
             fn maybe_trigger_onended_callback(&mut self) {
                 // We cannot have an end without a start.
                 if self.start_at.is_none() {

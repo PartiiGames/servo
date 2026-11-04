@@ -16,7 +16,7 @@ use num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::{Block, Chunk, FRAMES_PER_BLOCK_USIZE};
+use crate::block::{Block, Chunk, FRAMES_PER_BLOCK_USIZE, Tick};
 
 const B: usize = FRAMES_PER_BLOCK_USIZE;
 const FFT: usize = 2 * B;
@@ -259,6 +259,11 @@ impl ConvolverNode {
 impl AudioNodeEngine for ConvolverNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::ConvolverNode
+    }
+
+    /// Tail: the impulse response's length after the last input.
+    fn removable(&self, _now: Tick) -> bool {
+        self.state.as_ref().is_none_or(|state| state.tail_blocks == 0)
     }
 
     fn process(&mut self, mut inputs: Chunk, _info: &BlockInfo) -> Chunk {

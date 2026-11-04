@@ -3,12 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::cformat;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
+use servo_media::audio::context::NodeUnreferencedOnDrop;
 use servo_media::audio::audio_node::{AudioNodeMessage, AudioNodeType};
 use servo_media::audio::graph::NodeId;
 use servo_media::audio::param::{ParamRate, ParamType, RampKind, UserAutomationEvent};
@@ -37,6 +38,10 @@ pub(crate) struct AudioParam {
     default_value: f32,
     min_value: f32,
     max_value: f32,
+    /// Keeps the owner node's engine node alive while the page holds this AudioParam.
+    #[no_trace]
+    #[ignore_malloc_size_of = "servo_media"]
+    _node_lifetime: Option<Arc<NodeUnreferencedOnDrop>>,
 }
 
 impl AudioParam {
@@ -61,6 +66,7 @@ impl AudioParam {
             default_value,
             min_value,
             max_value,
+            _node_lifetime: node.and_then(|id| context.node_lifetime(id)),
         }
     }
 

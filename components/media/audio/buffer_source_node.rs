@@ -155,6 +155,21 @@ impl AudioNodeEngine for AudioBufferSourceNode {
         AudioNodeType::AudioBufferSourceNode
     }
 
+    /// Removable once it can't play anything more: not started, stopped, no buffer, or the
+    /// (non-looping) buffer has played out.
+    fn removable(&self, now: Tick) -> bool {
+        if self.scheduled_source_removable(now) {
+            return true;
+        }
+        let Some(buffer) = &self.buffer else {
+            return true;
+        };
+        self.initialized_pos &&
+            ((!self.loop_enabled &&
+                (self.buffer_pos < 0. || self.buffer_pos >= buffer.len() as f64)) ||
+                self.buffer_duration <= 0.)
+    }
+
     fn input_count(&self) -> u32 {
         0
     }
