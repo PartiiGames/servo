@@ -129,7 +129,7 @@ use crate::dom::messageport::MessagePort;
 use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
 use crate::dom::performance::performance::Performance;
 use crate::dom::performance::performanceentry::EntryType;
-use crate::dom::promise::RootedPromise;
+use crate::dom::promise::{RootedPromise, TracedPromise};
 use crate::dom::readablestream::{CrossRealmTransformReadable, ReadableStream};
 use crate::dom::script_execution::ScriptOptions;
 use crate::dom::serviceworker::ServiceWorker;
@@ -292,6 +292,13 @@ pub(crate) struct GlobalScope {
     #[cfg(feature = "webgpu")]
     gpu_devices: DomRefCell<HashMapTracedValues<WebGPUDevice, WeakRef<GPUDevice>, FxBuildHasher>>,
 
+    /// The device.lost promise of each device in `gpu_devices`, held strongly: a page may
+    /// keep only the promise (destroy(); await device.lost), and if the GPUDevice is
+    /// collected before the loss arrives, the promise must still resolve.
+    #[cfg(feature = "webgpu")]
+    gpu_device_lost_promises:
+        DomRefCell<HashMapTracedValues<WebGPUDevice, TracedPromise, FxBuildHasher>>,
+
     // https://w3c.github.io/performance-timeline/#supportedentrytypes-attribute
     #[ignore_malloc_size_of = "mozjs"]
     frozen_supported_performance_entry_types: CachedFrozenArray,
@@ -446,6 +453,8 @@ impl GlobalScope {
             gpu_id_hub,
             #[cfg(feature = "webgpu")]
             gpu_devices: DomRefCell::new(HashMapTracedValues::new_fx()),
+            #[cfg(feature = "webgpu")]
+            gpu_device_lost_promises: DomRefCell::new(HashMapTracedValues::new_fx()),
             frozen_supported_performance_entry_types: CachedFrozenArray::new(),
             console_group_stack: DomRefCell::new(Vec::new()),
             console_count_map: Default::default(),
@@ -2926,10 +2935,15 @@ impl GlobalScope {
         self.gpu_devices
             .borrow_mut()
             .insert(device.id(), WeakRef::new(device));
+        let lost_promise = device.lost_promise().clone();
+        self.gpu_device_lost_promises
+            .borrow_mut()
+            .insert(device.id(), lost_promise);
     }
 
     #[cfg(feature = "webgpu")]
     pub(crate) fn remove_gpu_device(&self, device: WebGPUDevice) {
+        self.gpu_device_lost_promises.borrow_mut().remove(&device);
         let device = self
             .gpu_devices
             .borrow_mut()
@@ -2941,6 +2955,7 @@ impl GlobalScope {
     #[cfg(feature = "webgpu")]
     pub(crate) fn gpu_device_lost(
         &self,
+        cx: &mut js::context::JSContext,
         device: WebGPUDevice,
         reason: DeviceLostReason,
         msg: String,
@@ -2957,7 +2972,32 @@ impl GlobalScope {
             .root()
         {
             device.lose(reason, msg);
+            return;
         }
+        // The GPUDevice was collected, but the page may still wait on device.lost:
+        // resolve the promise we kept (as "lose the device" would, in a task).
+        let Some(lost_promise) = self.gpu_device_lost_promises.borrow().get(&device).cloned()
+        else {
+            return;
+        };
+        if lost_promise.is_fulfilled() {
+            return;
+        }
+        let promise = TrustedPromise::new(&lost_promise.root(cx));
+        let global = Trusted::new(self);
+        self.task_manager()
+            .webgpu_task_source()
+            .queue(task!(resolve_collected_device_lost: move |cx| {
+                let global = global.root();
+                let promise = promise.root(cx);
+                let lost = crate::dom::webgpu::gpudevicelostinfo::GPUDeviceLostInfo::new(
+                    cx,
+                    &global,
+                    msg.into(),
+                    reason,
+                );
+                promise.resolve_native(cx, &*lost);
+            }));
     }
 
     #[cfg(feature = "webgpu")]

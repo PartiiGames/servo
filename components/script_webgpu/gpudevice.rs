@@ -444,6 +444,11 @@ where
         }));
     }
 
+    /// The device.lost promise, for the global to keep: see GlobalScope::gpu_device_lost.
+    pub fn lost_promise(&self) -> std::cell::Ref<'_, <D::Promise as PromiseHelpers<D>>::HeapTraced> {
+        self.lost_promise.borrow()
+    }
+
     pub(crate) fn is_lost(&self) -> bool {
         self.lost_promise.borrow().is_fulfilled()
     }
