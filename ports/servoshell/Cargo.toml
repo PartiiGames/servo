@@ -62,6 +62,10 @@ js_backtrace = ["servo/js_backtrace"]
 js_jit = ["servo/js_jit"]
 max_log_level = ["log/release_max_level_info"]
 media-gstreamer = ["servo/media-gstreamer"]
+# Partii: the pure-Rust media backend (cpal + symphonia). media-native-null has no sound device
+# (no libasound), for headless machines. `./mach build --media-stack native` / `native-null`.
+media-native = ["servo/media-native-device"]
+media-native-null = ["servo/media-native"]
 multiprocess = ["servo/multiprocess"]
 native-bluetooth = ["servo/native-bluetooth"]
 profilemozjs = ["servo/profilemozjs"]

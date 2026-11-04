@@ -273,6 +273,9 @@ class CommandBase(object):
     def __init__(self, context: Any) -> None:
         self.context = context
         self.enable_media = False
+        # Partii: the pure-Rust backend's servoshell feature ("media-native" or
+        # "media-native-null"), from --media-stack native / native-null. Never with GStreamer.
+        self.media_native_feature: Optional[str] = None
         self.enable_code_coverage = False
         self.features = []
 
@@ -525,8 +528,9 @@ class CommandBase(object):
                     "--media-stack",
                     default=None,
                     group="Feature Selection",
-                    choices=["gstreamer", "dummy"],
-                    help="Which media stack to use",
+                    choices=["gstreamer", "dummy", "native", "native-null"],
+                    help="Which media stack to use (native: Partii's cpal + symphonia backend; "
+                    "native-null: the same without a sound device or libasound)",
                 ),
                 CommandArgument(
                     "--debug-mozjs",
@@ -599,7 +603,10 @@ class CommandBase(object):
                 if build_configuration:
                     self.configure_build_target(kwargs)
                     self.features = kwargs.get("features", None) or []
-                    self.enable_media = self.is_media_enabled(kwargs["media_stack"])
+                    self.media_native_feature = self.native_media_feature(kwargs["media_stack"])
+                    self.enable_media = self.media_native_feature is None and self.is_media_enabled(
+                        kwargs["media_stack"]
+                    )
 
                 if build_configuration or binary_selection:
                     self.enable_code_coverage = kwargs.pop("coverage", False)
@@ -729,6 +736,13 @@ class CommandBase(object):
         if self.target.is_cross_build() and not suppress_log:
             print(f"Targeting '{self.target.triple()}' for cross-compilation", file=sys.stderr)
 
+    def native_media_feature(self, media_stack: Optional[str]) -> Optional[str]:
+        """The servoshell feature for Partii's native media backend, if the media stack (from the
+        command line, else the config) asks for it."""
+        if not media_stack and self.config["build"]["media-stack"] != "auto":
+            media_stack = self.config["build"]["media-stack"]
+        return {"native": "media-native", "native-null": "media-native-null"}.get(media_stack or "")
+
     def is_media_enabled(self, media_stack: Optional[str]) -> bool:
         """Determine whether media is enabled based on the value of the build target
         platform and the value of the '--media-stack' command-line argument.
@@ -815,6 +829,8 @@ class CommandBase(object):
             features += list(self.features)
             if self.enable_media:
                 features.append("media-gstreamer")
+            elif self.media_native_feature:
+                features.append(self.media_native_feature)
             if self.config["build"]["debug-mozjs"] or debug_mozjs:
                 features.append("debugmozjs")
 
