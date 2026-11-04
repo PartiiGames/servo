@@ -345,6 +345,14 @@ impl Param {
                     overlap_event.set_cancel_tick(event.time());
                     // Keep the RampToValueAtTime event.
                     events_to_keep = idx + 1;
+                } else if idx > 0 &&
+                    (self.events[idx - 1].is_set_target() ||
+                        self.events[idx - 1].is_set_value_curve()) &&
+                    self.events[idx - 1].time() == event.time()
+                {
+                    // A SetTarget or SetValueCurve starting exactly at cancelTime has not
+                    // produced a value yet: drop it and hold the value before it.
+                    events_to_keep = idx - 1;
                 } else {
                     if let Some(overlap_event) = self.get_previous_event_mut(idx) &&
                         (overlap_event.is_set_target() ||
@@ -899,6 +907,24 @@ mod tests {
         assert!((out[126] - at126).abs() < 1e-6, "{} vs {}", out[126], at126);
         assert!((out[127] - at126 * (-1_f32).exp()).abs() < 1e-6);
         assert!((out[128] - at126 * (-2_f32).exp()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cancel_and_hold_at_a_curve_start_drops_the_curve() {
+        // audioparam-cancel-and-hold.html "cancel setValueCurve now".
+        let mut p = Param::new(1.);
+        p.insert_event(AutomationEvent::SetValueAtTime(0.5, Tick(0)));
+        p.insert_event(AutomationEvent::SetValueCurveAtTime(
+            vec![-1., 1.],
+            Tick(200),
+            Tick(100),
+            None,
+        ));
+        p.insert_event(AutomationEvent::CancelAndHoldAtTime(Tick(200)));
+        for tick in 0..512 {
+            p.update(&block(tick / 128 * 128), Tick(tick % 128));
+            assert_eq!(p.value(), 0.5, "tick {tick}");
+        }
     }
 
     #[test]
