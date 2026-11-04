@@ -4,7 +4,6 @@
 
 use std::cell::LazyCell;
 use std::cmp::Ordering;
-use std::iter;
 use std::rc::Rc;
 
 use app_units::Au;
@@ -390,14 +389,33 @@ impl Range {
             }
         }
 
-        let document = start.owner_doc();
-        let unrooted_end = end.as_unrooted(no_gc);
-        start
-            .following_nodes_unrooted(no_gc, document.upcast::<Node>(), ShadowIncluding::No)
-            .take_while(move |node| *node != *end)
-            .chain(iter::once(unrooted_end))
-            .flat_map(move |node| node.border_boxes())
-            .collect()
+        // Partii: <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>: the border
+        // boxes of each element selected by the range whose parent isn't, and the boxes of each
+        // Text node selected or partially selected. (This walked every node after the start
+        // container until it met the end container, so a range inside one element, e.g.
+        // selectNodeContents(span), took the rest of the document.)
+        let root = start
+            .common_ancestor(&end, ShadowIncluding::No)
+            .unwrap_or_else(|| start.clone());
+        let mut rects = Vec::new();
+        let mut included_element: Option<DomRoot<Node>> = None;
+        for node in root.traverse_preorder(ShadowIncluding::No) {
+            if let Some(element) = &included_element {
+                if element.is_ancestor_of(&node) {
+                    continue;
+                }
+                included_element = None;
+            }
+            if node.is::<Text>() {
+                if node == start || node == end || self.contains(no_gc, &node) {
+                    rects.extend(node.border_boxes());
+                }
+            } else if node.is::<Element>() && self.contains(no_gc, &node) {
+                rects.extend(node.border_boxes());
+                included_element = Some(node);
+            }
+        }
+        rects
     }
 
     /// <https://dom.spec.whatwg.org/#concept-range-bp-set>
