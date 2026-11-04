@@ -13,9 +13,10 @@ use crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext;
 
 /// <https://registry.khronos.org/webgl/extensions/KHR_parallel_shader_compile/>
 ///
-/// compileShader and linkProgram wait for the WebGL thread's answer, so by the time a page can
-/// ask, COMPLETION_STATUS_KHR is always true. The extension spec allows exactly that; what pages
-/// (Babylon, three's `compileAsync`) need is the extension object and the query to exist.
+/// linkProgram doesn't wait for the WebGL thread: the program resolves the link when something
+/// needs its results, and COMPLETION_STATUS_KHR reports whether the link has finished without
+/// waiting. compileShader translates on the script thread and compiles on the WebGL thread
+/// without waiting, so a shader's status is always true.
 #[dom_struct]
 pub(crate) struct KHRParallelShaderCompile {
     reflector_: Reflector,

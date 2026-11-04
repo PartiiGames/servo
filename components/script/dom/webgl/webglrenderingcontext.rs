@@ -3628,7 +3628,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             KHRParallelShaderCompileConstants::COMPLETION_STATUS_KHR
                 if self.extension_manager.is_parallel_shader_compile_enabled() =>
             {
-                BooleanValue(true)
+                BooleanValue(program.link_completed())
             },
             _ => {
                 self.webgl_error(InvalidEnum);

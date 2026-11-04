@@ -11,10 +11,11 @@ use js::context::JSContext;
 use script_bindings::cell::{DomRefCell, Ref};
 use script_bindings::reflector::reflect_dom_object;
 use script_bindings::weakref::WeakRef;
+use servo_base::generic_channel::{GenericReceiver, TryReceiveError};
 use servo_base::text::Utf8CodeUnits;
 use servo_canvas_traits::webgl::{
-    ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, WebGLCommand, WebGLError,
-    WebGLProgramId, WebGLResult, webgl_channel,
+    ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, ProgramLinkInfo, WebGLCommand,
+    WebGLError, WebGLProgramId, WebGLResult, webgl_channel,
 };
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
@@ -189,6 +190,12 @@ pub(crate) struct WebGLProgram {
     active_uniform_blocks: DomRefCell<Box<[ActiveUniformBlockInfo]>>,
     transform_feedback_varyings_length: Cell<i32>,
     transform_feedback_mode: Cell<i32>,
+    /// The WebGL thread's answer to the last linkProgram, until something needs it. Links are
+    /// resolved lazily so that pages polling COMPLETION_STATUS_KHR (KHR_parallel_shader_compile)
+    /// don't block on the link; everything that reads link results resolves it first.
+    #[no_trace]
+    #[ignore_malloc_size_of = "channel"]
+    pending_link: RefCell<Option<GenericReceiver<ProgramLinkInfo>>>,
     droppable: RefCell<DroppableWebGLProgram>,
 }
 
@@ -206,6 +213,7 @@ impl WebGLProgram {
             active_uniform_blocks: DomRefCell::new(vec![].into()),
             transform_feedback_varyings_length: Default::default(),
             transform_feedback_mode: Default::default(),
+            pending_link: RefCell::new(None),
             droppable: RefCell::new(DroppableWebGLProgram::new(id, context)),
         }
     }
@@ -289,11 +297,14 @@ impl WebGLProgram {
     }
 
     pub(crate) fn is_linked(&self) -> bool {
+        self.resolve_link();
         self.linked.get()
     }
 
     /// glLinkProgram
     pub(crate) fn link(&self) -> WebGLResult<()> {
+        // A previous link still in flight is superseded; take its answer off the channel.
+        self.resolve_link();
         self.linked.set(false);
         self.link_generation
             .set(self.link_generation.get().checked_add(1).unwrap());
@@ -314,8 +325,41 @@ impl WebGLProgram {
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast()
             .send_command(WebGLCommand::LinkProgram(self.id(), sender));
-        let link_info = receiver.recv().unwrap();
+        *self.pending_link.borrow_mut() = Some(receiver);
+        Ok(())
+    }
 
+    /// Waits for and applies the answer to a pending linkProgram, if there is one.
+    fn resolve_link(&self) {
+        let receiver = self.pending_link.borrow_mut().take();
+        if let Some(receiver) = receiver &&
+            let Ok(link_info) = receiver.recv()
+        {
+            self.apply_link_info(link_info);
+        }
+    }
+
+    /// COMPLETION_STATUS_KHR: whether the last link has finished, without waiting for it.
+    pub(crate) fn link_completed(&self) -> bool {
+        let result = match self.pending_link.borrow().as_ref() {
+            None => return true,
+            Some(receiver) => receiver.try_recv(),
+        };
+        match result {
+            Ok(link_info) => {
+                self.pending_link.borrow_mut().take();
+                self.apply_link_info(link_info);
+                true
+            },
+            Err(TryReceiveError::Empty) => false,
+            Err(TryReceiveError::ReceiveError(_)) => {
+                self.pending_link.borrow_mut().take();
+                true
+            },
+        }
+    }
+
+    fn apply_link_info(&self, link_info: ProgramLinkInfo) {
         {
             let mut used_locs = HashSet::new();
             let mut used_names = HashSet::new();
@@ -333,14 +377,14 @@ impl WebGLProgram {
                 for column in 0..columns {
                     // https://www.khronos.org/registry/webgl/specs/latest/1.0/#6.31
                     if !used_locs.insert(location + column) {
-                        return Ok(());
+                        return;
                     }
                 }
             }
             for active_uniform in &*link_info.active_uniforms {
                 // https://www.khronos.org/registry/webgl/specs/latest/1.0/#6.41
                 if !used_names.insert(&*active_uniform.base_name) {
-                    return Ok(());
+                    return;
                 }
             }
         }
@@ -354,18 +398,20 @@ impl WebGLProgram {
         *self.active_attribs.borrow_mut() = link_info.active_attribs;
         *self.active_uniforms.borrow_mut() = link_info.active_uniforms;
         *self.active_uniform_blocks.borrow_mut() = link_info.active_uniform_blocks;
-        Ok(())
     }
 
     pub(crate) fn active_attribs(&self) -> Ref<'_, [ActiveAttribInfo]> {
+        self.resolve_link();
         Ref::map(self.active_attribs.borrow(), |attribs| &**attribs)
     }
 
     pub(crate) fn active_uniforms(&self) -> Ref<'_, [ActiveUniformInfo]> {
+        self.resolve_link();
         Ref::map(self.active_uniforms.borrow(), |uniforms| &**uniforms)
     }
 
     pub(crate) fn active_uniform_blocks(&self) -> Ref<'_, [ActiveUniformBlockInfo]> {
+        self.resolve_link();
         Ref::map(self.active_uniform_blocks.borrow(), |blocks| &**blocks)
     }
 
@@ -447,6 +493,7 @@ impl WebGLProgram {
         cx: &mut JSContext,
         index: u32,
     ) -> WebGLResult<DomRoot<WebGLActiveInfo>> {
+        self.resolve_link();
         if self.is_deleted() {
             return Err(WebGLError::InvalidValue);
         }
@@ -469,6 +516,7 @@ impl WebGLProgram {
         cx: &mut JSContext,
         index: u32,
     ) -> WebGLResult<DomRoot<WebGLActiveInfo>> {
+        self.resolve_link();
         if self.is_deleted() {
             return Err(WebGLError::InvalidValue);
         }
@@ -487,6 +535,7 @@ impl WebGLProgram {
 
     /// glGetAttribLocation
     pub(crate) fn get_attrib_location(&self, name: DOMString) -> WebGLResult<i32> {
+        self.resolve_link();
         if !self.is_linked() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -510,6 +559,7 @@ impl WebGLProgram {
 
     /// glGetFragDataLocation
     pub(crate) fn get_frag_data_location(&self, name: DOMString) -> WebGLResult<i32> {
+        self.resolve_link();
         if !self.is_linked() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -537,6 +587,7 @@ impl WebGLProgram {
         cx: &mut JSContext,
         name: DOMString,
     ) -> WebGLResult<Option<DomRoot<WebGLUniformLocation>>> {
+        self.resolve_link();
         if !self.is_linked() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -591,6 +642,7 @@ impl WebGLProgram {
     }
 
     pub(crate) fn get_uniform_block_index(&self, name: DOMString) -> WebGLResult<u32> {
+        self.resolve_link();
         if !self.link_called.get() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -610,6 +662,7 @@ impl WebGLProgram {
     }
 
     pub(crate) fn get_uniform_indices(&self, names: Vec<DOMString>) -> WebGLResult<Vec<u32>> {
+        self.resolve_link();
         if !self.link_called.get() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -636,6 +689,7 @@ impl WebGLProgram {
         indices: Vec<u32>,
         pname: u32,
     ) -> WebGLResult<Vec<i32>> {
+        self.resolve_link();
         if !self.is_linked() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -670,6 +724,7 @@ impl WebGLProgram {
         block_index: u32,
         pname: u32,
     ) -> WebGLResult<Vec<i32>> {
+        self.resolve_link();
         if !self.link_called.get() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -700,6 +755,7 @@ impl WebGLProgram {
     }
 
     pub(crate) fn get_active_uniform_block_name(&self, block_index: u32) -> WebGLResult<String> {
+        self.resolve_link();
         if !self.link_called.get() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -723,6 +779,7 @@ impl WebGLProgram {
         block_index: u32,
         block_binding: u32,
     ) -> WebGLResult<()> {
+        self.resolve_link();
         if block_index as usize >= self.active_uniform_blocks.borrow().len() {
             return Err(WebGLError::InvalidValue);
         }
@@ -743,6 +800,7 @@ impl WebGLProgram {
 
     /// glGetProgramInfoLog
     pub(crate) fn get_info_log(&self) -> WebGLResult<String> {
+        self.resolve_link();
         if self.is_deleted() {
             return Err(WebGLError::InvalidValue);
         }
@@ -781,10 +839,12 @@ impl WebGLProgram {
     }
 
     pub(crate) fn transform_feedback_varyings_length(&self) -> i32 {
+        self.resolve_link();
         self.transform_feedback_varyings_length.get()
     }
 
     pub(crate) fn transform_feedback_buffer_mode(&self) -> i32 {
+        self.resolve_link();
         self.transform_feedback_mode.get()
     }
 
