@@ -6882,20 +6882,28 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             } else {
                 program.transform_feedback_varyings_length() as usize
             };
-        // WebGL 2.0 5.36: nor may one buffer be bound to two of those binding points.
-        let mut buffers = Vec::with_capacity(buffers_needed);
-        for binding in self
+        if self
             .indexed_transform_feedback_buffer_bindings
             .iter()
             .take(buffers_needed)
+            .any(|binding| binding.buffer.get().is_none())
         {
-            match binding.buffer.get() {
-                Some(buffer) if !buffers.contains(&buffer.id()) => buffers.push(buffer.id()),
-                _ => {
-                    self.base.webgl_error(InvalidOperation);
-                    return;
-                },
+            self.base.webgl_error(InvalidOperation);
+            return;
+        }
+        // WebGL 2.0 5.36: nor may one buffer be bound to two of the object's binding points,
+        // including ones the program does not record into.
+        let mut buffers = Vec::new();
+        for buffer in self
+            .indexed_transform_feedback_buffer_bindings
+            .iter()
+            .filter_map(|binding| binding.buffer.get())
+        {
+            if buffers.contains(&buffer.id()) {
+                self.base.webgl_error(InvalidOperation);
+                return;
             }
+            buffers.push(buffer.id());
         }
         self.with_current_transform_feedback(|tf| tf.begin(&self.base, primitiveMode));
     }
