@@ -24,3 +24,24 @@ pub(crate) fn ensure_blob_referenced_by_url_is_kept_alive(
         },
     }
 }
+
+/// Like [`ensure_blob_referenced_by_url_is_kept_alive`], for a blob URL owned by `origin`
+/// rather than by `global` (a worklet module is fetched for the document that added it).
+pub(crate) fn ensure_blob_referenced_by_url_is_kept_alive_for_origin(
+    global: &GlobalScope,
+    origin: servo_url::ImmutableOrigin,
+    url: ServoUrl,
+) -> UrlWithBlobClaim {
+    match UrlWithBlobClaim::for_url(url) {
+        Ok(lock) => lock,
+        Err(url) => {
+            let token = BlobResolver {
+                origin,
+                resource_threads: global.resource_threads(),
+            }
+            .acquire_blob_token_for(&url);
+
+            UrlWithBlobClaim::new(url, token)
+        },
+    }
+}
