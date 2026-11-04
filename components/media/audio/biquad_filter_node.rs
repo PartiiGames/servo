@@ -210,7 +210,10 @@ pub fn biquad_coefficients(
         f0
     };
 
-    let normalized = f0 / fs;
+    // Normalized to Nyquist (as the spec's limits are): 1 is fs / 2. Normalizing to fs
+    // left the `== 1.` limits unreachable, so a filter at Nyquist got poles on the unit
+    // circle (a band-pass at 0.5 * fs rang and grew instead of outputting 0).
+    let normalized = f0 / (fs / 2.);
     let a = 10.0_f64.powf(g / 40.);
 
     // the boundary values sometimes need limits to
@@ -274,7 +277,7 @@ pub fn biquad_coefficients(
         },
     }
 
-    let omega0 = 2. * PI * normalized;
+    let omega0 = PI * normalized;
     let sin_omega = omega0.sin();
     let cos_omega = omega0.cos();
     let alpha_q = sin_omega / (2. * q);
@@ -470,5 +473,20 @@ mod tests {
         assert!((mag[1] - 10f32.powf(1. / 20.)).abs() < 1e-3, "{}", mag[1]);
         assert!(mag[2] < 1e-6, "{}", mag[2]);
         assert!(mag[3].is_nan() && mag[4].is_nan());
+    }
+
+    #[test]
+    fn filters_at_nyquist_take_the_limits() {
+        let fs = 44100.;
+        // biquad-automation.html: a band-pass detuned past Nyquist outputs nothing.
+        let c = biquad_coefficients(FilterType::BandPass, 4400., 12000., 1., 0., fs);
+        assert_eq!(c, [0., 0., 0., 0., 0.]);
+        let c = biquad_coefficients(FilterType::LowPass, fs / 2., 0., 1., 0., fs);
+        assert_eq!(c, [1., 0., 0., 0., 0.]);
+        // Below Nyquist the coefficients are unchanged: w0 = 2 pi f0 / fs.
+        let c = biquad_coefficients(FilterType::BandPass, 1000., 0., 1., 0., fs);
+        let w0 = 2. * PI * 1000. / fs;
+        let alpha = w0.sin() / 2.;
+        assert!((c[0] - alpha / (1. + alpha)).abs() < 1e-12, "{:?}", c);
     }
 }
