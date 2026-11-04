@@ -210,6 +210,37 @@ pub(crate) fn invalidate_for_snapshots<E: TElement>(
     !take_invalidated().is_empty()
 }
 
+/// Invalidate `:has()` anchors for elements that changed but have no style data (inside
+/// display: none): without a snapshot, treat each as if it had just been appended (all of its
+/// dependencies). Layout-time, like [`invalidate_for_snapshots`].
+pub(crate) fn invalidate_for_unstyled_changes<E: TElement>(
+    stylist: &Stylist,
+    elements: impl Iterator<Item = E>,
+) -> bool {
+    for element in elements {
+        let inherited =
+            inherited_search_direction(element.traversal_parent(), prev_sibling_element(element));
+        if inherited.is_empty() {
+            continue;
+        }
+        let invalidator = RelativeSelectorInvalidator {
+            element,
+            quirks_mode: stylist.quirks_mode(),
+            snapshot_table: None,
+            invalidated: invalidated_at::<E>,
+            sibling_traversal_map: SiblingTraversalMap::default(),
+            _marker: PhantomData,
+        };
+        invalidator.invalidate_relative_selectors_for_dom_mutation(
+            false,
+            stylist,
+            inherited,
+            DomMutationOperation::Append,
+        );
+    }
+    !take_invalidated().is_empty()
+}
+
 /// The relative selector search directions an element inherits from its parent and previous
 /// sibling (Gecko's `inherit_relative_selector_search_direction`).
 fn inherited_search_direction<E: TElement>(

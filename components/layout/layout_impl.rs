@@ -1370,6 +1370,12 @@ impl LayoutThread {
                     .elements_with_snapshot
                     .iter()
                     .map(|element| unsafe { element.dangerous_style_element() }),
+            ) | has_invalidation::invalidate_for_unstyled_changes(
+                &self.stylist,
+                _snapshot_setter
+                    .unstyled_with_changes
+                    .iter()
+                    .map(|element| unsafe { element.dangerous_style_element() }),
             );
         let restyle_whole_document = restyle_whole_document || has_invalidated;
 
@@ -2061,6 +2067,9 @@ impl Debug for LayoutFontMetricsProvider {
 
 struct SnapshotSetter<'dom> {
     elements_with_snapshot: Vec<ServoLayoutElement<'dom>>,
+    /// Partii: elements whose attributes or state changed but that have no style data (inside
+    /// display: none); their snapshots are dropped, but `:has()` may still depend on them.
+    unstyled_with_changes: Vec<ServoLayoutElement<'dom>>,
 }
 
 impl SnapshotSetter<'_> {
@@ -2074,6 +2083,7 @@ impl SnapshotSetter<'_> {
             .map(|r| unsafe { ServoLayoutNode::new(&r.0).as_element().unwrap() })
             .collect();
 
+        let mut unstyled_with_changes = Vec::new();
         for (element, restyle) in restyles {
             let element = unsafe { ServoLayoutNode::new(&element).as_element().unwrap() };
 
@@ -2084,6 +2094,10 @@ impl SnapshotSetter<'_> {
                 .map(|data| data.element_data.borrow_mut())
             else {
                 element.unset_snapshot_flags();
+                // Partii: still matters to `:has()` (a display: none descendant can match one).
+                if restyle.snapshot.is_some() {
+                    unstyled_with_changes.push(element);
+                }
                 continue;
             };
 
@@ -2099,6 +2113,7 @@ impl SnapshotSetter<'_> {
         }
         Self {
             elements_with_snapshot,
+            unstyled_with_changes,
         }
     }
 }
