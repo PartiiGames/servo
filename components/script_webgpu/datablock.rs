@@ -31,12 +31,27 @@ fn range_overlap<T: std::cmp::PartialOrd>(range1: &Range<T>, range2: &Range<T>) 
 }
 
 impl DataBlock {
-    pub(crate) fn new_zeroed(size: usize) -> Self {
-        let data = vec![0; size];
-        Self {
+    /// A zeroed block of `size` bytes, or None if it can't be allocated. Buffer sizes come
+    /// from content (up to 2^53), so a failed allocation must be an error, not an abort.
+    /// alloc_zeroed lets the OS hand out zero pages lazily, as `vec![0; n]` does.
+    pub(crate) fn try_new_zeroed(size: usize) -> Option<Self> {
+        let data = if size == 0 {
+            Vec::new()
+        } else {
+            let layout = std::alloc::Layout::array::<u8>(size).ok()?;
+            // SAFETY: the layout has a non-zero size.
+            let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+            if ptr.is_null() {
+                return None;
+            }
+            // SAFETY: `ptr` was allocated by the global allocator with the layout of
+            // `[u8; size]`, and all `size` bytes are initialized (zeroed).
+            unsafe { Vec::from_raw_parts(ptr, size, size) }
+        };
+        Some(Self {
             data: Arc::new(data.into_boxed_slice()),
             data_views: Vec::new(),
-        }
+        })
     }
 
     /// Panics if there is any active view or src data is not same length

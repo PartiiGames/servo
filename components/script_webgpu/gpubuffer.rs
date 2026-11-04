@@ -62,8 +62,12 @@ impl ActiveBufferMapping {
         let size: usize = size
             .try_into()
             .map_err(|_| Error::Range(c"Over usize".to_owned()))?;
+        // Step 3: "If allocation fails, throw a RangeError."
+        let Some(data) = DataBlock::try_new_zeroed(size) else {
+            return Err(Error::Range(c"Failed to allocate the buffer mapping".to_owned()));
+        };
         Ok(RootedTraceableBox::new(Self {
-            data: DataBlock::new_zeroed(size),
+            data,
             mode,
             range,
         }))
@@ -179,6 +183,17 @@ where
             usage: BufferUsages::from_bits_retain(descriptor.usage),
             mapped_at_creation: descriptor.mappedAtCreation,
         };
+        // Initialize the active buffer mapping first: it throws a RangeError if it can't be
+        // allocated, and then no buffer may be created on the device timeline.
+        let mapping = if descriptor.mappedAtCreation {
+            Some(ActiveBufferMapping::new(
+                GPUMapModeConstants::WRITE,
+                0..descriptor.size,
+            )?)
+        } else {
+            None
+        };
+
         let id = <D::GPUDevice as DomGlobalGeneric<D>>::global_from_reflector(device)
             .global_wgpu_id_hub()
             .create_buffer_id();
@@ -194,14 +209,6 @@ where
             .expect("Failed to create WebGPU buffer");
 
         let buffer = WebGPUBuffer(id);
-        let mapping = if descriptor.mappedAtCreation {
-            Some(ActiveBufferMapping::new(
-                GPUMapModeConstants::WRITE,
-                0..descriptor.size,
-            )?)
-        } else {
-            None
-        };
 
         let global = <D::GPUDevice as DomGlobalGeneric<D>>::global_from_reflector(device);
         Ok(GPUBuffer::new(
