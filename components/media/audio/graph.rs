@@ -378,6 +378,15 @@ impl AudioGraph {
         // the destinations.
         let mut roots: SmallVec<[NodeIndex<DefaultIx>; 4]> =
             self.dests.iter().map(|d| d.0).collect();
+        // AnalyserNodes are processed even when nothing downstream pulls from them: a page may
+        // connect a source to an analyser only to read it (Tone.js meters, the j9 probes). The
+        // rendering loop orders all of the context's nodes, not only those that reach the
+        // destination.
+        for ix in self.graph.node_indices() {
+            if self.graph[ix].node.borrow().node_type() == AudioNodeType::AnalyserNode {
+                roots.push(ix);
+            }
+        }
         for breaker in &cycle_breakers {
             for edge in self.graph.edges_directed(*breaker, Direction::Incoming) {
                 roots.push(edge.source());
@@ -822,6 +831,42 @@ mod tests {
         assert_eq!(out[384], 0.25);
         let nonzero = out.iter().filter(|v| **v != 0.).count();
         assert_eq!(nonzero, 4, "{:?}", out.iter().enumerate().filter(|(_, v)| **v != 0.).collect::<Vec<_>>());
+    }
+
+    /// Stands in for an AnalyserNode: counts the non-silent blocks it sees.
+    #[derive(AudioNodeCommon)]
+    struct Meter {
+        channel_info: ChannelInfo,
+        seen: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    // The graph is single-threaded in these tests; Rc is fine for the counter.
+    unsafe impl Send for Meter {}
+
+    impl AudioNodeEngine for Meter {
+        fn node_type(&self) -> AudioNodeType {
+            AudioNodeType::AnalyserNode
+        }
+        fn process(&mut self, inputs: Chunk, _: &BlockInfo) -> Chunk {
+            if !inputs.blocks[0].is_silence() {
+                self.seen.set(self.seen.get() + 1);
+            }
+            inputs
+        }
+    }
+
+    #[test]
+    fn analyser_not_connected_to_the_destination_is_processed() {
+        let mut graph = AudioGraph::new(2);
+        let src = graph.add_node(impulse());
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let meter = graph.add_node(Box::new(Meter {
+            channel_info: ChannelInfo::default(),
+            seen: seen.clone(),
+        }));
+        graph.add_edge(src.output(0), meter.input(0));
+        render(&mut graph, 2);
+        assert_eq!(seen.get(), 1);
     }
 
     #[test]
