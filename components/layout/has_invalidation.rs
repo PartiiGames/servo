@@ -34,6 +34,11 @@ thread_local! {
     /// The elements the invalidator invalidated during the current call (anchors, or the parent
     /// of invalidated siblings).
     static INVALIDATED: RefCell<Vec<OpaqueNode>> = const { RefCell::new(Vec::new()) };
+    /// Whether the current call comes from script (a DOM mutation). Then script marks the
+    /// returned elements dirty (Node::dirty keeps the document's dirty root right), and layout
+    /// must not set dirty-descendant bits itself: script's dirty-root walk stops at a bit that's
+    /// already set, so the dirty root would miss the anchor (and its new, unstyled children).
+    static FROM_SCRIPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether any stylesheet in use has a `:has()` selector (so relative selector invalidation is
@@ -73,10 +78,19 @@ fn invalidated_at<E: TElement>(element: E, result: &InvalidationResult) {
     } else {
         element
     };
-    if result.has_invalidated_descendants() {
-        unsafe { marked.set_dirty_descendants() };
+    if FROM_SCRIPT.with(|from_script| from_script.get()) {
+        // Script marks `marked` dirty; descendants the invalidator touched are restyled with it.
+        if result.has_invalidated_descendants() {
+            if let Some(mut data) = marked.mutate_data() {
+                data.hint.insert(RestyleHint::restyle_subtree());
+            }
+        }
+    } else {
+        if result.has_invalidated_descendants() {
+            unsafe { marked.set_dirty_descendants() };
+        }
+        mark_ancestors_dirty(marked);
     }
-    mark_ancestors_dirty(marked);
     INVALIDATED.with(|invalidated| invalidated.borrow_mut().push(marked.as_node().opaque()));
 }
 
@@ -85,7 +99,9 @@ fn invalidate_subtree<E: TElement>(element: E) {
     if let Some(mut data) = element.mutate_data() {
         data.hint.insert(RestyleHint::restyle_subtree());
     }
-    mark_ancestors_dirty(element);
+    if !FROM_SCRIPT.with(|from_script| from_script.get()) {
+        mark_ancestors_dirty(element);
+    }
     INVALIDATED.with(|invalidated| invalidated.borrow_mut().push(element.as_node().opaque()));
 }
 
@@ -241,6 +257,13 @@ fn next_sibling_element<E: TElement>(element: E) -> Option<E> {
 /// the sibling side-effect special case: a sibling-relative `:has()` across the insertion point
 /// restyles the parent's subtree instead.)
 pub(crate) fn invalidate_for_insertion<E: TElement>(stylist: &Stylist, element: E) -> Vec<OpaqueNode> {
+    FROM_SCRIPT.with(|from_script| from_script.set(true));
+    let result = invalidate_for_insertion_inner(stylist, element);
+    FROM_SCRIPT.with(|from_script| from_script.set(false));
+    result
+}
+
+fn invalidate_for_insertion_inner<E: TElement>(stylist: &Stylist, element: E) -> Vec<OpaqueNode> {
     let parent = element.traversal_parent();
     let prev_sibling = prev_sibling_element(element);
     let inherited = inherited_search_direction(parent, prev_sibling);
@@ -276,6 +299,13 @@ pub(crate) fn invalidate_for_insertion<E: TElement>(stylist: &Stylist, element: 
 /// elements script must mark dirty. (Gecko's MaybeInvalidateRelativeSelectorForRemoval, with the
 /// same simplification as insertion for the sibling side effect.)
 pub(crate) fn invalidate_for_removal<E: TElement>(stylist: &Stylist, element: E) -> Vec<OpaqueNode> {
+    FROM_SCRIPT.with(|from_script| from_script.set(true));
+    let result = invalidate_for_removal_inner(stylist, element);
+    FROM_SCRIPT.with(|from_script| from_script.set(false));
+    result
+}
+
+fn invalidate_for_removal_inner<E: TElement>(stylist: &Stylist, element: E) -> Vec<OpaqueNode> {
     let search_direction = element.relative_selector_search_direction();
     if search_direction.is_empty() {
         return Vec::new();
