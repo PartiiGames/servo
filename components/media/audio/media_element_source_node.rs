@@ -70,11 +70,14 @@ impl AudioNodeEngine for MediaElementSourceNode {
             return inputs;
         }
 
-        let len = buffers[0].len();
+        // The renderer fills each channel separately, so they can differ in length for a
+        // moment: copy only what every channel has (the shortest one; indexing past it
+        // panicked the render thread in cors-check / no-cors).
+        let len = buffers.iter().map(Vec::len).min().unwrap_or(0);
 
         let frames_per_block = FRAMES_PER_BLOCK.0 as usize;
         let samples_to_copy = if self.playback_offset + frames_per_block > len {
-            len - self.playback_offset
+            len.saturating_sub(self.playback_offset)
         } else {
             frames_per_block
         };
@@ -138,5 +141,29 @@ impl AudioRenderer for MediaElementSourceNodeRenderer {
             },
         };
         self.buffers.lock().unwrap()[channel - 1].extend_from_slice((*sample).as_ref());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channels_of_different_lengths_do_not_panic() {
+        let mut node = MediaElementSourceNode::new(ChannelInfo::default());
+        *node.buffers.lock().unwrap() = vec![vec![0.5; 12288], vec![0.25; 12216]];
+        let info = BlockInfo {
+            sample_rate: 48000.,
+            frame: Tick(0),
+            time: 0.,
+        };
+        let mut frames = 0;
+        for _ in 0..100 {
+            let out = node.process(Chunk::default(), &info);
+            frames = node.playback_offset;
+            assert_eq!(out.len(), 1);
+        }
+        // Only what both channels have is played.
+        assert_eq!(frames, 12216);
     }
 }
