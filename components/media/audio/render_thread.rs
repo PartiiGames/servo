@@ -59,6 +59,9 @@ fn run_exit_hooks() {
 
 pub type SinkEosCallback = Box<dyn Fn(Box<dyn AsRef<[f32]>>) + Send + Sync + 'static>;
 
+/// Called on the render thread when an OfflineAudioContext reaches a scheduled suspension.
+pub struct SuspendCallback(pub Box<dyn FnOnce() + Send + 'static>);
+
 #[derive(MallocSizeOf)]
 pub enum AudioRenderThreadMsg {
     CreateNode(AudioNodeInit, Sender<Option<NodeId>>, ChannelInfo),
@@ -66,6 +69,9 @@ pub enum AudioRenderThreadMsg {
     MessageNode(NodeId, AudioNodeMessage),
     Resume(Sender<StateChangeResult>),
     Suspend(Sender<StateChangeResult>),
+    /// OfflineAudioContext.suspend(): suspend before rendering the quantum that starts at
+    /// this frame (a multiple of the render quantum), then call back.
+    SuspendAt(u64, #[ignore_malloc_size_of = "Fn"] SuspendCallback),
     Close(Sender<StateChangeResult>),
     SinkNeedData,
     GetCurrentTime(Sender<f64>),
@@ -170,6 +176,8 @@ pub struct AudioRenderThread {
     pub current_time: f64,
     pub current_frame: Tick,
     pub muted: bool,
+    /// Scheduled offline suspensions, by frame.
+    suspend_points: std::collections::BTreeMap<u64, SuspendCallback>,
 }
 
 impl AudioRenderThread {
@@ -203,6 +211,7 @@ impl AudioRenderThread {
             current_time: 0.,
             current_frame: Tick(0),
             muted: false,
+            suspend_points: Default::default(),
         })
     }
 
@@ -386,6 +395,9 @@ impl AudioRenderThread {
                     context.set_mute(val);
                 },
                 AudioRenderThreadMsg::RunTask(task) => task(),
+                AudioRenderThreadMsg::SuspendAt(frame, callback) => {
+                    context.suspend_points.insert(frame, callback);
+                },
             };
 
             break_loop
@@ -413,6 +425,15 @@ impl AudioRenderThread {
 
                 if self.state == ProcessingState::Suspended {
                     // Bail out if we just suspended processing.
+                    continue;
+                }
+
+                // OfflineAudioContext.suspend(): stop before this quantum, and tell the
+                // control thread, which resolves the promise and may change the graph
+                // before it resumes us.
+                if let Some(callback) = self.suspend_points.remove(&self.current_frame.0) {
+                    let _ = self.suspend();
+                    (callback.0)();
                     continue;
                 }
 

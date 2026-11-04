@@ -213,7 +213,7 @@ impl BaseAudioContext {
         self.state.get() == AudioContextState::Suspended
     }
 
-    fn push_pending_resume_promise(&self, promise: &RootedPromise) {
+    pub(crate) fn push_pending_resume_promise(&self, promise: &RootedPromise) {
         self.pending_resume_promises
             .borrow_mut()
             .push(promise.to_traced());
@@ -312,6 +312,17 @@ impl BaseAudioContext {
                         this.root().fulfill_in_flight_resume_promises(cx, || {})
                     }));
             },
+        }
+    }
+
+    /// Set the control thread state and, if it changed, fire `statechange`.
+    pub(crate) fn set_state_and_notify(&self, state: AudioContextState) {
+        if self.state.get() != state {
+            self.state.set(state);
+            self.global()
+                .task_manager()
+                .dom_manipulation_task_source()
+                .queue_simple_event(self.upcast(), atom!("statechange"));
         }
     }
 

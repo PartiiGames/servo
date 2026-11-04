@@ -13,12 +13,14 @@ use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_base::id::PipelineId;
+use servo_media::audio::block::FRAMES_PER_BLOCK_USIZE;
 use servo_media::audio::context::OfflineAudioContextOptions as ServoMediaOfflineAudioContextOptions;
 
 use crate::dom::audio::audiobuffer::{AudioBuffer, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
 use crate::dom::audio::audionode::MAX_CHANNEL_COUNT;
 use crate::dom::audio::baseaudiocontext::{BaseAudioContext, BaseAudioContextOptions};
 use crate::dom::audio::offlineaudiocompletionevent::OfflineAudioCompletionEvent;
+use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::AudioContextState;
 use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContext_Binding::BaseAudioContextMethods;
 use crate::dom::bindings::codegen::Bindings::OfflineAudioContextBinding::{
     OfflineAudioContextMethods, OfflineAudioContextOptions,
@@ -26,7 +28,7 @@ use crate::dom::bindings::codegen::Bindings::OfflineAudioContextBinding::{
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::refcounted::Trusted;
+use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
@@ -40,6 +42,8 @@ pub(crate) struct OfflineAudioContext {
     length: u32,
     rendering_started: Cell<bool>,
     pending_rendering_promise: DomRefCell<Option<TracedPromise>>,
+    /// Frames with a scheduled suspend() (no two at the same quantized frame).
+    suspend_frames: DomRefCell<Vec<u64>>,
 }
 
 impl OfflineAudioContext {
@@ -65,6 +69,7 @@ impl OfflineAudioContext {
             length,
             rendering_started: Cell::new(false),
             pending_rendering_promise: Default::default(),
+            suspend_frames: Default::default(),
         })
     }
 
@@ -142,6 +147,7 @@ impl OfflineAudioContextMethods<crate::DomTypeHolder> for OfflineAudioContext {
             return promise;
         }
         self.rendering_started.set(true);
+        self.context.set_state_and_notify(AudioContextState::Running);
 
         *self.pending_rendering_promise.safe_borrow_mut(cx.no_gc()) = Some(promise.to_traced());
 
@@ -225,6 +231,73 @@ impl OfflineAudioContextMethods<crate::DomTypeHolder> for OfflineAudioContext {
             );
         }
 
+        promise
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-offlineaudiocontext-resume>
+    fn Resume(&self, cx: &mut CurrentRealm) -> RootedPromise {
+        let promise = Promise::new_in_realm(cx);
+        // > Abort these steps and reject promise with InvalidStateError when any of following
+        // > conditions is true: the [[control thread state]] is closed; [[rendering started]]
+        // > is false.
+        if self.context.State() == AudioContextState::Closed || !self.rendering_started.get() {
+            promise.reject_error(cx, Error::InvalidState(None));
+            return promise;
+        }
+        if self.context.State() == AudioContextState::Running {
+            promise.resolve_native(cx, &());
+            return promise;
+        }
+        // > Set the [[control thread state]] to running. Queue a control message to resume.
+        self.context.push_pending_resume_promise(&promise);
+        self.context.resume();
+        promise
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-offlineaudiocontext-suspend>
+    fn Suspend(&self, cx: &mut CurrentRealm, suspend_time: Finite<f64>) -> RootedPromise {
+        let promise = Promise::new_in_realm(cx);
+        // > the specified suspension time will be rounded up to the nearest render quantum
+        // > boundary.
+        let quantum = FRAMES_PER_BLOCK_USIZE as f64;
+        let frame = (*suspend_time * *self.context.SampleRate() as f64 / quantum).ceil() * quantum;
+        let current_frame = *self.context.CurrentTime() * *self.context.SampleRate() as f64;
+        // > If the quantized frame number is negative or is less than or equal to the current
+        // > time or is greater than or equal to the total render duration or is scheduled by
+        // > another suspend for the same time, then the promise is rejected with
+        // > InvalidStateError.
+        if *suspend_time < 0. ||
+            frame <= current_frame.round() ||
+            frame >= self.length as f64 ||
+            self.suspend_frames.borrow().contains(&(frame as u64)) ||
+            self.context.State() == AudioContextState::Closed
+        {
+            promise.reject_error(cx, Error::InvalidState(None));
+            return promise;
+        }
+        let frame = frame as u64;
+        self.suspend_frames.borrow_mut().push(frame);
+
+        let trusted_promise = TrustedPromise::new(&promise);
+        let this = Trusted::new(self);
+        let task_source = self
+            .global()
+            .task_manager()
+            .dom_manipulation_task_source()
+            .to_sendable();
+        self.context.audio_context_impl().lock().unwrap().suspend_at(
+            frame,
+            Box::new(move || {
+                task_source.queue(task!(offline_suspend: move |cx| {
+                    let this = this.root();
+                    this.suspend_frames.borrow_mut().retain(|f| *f != frame);
+                    // The rendering thread is suspended: the control thread state follows,
+                    // then the promise resolves.
+                    this.context.set_state_and_notify(AudioContextState::Suspended);
+                    trusted_promise.root(cx).resolve_native(cx, &());
+                }));
+            }),
+        );
         promise
     }
 }

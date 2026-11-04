@@ -15,7 +15,7 @@ use crate::audio_node::{AudioNodeInit, AudioNodeMessage, ChannelInfo};
 use crate::decoder::{AudioDecoder, AudioDecoderCallbacks, AudioDecoderOptions};
 use crate::graph::{AudioGraph, InputPort, NodeId, OutputPort, PortId};
 use crate::render_thread::{
-    AudioRenderThread, AudioRenderThreadMsg, RenderThreadTask, SinkEosCallback,
+    AudioRenderThread, AudioRenderThreadMsg, RenderThreadTask, SinkEosCallback, SuspendCallback,
 };
 use crate::sink::AudioSinkError;
 
@@ -334,6 +334,14 @@ impl AudioContext {
         let _ = self
             .sender
             .send(AudioRenderThreadMsg::SetSinkEosCallback(callback));
+    }
+
+    /// OfflineAudioContext.suspend(): suspend rendering before the render quantum starting at
+    /// `frame` and call `callback` (on the render thread) once suspended.
+    pub fn suspend_at(&self, frame: u64, callback: Box<dyn FnOnce() + Send + 'static>) {
+        let _ = self
+            .sender
+            .send(AudioRenderThreadMsg::SuspendAt(frame, SuspendCallback(callback)));
     }
 
     fn set_mute(&self, val: bool) {
