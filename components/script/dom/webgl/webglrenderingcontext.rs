@@ -475,6 +475,19 @@ impl WebGLRenderingContext {
         }
     }
 
+    /// WebGL 2 copies read the read framebuffer's read buffer: with nothing attached there (or
+    /// READ_BUFFER NONE), GL ES 3.0 makes the copy INVALID_OPERATION. WebGL 1 framebuffers
+    /// without colour are already rejected by `validate_framebuffer`.
+    pub(crate) fn validate_read_buffer_image(&self) -> WebGLResult<()> {
+        if self.webgl_version() != WebGLVersion::WebGL2 {
+            return Ok(());
+        }
+        match self.bound_read_framebuffer.get() {
+            Some(fb) if fb.attachment(fb.read_buffer()).is_none() => Err(InvalidOperation),
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn validate_ownership<T>(&self, object: &T) -> WebGLResult<()>
     where
         T: DerivedFrom<WebGLObject>,
@@ -2950,6 +2963,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         border: i32,
     ) {
         handle_potential_webgl_error!(self, self.validate_framebuffer(), return);
+        handle_potential_webgl_error!(self, self.validate_read_buffer_image(), return);
 
         let validator = CommonTexImage2DValidator::new(
             self,
@@ -3079,6 +3093,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         height: i32,
     ) {
         handle_potential_webgl_error!(self, self.validate_framebuffer(), return);
+        handle_potential_webgl_error!(self, self.validate_read_buffer_image(), return);
 
         // NB: We use a dummy (valid) format and border in order to reuse the
         // common validations, but this should have its own validator.

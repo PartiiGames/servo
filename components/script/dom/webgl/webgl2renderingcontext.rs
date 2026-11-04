@@ -5538,6 +5538,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         height: i32,
     ) {
         handle_potential_webgl_error!(self.base, self.base.validate_framebuffer(), return);
+        handle_potential_webgl_error!(self.base, self.base.validate_read_buffer_image(), return);
         let target = match TexImageTarget::from_gl_constant(target) {
             Some(target) if target.dimensions() == 3 => target,
             _ => return self.base.webgl_error(InvalidEnum),
