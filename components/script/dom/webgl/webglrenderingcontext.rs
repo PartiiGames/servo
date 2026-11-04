@@ -40,7 +40,7 @@ use crate::canvas_context::{CanvasContext, HTMLCanvasElementOrOffscreenCanvas};
 use crate::dom::RootedPromise;
 use crate::dom::bindings::buffer_source::{
     array_buffer_view_bytes, array_buffer_view_bytes_mut, create_buffer_source,
-    get_buffer_source_slice,
+    get_buffer_source_slice, typed_array_to_vec,
 };
 use crate::dom::bindings::codegen::Bindings::ANGLEInstancedArraysBinding::ANGLEInstancedArraysConstants;
 use crate::dom::bindings::codegen::Bindings::EXTBlendMinmaxBinding::EXTBlendMinmaxConstants;
@@ -1510,7 +1510,7 @@ impl WebGLRenderingContext {
         uniform_location: &WebGLUniformLocation,
     ) -> WebGLResult<Vec<i32>> {
         let vec = match vec {
-            Int32ArrayOrLongSequence::Int32Array(v) => v.to_vec().unwrap_or_default(),
+            Int32ArrayOrLongSequence::Int32Array(v) => typed_array_to_vec(&*v),
             Int32ArrayOrLongSequence::LongSequence(v) => v,
         };
         self.uniform_vec_section::<i32>(vec, offset, length, uniform_size, uniform_location)
@@ -1525,9 +1525,7 @@ impl WebGLRenderingContext {
         uniform_location: &WebGLUniformLocation,
     ) -> WebGLResult<Vec<f32>> {
         let vec = match vec {
-            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
-                v.to_vec().unwrap_or_default()
-            },
+            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => typed_array_to_vec(&*v),
             Float32ArrayOrUnrestrictedFloatSequence::UnrestrictedFloatSequence(v) => v,
         };
         self.uniform_vec_section::<f32>(vec, offset, length, uniform_size, uniform_location)
@@ -1581,9 +1579,7 @@ impl WebGLRenderingContext {
         uniform_location: &WebGLUniformLocation,
     ) -> WebGLResult<Vec<f32>> {
         let vec = match vec {
-            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
-                v.to_vec().unwrap_or_default()
-            },
+            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => typed_array_to_vec(&*v),
             Float32ArrayOrUnrestrictedFloatSequence::UnrestrictedFloatSequence(v) => v,
         };
         if transpose {
@@ -4505,9 +4501,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
         let values = match v {
-            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
-                v.to_vec().unwrap_or_default()
-            },
+            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => typed_array_to_vec(&*v),
             Float32ArrayOrUnrestrictedFloatSequence::UnrestrictedFloatSequence(v) => v,
         };
         if values.is_empty() {
@@ -4530,9 +4524,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
         let values = match v {
-            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
-                v.to_vec().unwrap_or_default()
-            },
+            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => typed_array_to_vec(&*v),
             Float32ArrayOrUnrestrictedFloatSequence::UnrestrictedFloatSequence(v) => v,
         };
         if values.len() < 2 {
@@ -4555,9 +4547,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
         let values = match v {
-            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
-                v.to_vec().unwrap_or_default()
-            },
+            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => typed_array_to_vec(&*v),
             Float32ArrayOrUnrestrictedFloatSequence::UnrestrictedFloatSequence(v) => v,
         };
         if values.len() < 3 {
@@ -4580,9 +4570,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         v: Float32ArrayOrUnrestrictedFloatSequence,
     ) {
         let values = match v {
-            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
-                v.to_vec().unwrap_or_default()
-            },
+            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => typed_array_to_vec(&*v),
             Float32ArrayOrUnrestrictedFloatSequence::UnrestrictedFloatSequence(v) => v,
         };
         if values.len() < 4 {

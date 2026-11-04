@@ -191,6 +191,32 @@ pub fn array_buffer_view_bytes_mut<'a>(
     unsafe { std::slice::from_raw_parts_mut(data, len) }
 }
 
+/// Copies a typed array's elements out, whether or not a SharedArrayBuffer backs it (mozjs's
+/// `TypedArray::to_vec` asserts it doesn't). Typed arrays are ArrayBufferViews, so their bytes
+/// come the same way as `array_buffer_view_bytes`; the data is aligned for the element type.
+pub fn typed_array_to_vec<T, S>(array: &TypedArray<T, S>) -> Vec<T::Element>
+where
+    T: TypedArrayElement,
+    T::Element: Copy,
+    S: JSObjectStorage,
+{
+    let (mut len, mut shared, mut data) = (0usize, false, ptr::null_mut());
+    unsafe {
+        js::jsapi::GetArrayBufferViewLengthAndData(
+            array.underlying_object().as_raw(),
+            &mut len,
+            &mut shared,
+            &mut data,
+        );
+    }
+    if data.is_null() {
+        return Vec::new();
+    }
+    let count = len / std::mem::size_of::<T::Element>().max(1);
+    // SAFETY: a typed array's data is `count` aligned elements; no JS runs during the copy.
+    unsafe { std::slice::from_raw_parts(data as *const T::Element, count).to_vec() }
+}
+
 /// The byte length of an ArrayBufferView, shared or not.
 pub fn array_buffer_view_byte_len(view: &ArrayBufferView) -> usize {
     array_buffer_view_raw(view).1

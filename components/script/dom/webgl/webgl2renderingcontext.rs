@@ -33,7 +33,7 @@ use crate::canvas_context::CanvasContext;
 use crate::dom::RootedPromise;
 use crate::dom::bindings::buffer_source::{
     array_buffer_view_byte_len, array_buffer_view_bytes, array_buffer_view_bytes_mut,
-    create_buffer_source,
+    create_buffer_source, typed_array_to_vec,
 };
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::{
     WebGL2RenderingContextConstants as constants, WebGL2RenderingContextMethods,
@@ -600,7 +600,7 @@ impl WebGL2RenderingContext {
         uniform_location: &WebGLUniformLocation,
     ) -> WebGLResult<Vec<u32>> {
         let vec = match vec {
-            Uint32ArrayOrUnsignedLongSequence::Uint32Array(v) => v.to_vec().unwrap_or_default(),
+            Uint32ArrayOrUnsignedLongSequence::Uint32Array(v) => typed_array_to_vec(&*v),
             Uint32ArrayOrUnsignedLongSequence::UnsignedLongSequence(v) => v,
         };
         self.base
@@ -4395,7 +4395,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.8>
     fn VertexAttribI4iv(&self, cx: &mut JSContext, index: u32, v: Int32ArrayOrLongSequence) {
         let values = match v {
-            Int32ArrayOrLongSequence::Int32Array(v) => v.to_vec().unwrap_or_default(),
+            Int32ArrayOrLongSequence::Int32Array(v) => typed_array_to_vec(&*v),
             Int32ArrayOrLongSequence::LongSequence(v) => v,
         };
         if values.len() < 4 {
@@ -4417,7 +4417,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         v: Uint32ArrayOrUnsignedLongSequence,
     ) {
         let values = match v {
-            Uint32ArrayOrUnsignedLongSequence::Uint32Array(v) => v.to_vec().unwrap_or_default(),
+            Uint32ArrayOrUnsignedLongSequence::Uint32Array(v) => typed_array_to_vec(&*v),
             Uint32ArrayOrUnsignedLongSequence::UnsignedLongSequence(v) => v,
         };
         if values.len() < 4 {
@@ -6759,9 +6759,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
     ) {
         let array = match values {
-            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => {
-                v.to_vec().unwrap_or_default()
-            },
+            Float32ArrayOrUnrestrictedFloatSequence::Float32Array(v) => typed_array_to_vec(&*v),
             Float32ArrayOrUnrestrictedFloatSequence::UnrestrictedFloatSequence(v) => v,
         };
         self.clear_buffer::<f32>(
@@ -6783,7 +6781,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
     ) {
         let array = match values {
-            Int32ArrayOrLongSequence::Int32Array(v) => v.to_vec().unwrap_or_default(),
+            Int32ArrayOrLongSequence::Int32Array(v) => typed_array_to_vec(&*v),
             Int32ArrayOrLongSequence::LongSequence(v) => v,
         };
         self.clear_buffer::<i32>(
@@ -6805,7 +6803,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         src_offset: u32,
     ) {
         let array = match values {
-            Uint32ArrayOrUnsignedLongSequence::Uint32Array(v) => v.to_vec().unwrap_or_default(),
+            Uint32ArrayOrUnsignedLongSequence::Uint32Array(v) => typed_array_to_vec(&*v),
             Uint32ArrayOrUnsignedLongSequence::UnsignedLongSequence(v) => v,
         };
         self.clear_buffer::<u32>(
