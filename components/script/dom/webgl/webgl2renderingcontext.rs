@@ -1607,6 +1607,44 @@ impl WebGL2RenderingContext {
         (primary, implementation)
     }
 
+    /// WebGL 2.0, 5.22 / GL ES 3.0, 2.11.2: each active sampler must sample a texture of its own
+    /// kind: float samplers a float/normalized texture, isampler / usampler a signed / unsigned
+    /// integer one, and shadow samplers a depth texture whose effective TEXTURE_COMPARE_MODE
+    /// (the bound sampler object's, else the texture's) is COMPARE_REF_TO_TEXTURE. A depth
+    /// texture in that mode is no longer a float texture. Otherwise the draw fails with
+    /// INVALID_OPERATION. Units without a complete texture are left alone.
+    fn validate_sampler_types_for_draw(&self) -> bool {
+        let Some(program) = self.base.current_program() else {
+            return true;
+        };
+        for uniform in program.active_uniforms().iter() {
+            let Some((target, sampler_kind)) = sampler_target_and_kind(uniform.type_) else {
+                continue;
+            };
+            let Some(location) = uniform.location else {
+                continue;
+            };
+            for element in 0..uniform.size.unwrap_or(1).max(1) {
+                let unit = program.sampler_unit(location + element);
+                let Some(texture) = self.base.textures().texture_at(unit, target) else {
+                    continue;
+                };
+                let Some(format) = texture.base_internal_format() else {
+                    continue;
+                };
+                let compare_mode = match self.samplers.get(unit as usize).and_then(|s| s.get()) {
+                    Some(sampler) => sampler.compare_mode(),
+                    None => texture.compare_mode(),
+                };
+                if texture_kind(format, compare_mode) != sampler_kind {
+                    self.base.webgl_error(InvalidOperation);
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// True if UNPACK_FLIP_Y_WEBGL or UNPACK_PREMULTIPLY_ALPHA_WEBGL is set. 3D uploads from a
     /// PIXEL_UNPACK_BUFFER or an ArrayBufferView must then fail with INVALID_OPERATION.
     fn unpack_flip_or_premultiply(&self) -> bool {
@@ -2051,6 +2089,82 @@ struct UnpackLayout {
     first: u64,
     /// Bytes past the start of the source that the upload reads: `first` plus the extent.
     end: u64,
+}
+
+/// The kind of texture a sampler reads, for the draw-time sampler type check.
+#[derive(Clone, Copy, PartialEq)]
+enum SamplerKind {
+    Float,
+    Int,
+    Uint,
+    Shadow,
+}
+
+/// The texture target and kind of a sampler uniform type; None for non-samplers.
+fn sampler_target_and_kind(type_: u32) -> Option<(u32, SamplerKind)> {
+    use SamplerKind::*;
+    Some(match type_ {
+        constants::SAMPLER_2D => (constants::TEXTURE_2D, Float),
+        constants::SAMPLER_3D => (constants::TEXTURE_3D, Float),
+        constants::SAMPLER_CUBE => (constants::TEXTURE_CUBE_MAP, Float),
+        constants::SAMPLER_2D_ARRAY => (constants::TEXTURE_2D_ARRAY, Float),
+        constants::INT_SAMPLER_2D => (constants::TEXTURE_2D, Int),
+        constants::INT_SAMPLER_3D => (constants::TEXTURE_3D, Int),
+        constants::INT_SAMPLER_CUBE => (constants::TEXTURE_CUBE_MAP, Int),
+        constants::INT_SAMPLER_2D_ARRAY => (constants::TEXTURE_2D_ARRAY, Int),
+        constants::UNSIGNED_INT_SAMPLER_2D => (constants::TEXTURE_2D, Uint),
+        constants::UNSIGNED_INT_SAMPLER_3D => (constants::TEXTURE_3D, Uint),
+        constants::UNSIGNED_INT_SAMPLER_CUBE => (constants::TEXTURE_CUBE_MAP, Uint),
+        constants::UNSIGNED_INT_SAMPLER_2D_ARRAY => (constants::TEXTURE_2D_ARRAY, Uint),
+        constants::SAMPLER_2D_SHADOW => (constants::TEXTURE_2D, Shadow),
+        constants::SAMPLER_CUBE_SHADOW => (constants::TEXTURE_CUBE_MAP, Shadow),
+        constants::SAMPLER_2D_ARRAY_SHADOW => (constants::TEXTURE_2D_ARRAY, Shadow),
+        _ => return None,
+    })
+}
+
+/// The kind of sampler a texture with base level `format` can be read with.
+fn texture_kind(format: TexFormat, compare_mode: u32) -> SamplerKind {
+    use TexFormat as F;
+    match format {
+        F::R8i |
+        F::R16i |
+        F::R32i |
+        F::RG8i |
+        F::RG16i |
+        F::RG32i |
+        F::RGB8i |
+        F::RGB16i |
+        F::RGB32i |
+        F::RGBA8i |
+        F::RGBA16i |
+        F::RGBA32i => SamplerKind::Int,
+        F::R8ui |
+        F::R16ui |
+        F::R32ui |
+        F::RG8ui |
+        F::RG16ui |
+        F::RG32ui |
+        F::RGB8ui |
+        F::RGB16ui |
+        F::RGB32ui |
+        F::RGBA8ui |
+        F::RGBA16ui |
+        F::RGBA32ui |
+        F::RGB10A2ui => SamplerKind::Uint,
+        F::DepthComponent |
+        F::DepthStencil |
+        F::DepthComponent16 |
+        F::DepthComponent24 |
+        F::DepthComponent32f |
+        F::Depth24Stencil8 |
+        F::Depth32fStencil8
+            if compare_mode == constants::COMPARE_REF_TO_TEXTURE =>
+        {
+            SamplerKind::Shadow
+        },
+        _ => SamplerKind::Float,
+    }
 }
 
 /// The validated arguments of a WebGL 2 texSubImage2D call.
@@ -3282,6 +3396,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     fn DrawArrays(&self, cx: &mut JSContext, mode: u32, first: i32, count: i32) {
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
+        if !self.validate_sampler_types_for_draw() {
+            return;
+        }
         self.base.DrawArrays(cx, mode, first, count)
     }
 
@@ -3289,6 +3406,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     fn DrawElements(&self, cx: &mut JSContext, mode: u32, count: i32, type_: u32, offset: i64) {
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
+        if !self.validate_sampler_types_for_draw() {
+            return;
+        }
         self.base.DrawElements(cx, mode, count, type_, offset)
     }
 
@@ -5836,6 +5956,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     ) {
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
+        if !self.validate_sampler_types_for_draw() {
+            return;
+        }
         handle_potential_webgl_error!(
             self.base,
             self.base
@@ -5855,6 +5978,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     ) {
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
+        if !self.validate_sampler_types_for_draw() {
+            return;
+        }
         handle_potential_webgl_error!(
             self.base,
             self.base
@@ -5879,6 +6005,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         }
         self.validate_uniform_block_for_draw();
         self.validate_vertex_attribs_for_draw(cx);
+        if !self.validate_sampler_types_for_draw() {
+            return;
+        }
         handle_potential_webgl_error!(
             self.base,
             self.base

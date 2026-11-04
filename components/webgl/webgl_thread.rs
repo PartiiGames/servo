@@ -2832,6 +2832,10 @@ impl WebGLImpl {
                     },
                     type_: active_uniform.utype,
                     bind_index: None,
+                    location: unsafe {
+                        gl.get_uniform_location(program.glow(), &active_uniform.name)
+                    }
+                    .map(|location| location.0 as i32),
                 }
             })
             .collect::<Vec<_>>()

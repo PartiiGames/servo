@@ -1828,6 +1828,11 @@ impl WebGLRenderingContext {
 
             let val = self.uniform_vec_section_int(val, src_offset, src_length, 1, location)?;
 
+            if is_sampler_type(location.type_()) &&
+                let Some(program) = self.current_program.get()
+            {
+                program.set_sampler_units(location.id(), &val);
+            }
             match location.type_() {
                 sampler if is_sampler_type(sampler) => {
                     for &v in val
@@ -3294,6 +3299,20 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                     WebGLFramebufferBindingRequest::Default,
                 ));
             }
+            // WebGL 2 binds READ_FRAMEBUFFER separately: deleting the read framebuffer reverts
+            // it to the default one too (a dangling read binding made readPixels check the
+            // deleted framebuffer's formats).
+            if let Some(bound_object) = self.bound_read_framebuffer.get() &&
+                bound_object.id() == framebuffer.id()
+            {
+                self.bound_read_framebuffer.set(None);
+                if self.webgl_version() == WebGLVersion::WebGL2 {
+                    self.send_command(WebGLCommand::BindFramebuffer(
+                        WebGL2RenderingContextConstants::READ_FRAMEBUFFER,
+                        WebGLFramebufferBindingRequest::Default,
+                    ));
+                }
+            }
             framebuffer.delete(Operation::Infallible)
         }
     }
@@ -4255,6 +4274,11 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                     }
                 },
                 _ => return Err(InvalidOperation),
+            }
+            if is_sampler_type(location.type_()) &&
+                let Some(program) = self.current_program.get()
+            {
+                program.set_sampler_units(location.id(), &[val]);
             }
             self.send_command(WebGLCommand::Uniform1i(location.id(), val));
             Ok(())
@@ -5244,6 +5268,18 @@ impl Textures {
             TexImageTarget::CubeMapNegativeY |
             TexImageTarget::CubeMapPositiveZ |
             TexImageTarget::CubeMapNegativeZ => active_unit.tex_cube_map.get(),
+        }
+    }
+
+    /// The texture bound to `target` (TEXTURE_2D, _CUBE_MAP, _3D, _2D_ARRAY) on unit `unit`.
+    pub(crate) fn texture_at(&self, unit: u32, target: u32) -> Option<DomRoot<WebGLTexture>> {
+        let unit = self.units.get(unit as usize)?;
+        match target {
+            constants::TEXTURE_2D => unit.tex_2d.get(),
+            constants::TEXTURE_CUBE_MAP => unit.tex_cube_map.get(),
+            WebGL2RenderingContextConstants::TEXTURE_2D_ARRAY => unit.tex_2d_array.get(),
+            WebGL2RenderingContextConstants::TEXTURE_3D => unit.tex_3d.get(),
+            _ => None,
         }
     }
 
