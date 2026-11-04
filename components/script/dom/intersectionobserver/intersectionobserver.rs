@@ -523,6 +523,14 @@ impl IntersectionObserver {
         target: &Element,
         maybe_root_bounds: Option<Rect<Au, CSSPixel>>,
     ) -> IntersectionObservationOutput {
+        // Partii: an element inside an inline <svg> has no layout box; its geometry comes from the
+        // SVG (svggeometry), and for the containing block chain the outer <svg> stands in for it.
+        let svg_geometry = crate::dom::svg::svggeometry::svg_geometry(target, false);
+        let chain_target = svg_geometry
+            .as_ref()
+            .map(|geometry| geometry.outer_svg.clone())
+            .unwrap_or_else(|| DomRoot::from_ref(target));
+
         // Step 5
         // > If the intersection root is not the implicit root, and target is not in
         // > the same document as the intersection root, skip to step 11.
@@ -545,7 +553,7 @@ impl IntersectionObserver {
                     .owner_window()
                     .is_containing_block_descendant_query_without_reflow(
                         element.upcast(),
-                        target.upcast(),
+                        chain_target.upcast(),
                     )
                 {
                     return IntersectionObservationOutput::default_skipped();
@@ -556,7 +564,10 @@ impl IntersectionObserver {
 
         // Step 7
         // > Set targetRect to the DOMRectReadOnly obtained by getting the bounding box for target.
-        let maybe_target_rect = target.upcast::<Node>().border_box_without_reflow();
+        let maybe_target_rect = match &svg_geometry {
+            Some(geometry) => Some(geometry.rect),
+            None => target.upcast::<Node>().border_box_without_reflow(),
+        };
 
         // Following the implementation of Gecko, we will skip further processing if these
         // information not available. This would also handle display none element.
@@ -572,13 +583,28 @@ impl IntersectionObserver {
         // Step 8
         // > Let intersectionRect be the result of running the compute the intersection algorithm on
         // > target and observer’s intersection root.
-        let maybe_intersection_rect = compute_the_intersection(
-            target,
-            &root_intersection,
-            root_bounds,
-            target_rect,
-            &self.scroll_margin.borrow(),
-        );
+        let maybe_intersection_rect = match &svg_geometry {
+            // Clip to the SVG viewports and clip paths first, then walk up from the outer <svg>.
+            Some(geometry) => geometry
+                .clip
+                .and_then(|clip| intersect_rectangle(&target_rect, &clip))
+                .and_then(|clipped| {
+                    compute_the_intersection(
+                        &chain_target,
+                        &root_intersection,
+                        root_bounds,
+                        clipped,
+                        &self.scroll_margin.borrow(),
+                    )
+                }),
+            None => compute_the_intersection(
+                target,
+                &root_intersection,
+                root_bounds,
+                target_rect,
+                &self.scroll_margin.borrow(),
+            ),
+        };
         let intersection_rect = maybe_intersection_rect.unwrap_or_default();
 
         // Step 9

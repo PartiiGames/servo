@@ -3279,7 +3279,11 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
     /// <https://drafts.csswg.org/cssom-view/#dom-element-getboundingclientrect>
     fn GetBoundingClientRect(&self, cx: &mut JSContext) -> DomRoot<DOMRect> {
         let win = self.owner_window();
-        let rect = self.upcast::<Node>().border_box().unwrap_or_default();
+        // Partii: elements inside an inline <svg> have no boxes; compute theirs from the SVG.
+        let rect = crate::dom::svg::svggeometry::svg_geometry(self, true)
+            .map(|geometry| geometry.rect)
+            .or_else(|| self.upcast::<Node>().border_box())
+            .unwrap_or_default();
         debug_assert!(rect.size.width.to_f64_px() >= 0.0 && rect.size.height.to_f64_px() >= 0.0);
         DOMRect::new(
             cx,
