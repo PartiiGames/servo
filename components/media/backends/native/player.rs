@@ -30,7 +30,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
-use crate::output::{OutputSource, add_stereo, output};
+use crate::output::{OutputSource, add_stereo, context_rate, output};
 use crate::queue::FrameQueue;
 
 /// Decode ahead of playback by this much (seconds).
@@ -65,9 +65,9 @@ impl PlayState {
     }
 }
 
-/// MediaElementAudioSourceNode renders at the context's rate, which the player isn't told; the
-/// DOM creates contexts at 44100 Hz unless the page asks otherwise.
-const RENDERER_RATE: u32 = 44100;
+// MediaElementAudioSourceNode renders at the context's rate, which the player isn't told: it uses
+// the default context rate for this output (`output::context_rate`). A page that picks another
+// sampleRate gets its element audio at the wrong speed.
 
 pub(crate) struct PlayerShared {
     state: Mutex<PlayState>,
@@ -107,13 +107,14 @@ impl OutputSource for PlayerShared {
             Some(ref renderer) => {
                 // The output's callbacks are the clock: render the same span of time at the
                 // renderer's rate.
+                let renderer_rate = context_rate(rate);
                 let mut carry = self.renderer_carry.lock().unwrap();
-                let exact = frames_out as f64 * RENDERER_RATE as f64 / rate as f64 + *carry;
+                let exact = frames_out as f64 * renderer_rate as f64 / rate as f64 + *carry;
                 let frames = exact.floor() as usize;
                 *carry = exact - frames as f64;
                 let mut left = vec![0f32; frames];
                 let mut right = vec![0f32; frames];
-                Self::pull(st, frames, RENDERER_RATE, |i, l, r| {
+                Self::pull(st, frames, renderer_rate, |i, l, r| {
                     left[i] = l;
                     right[i] = r;
                 });

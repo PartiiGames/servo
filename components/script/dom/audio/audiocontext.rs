@@ -8,6 +8,7 @@ use js::realm::CurrentRealm;
 use js::rust::HandleObject;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_base::id::PipelineId;
+use servo_media::ServoMedia;
 use servo_media::audio::context::{LatencyCategory, ProcessingState, RealTimeAudioContextOptions};
 
 use crate::conversions::Convert;
@@ -307,7 +308,11 @@ impl Convert<LatencyCategory> for AudioContextLatencyCategory {
 impl Convert<RealTimeAudioContextOptions> for &AudioContextOptions {
     fn convert(self) -> RealTimeAudioContextOptions {
         RealTimeAudioContextOptions {
-            sample_rate: *self.sampleRate.unwrap_or(Finite::wrap(44100.)),
+            // Default: the output device's rate (the backend's preferred rate).
+            sample_rate: self
+                .sampleRate
+                .map(|rate| *rate)
+                .unwrap_or_else(|| ServoMedia::get().preferred_sample_rate()),
             latency_hint: match self.latencyHint {
                 AudioContextLatencyCategoryOrDouble::AudioContextLatencyCategory(category) => {
                     category.convert()

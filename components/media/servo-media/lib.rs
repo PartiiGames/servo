@@ -86,6 +86,12 @@ pub trait Backend: Send + Sync {
     fn resume(&self, _id: &ClientContextId) {}
 
     fn get_device_monitor(&self) -> Box<dyn MediaDeviceMonitor>;
+
+    /// The sample rate a realtime AudioContext gets when the page doesn't ask for one: the
+    /// output device's rate, per the Web Audio spec. Backends that don't know it keep 44100.
+    fn preferred_sample_rate(&self) -> f32 {
+        44100.
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

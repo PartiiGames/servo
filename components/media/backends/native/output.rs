@@ -162,6 +162,16 @@ fn run_null(output: &Output, ready: &mpsc::Sender<()>, run_for: Option<Duration>
     }
 }
 
+/// The rate a default AudioContext gets on an output running at `output_rate`: that rate, or
+/// 48000 when AudioContext can't use it (outside 8000..=192000).
+pub fn context_rate(output_rate: u32) -> u32 {
+    if (8000..=192000).contains(&output_rate) {
+        output_rate
+    } else {
+        48000
+    }
+}
+
 /// Write one stereo frame into an interleaved output frame of `channels` channels.
 #[inline]
 pub fn add_stereo(frame: &mut [f32], l: f32, r: f32) {

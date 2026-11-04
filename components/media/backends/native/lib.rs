@@ -261,6 +261,12 @@ impl Backend for NativeBackend {
     fn get_device_monitor(&self) -> Box<dyn MediaDeviceMonitor> {
         DummyBackend.get_device_monitor()
     }
+
+    fn preferred_sample_rate(&self) -> f32 {
+        // The shared output's rate: the device's, or the null output's (PARTII_AUDIO_RATE,
+        // default 48000).
+        output::context_rate(output::output().format().0) as f32
+    }
 }
 
 impl AudioBackend for NativeBackend {
