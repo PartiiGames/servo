@@ -12,6 +12,10 @@
 //! it. The nested document then enables a feature iff the allowlist matches its own origin.
 //!
 //! <https://w3c.github.io/webappsec-permissions-policy/>
+//!
+//! Deliberate difference from Chromium (partii-backend decision, 2026-11-04): a nested frame gets
+//! these features only when its `<iframe>` declares them, same-origin frames included. The
+//! game-maker documentation is partii-runtime `docs/WEB-DIFFERENCES.md`.
 
 use serde::{Deserialize, Serialize};
 use servo_url::{ImmutableOrigin, ServoUrl};
