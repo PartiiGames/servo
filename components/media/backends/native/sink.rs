@@ -7,7 +7,7 @@
 //! pull side (queue.rs). When the FIFO drops under its target the sink wakes the render
 //! thread with `SinkNeedData` (the push/pull model `AudioRenderThread::event_loop` expects).
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -30,6 +30,11 @@ pub(crate) struct SinkShared {
     target: AtomicUsize,
     render_thread: Mutex<Option<Sender<AudioRenderThreadMsg>>>,
     need_data_sent: AtomicBool,
+    /// Set once a callback has been filled completely: earlier shortfalls are start-up, not
+    /// underruns.
+    primed: AtomicBool,
+    underrun_events: AtomicU64,
+    underrun_frames: AtomicU64,
 }
 
 impl SinkShared {
@@ -60,9 +65,18 @@ impl OutputSource for SinkShared {
             self.target.store(wanted, Ordering::Relaxed);
         }
         // On underrun the rest stays silent and the queue keeps its place.
+        let mut produced = 0;
         self.fifo.lock().unwrap().read(frames_out, step, |i, l, r| {
+            produced = i + 1;
             add_stereo(&mut out[i * channels..(i + 1) * channels], l, r)
         });
+        if produced == frames_out {
+            self.primed.store(true, Ordering::Relaxed);
+        } else if self.primed.load(Ordering::Relaxed) {
+            self.underrun_events.fetch_add(1, Ordering::Relaxed);
+            self.underrun_frames
+                .fetch_add((frames_out - produced) as u64, Ordering::Relaxed);
+        }
         if self.level() < self.target.load(Ordering::Relaxed) {
             self.wake_render_thread();
         }
@@ -86,6 +100,9 @@ impl NativeAudioSink {
                 target: AtomicUsize::new(MIN_TARGET_FRAMES),
                 render_thread: Mutex::new(None),
                 need_data_sent: AtomicBool::new(false),
+                primed: AtomicBool::new(false),
+                underrun_events: AtomicU64::new(0),
+                underrun_frames: AtomicU64::new(0),
             }),
             stream_only: AtomicBool::new(false),
         }
@@ -123,6 +140,8 @@ impl AudioSink for NativeAudioSink {
     }
 
     fn play(&self) -> Result<(), AudioSinkError> {
+        // A resumed stream refills from empty: that start-up isn't an underrun.
+        self.shared.primed.store(false, Ordering::Relaxed);
         self.shared.playing.store(true, Ordering::Release);
         Ok(())
     }
@@ -130,6 +149,13 @@ impl AudioSink for NativeAudioSink {
     fn stop(&self) -> Result<(), AudioSinkError> {
         self.shared.playing.store(false, Ordering::Release);
         Ok(())
+    }
+
+    fn underrun_stats(&self) -> Option<(u64, u64)> {
+        Some((
+            self.shared.underrun_events.load(Ordering::Relaxed),
+            self.shared.underrun_frames.load(Ordering::Relaxed),
+        ))
     }
 
     fn has_enough_data(&self) -> bool {

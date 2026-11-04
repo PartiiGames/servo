@@ -47,6 +47,7 @@ pub(crate) mod oversampler;
 pub mod panner_node;
 pub mod param;
 pub mod periodic_wave;
+pub mod render_stats;
 pub mod render_thread;
 pub mod sink;
 pub mod stereo_panner;
