@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::f32::consts::PI;
+use std::f64::consts::PI;
 
 use malloc_size_of_derive::MallocSizeOf;
 
@@ -74,6 +74,9 @@ impl AudioNodeEngine for StereoPannerNode {
                 // clamp pan to [-1, 1]
                 pan = pan.clamp(-1., 1.);
 
+                // The gains are computed in f64 (like the spec's reference math):
+                // f32 cos/sin alone put the left channel ~1.4e-7 off.
+                let pan = pan as f64;
                 let x = if mono {
                     (pan + 1.) / 2.
                 } else if pan <= 0. {
@@ -95,15 +98,15 @@ impl AudioNodeEngine for StereoPannerNode {
 
                 let index = frame.0 as usize;
                 if mono {
-                    let input = l[index];
-                    l[index] = input * gain_l;
-                    r[index] = input * gain_r;
+                    let input = l[index] as f64;
+                    l[index] = (input * gain_l) as f32;
+                    r[index] = (input * gain_r) as f32;
                 } else if pan <= 0. {
-                    l[index] += r[index] * gain_l;
-                    r[index] *= gain_r;
+                    l[index] = (l[index] as f64 + r[index] as f64 * gain_l) as f32;
+                    r[index] = (r[index] as f64 * gain_r) as f32;
                 } else {
-                    r[index] += l[index] * gain_r;
-                    l[index] *= gain_l;
+                    r[index] = (r[index] as f64 + l[index] as f64 * gain_r) as f32;
+                    l[index] = (l[index] as f64 * gain_l) as f32;
                 }
             }
         }
