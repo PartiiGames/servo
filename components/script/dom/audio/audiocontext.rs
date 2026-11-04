@@ -53,6 +53,15 @@ impl AudioContext {
         options: &AudioContextOptions,
         pipeline_id: PipelineId,
     ) -> Fallible<AudioContext> {
+        // A sampleRate outside the nominal range [3000, 768000] is not supported: throw
+        // NotSupportedError instead of building a context (a 0 Hz context used to reach the
+        // render thread).
+        if let Some(rate) = options.sampleRate
+            && !(3000. ..=768000.).contains(&*rate)
+        {
+            return Err(Error::NotSupported(None));
+        }
+
         // Steps 1-3.
         let context = BaseAudioContext::new_inherited(
             BaseAudioContextOptions::AudioContext(options.convert()),
