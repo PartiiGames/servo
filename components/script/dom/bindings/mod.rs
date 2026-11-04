@@ -164,6 +164,7 @@ pub(crate) mod structuredclone;
 pub(crate) mod trace;
 pub(crate) mod transferable;
 pub(crate) mod utils;
+pub(crate) mod wasm_module;
 pub(crate) mod weakref;
 pub(crate) mod xmlname;
 
