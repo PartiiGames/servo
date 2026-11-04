@@ -7,7 +7,7 @@
  * https://registry.khronos.org/webgl/extensions/WEBGL_compressed_texture_astc/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface WEBGLCompressedTextureASTC {
   const GLenum COMPRESSED_RGBA_ASTC_4x4_KHR = 0x93B0;
   const GLenum COMPRESSED_RGBA_ASTC_5x4_KHR = 0x93B1;

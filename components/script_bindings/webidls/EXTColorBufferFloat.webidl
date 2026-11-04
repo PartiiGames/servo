@@ -7,6 +7,6 @@
  * https://registry.khronos.org/webgl/extensions/EXT_color_buffer_float/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface EXTColorBufferFloat {
 }; // interface EXT_color_buffer_float

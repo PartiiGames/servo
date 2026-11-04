@@ -7,7 +7,7 @@
  * https://registry.khronos.org/webgl/extensions/EXT_texture_compression_rgtc/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface EXTTextureCompressionRGTC {
   const GLenum COMPRESSED_RED_RGTC1_EXT = 0x8DBB;
   const GLenum COMPRESSED_SIGNED_RED_RGTC1_EXT = 0x8DBC;

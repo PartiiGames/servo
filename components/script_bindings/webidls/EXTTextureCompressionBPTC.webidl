@@ -7,7 +7,7 @@
  * https://registry.khronos.org/webgl/extensions/EXT_texture_compression_bptc/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface EXTTextureCompressionBPTC {
   const GLenum COMPRESSED_RGBA_BPTC_UNORM_EXT = 0x8E8C;
   const GLenum COMPRESSED_SRGB_ALPHA_BPTC_UNORM_EXT = 0x8E8D;

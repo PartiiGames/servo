@@ -7,7 +7,7 @@
  * https://registry.khronos.org/webgl/extensions/KHR_parallel_shader_compile/
  */
 
-[LegacyNoInterfaceObject, Exposed=Window]
+[LegacyNoInterfaceObject, Exposed=(Window,Worker)]
 interface KHRParallelShaderCompile {
   const GLenum COMPLETION_STATUS_KHR = 0x91B1;
 }; // interface KHR_parallel_shader_compile
