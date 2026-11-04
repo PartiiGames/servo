@@ -451,8 +451,17 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
         self.element.namespace()
     }
 
-    fn query_container_size(&self, _display: &Display) -> Size2D<Option<app_units::Au>> {
-        todo!();
+    fn query_container_size(&self, display: &Display) -> Size2D<Option<app_units::Au>> {
+        // Partii: the container's content box from the last layout (layout lays out again
+        // when a container's size changes); unknown or not rendered: no size (Stylo then falls
+        // back to the viewport).
+        if display.is_none() {
+            return Size2D::new(None, None);
+        }
+        match layout_api::query_container_size(self.as_node().opaque().0) {
+            Some((width, height)) => Size2D::new(Some(width), Some(height)),
+            None => Size2D::new(None, None),
+        }
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {

@@ -9,3 +9,5 @@ Patches on top of 0.22.0:
   `layout_css_backdrop_filter_enabled`) instead of `layout.unimplemented`.
 - `text-wrap-style` and the `text-wrap` shorthand are enabled for Servo (Gecko only upstream);
   Servo's inline layout implements `text-wrap-style: balance`.
+- Container query length units (cqw, cqh, cqi, cqb, cqmin, cqmax) parse for Servo too (Gecko only
+  upstream); Servo's layout supplies container sizes (`query_container_size`).

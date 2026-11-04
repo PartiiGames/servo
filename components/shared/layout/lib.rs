@@ -1137,3 +1137,33 @@ mod test {
         assert_eq!(image_animation_state.active_frame, 1);
     }
 }
+
+/// Partii: sizes of query containers (`container-type: size | inline-size`) from the last layout,
+/// keyed by the element's opaque node address, content box (width, height). Style runs before
+/// layout in Servo, so `query_container_size` (container query units, `@container` size
+/// queries) reads these; when one changes, layout restyles and lays out again.
+static CONTAINER_SIZES: std::sync::LazyLock<RwLock<FxHashMap<usize, (Au, Au)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Partii: the content-box size a query container had at the last layout.
+pub fn query_container_size(node: usize) -> Option<(Au, Au)> {
+    CONTAINER_SIZES.read().get(&node).copied()
+}
+
+/// Partii: replace the container sizes one layout recorded last time (`previous` keys) with this
+/// layout's; returns whether any size is new or changed.
+pub fn update_container_sizes(previous: &[usize], current: &[(usize, (Au, Au))]) -> bool {
+    let mut sizes = CONTAINER_SIZES.write();
+    let mut changed = false;
+    for key in previous {
+        if !current.iter().any(|(node, _)| node == key) {
+            sizes.remove(key);
+        }
+    }
+    for (node, size) in current {
+        if sizes.insert(*node, *size) != Some(*size) {
+            changed = true;
+        }
+    }
+    changed
+}

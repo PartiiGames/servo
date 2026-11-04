@@ -97,6 +97,7 @@ use crate::query::{
     process_scroll_container_query,
 };
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
+use crate::fragment_tree::Fragment;
 use crate::{BoxTree, FragmentTree};
 
 // This mutex is necessary due to syncronisation issues between two different types of thread-local storage
@@ -175,6 +176,12 @@ pub struct LayoutThread {
     /// layout requests a display list, it is produced unconditionally, even when the
     /// layout trees remain the same.
     need_new_display_list: Cell<bool>,
+
+    /// Partii: the query containers this layout recorded last time (opaque node addresses).
+    container_nodes: Vec<usize>,
+
+    /// Partii: restyle from the root once more (query container sizes changed).
+    force_full_restyle: bool,
 
     /// Whether or not cumulative containing blocks offsets have been set into the
     /// [`FragmentTree`]. This typically happens during [`StackingContextTree`]
@@ -850,6 +857,8 @@ impl LayoutThread {
             device_has_changed: false,
             need_containing_block_calculation: Cell::new(false),
             need_new_display_list: Cell::new(false),
+            container_nodes: Vec::new(),
+            force_full_restyle: false,
             need_new_stacking_context_tree: Cell::new(false),
             box_tree: Default::default(),
             fragment_tree: Default::default(),
@@ -1074,7 +1083,7 @@ impl LayoutThread {
         let mut accessibility_damage =
             to_accessibility_damage_map(std::mem::take(&mut reflow_request.accessibility_damage));
 
-        let (mut reflow_phases_run, iframe_sizes, changed_web_fonts) = self
+        let (mut reflow_phases_run, mut iframe_sizes, mut changed_web_fonts) = self
             .restyle_and_build_trees(
                 &mut reflow_request,
                 document,
@@ -1082,6 +1091,24 @@ impl LayoutThread {
                 &image_resolver,
                 accessibility_damage.as_mut(),
             );
+
+        // Partii: query containers. Style ran with the container sizes of the previous layout;
+        // if this layout changed any, restyle (from the root) and lay out once more.
+        if reflow_phases_run.contains(ReflowPhasesRun::RanLayout) && self.record_container_sizes() {
+            self.force_full_restyle = true;
+            let (phases, sizes, fonts) = self.restyle_and_build_trees(
+                &mut reflow_request,
+                document,
+                root_element,
+                &image_resolver,
+                accessibility_damage.as_mut(),
+            );
+            self.force_full_restyle = false;
+            self.record_container_sizes();
+            reflow_phases_run.insert(phases);
+            iframe_sizes = sizes;
+            changed_web_fonts = fonts;
+        }
 
         if self.build_stacking_context_tree_for_reflow(&reflow_request) {
             reflow_phases_run.insert(ReflowPhasesRun::BuiltStackingContextTree);
@@ -1204,6 +1231,35 @@ impl LayoutThread {
     }
 
     #[servo_tracing::instrument(skip_all)]
+    /// Partii: record the content-box size of every query container (`container-type` other
+    /// than `normal`) in the fragment tree; returns whether any changed since the last layout.
+    fn record_container_sizes(&mut self) -> bool {
+        let mut current = Vec::new();
+        if let Some(fragment_tree) = &*self.fragment_tree.borrow() {
+            fragment_tree.find(|fragment, _, _| {
+                let box_fragment = match fragment {
+                    Fragment::Box(box_fragment) | Fragment::Float(box_fragment) => box_fragment,
+                    _ => return None::<()>,
+                };
+                if box_fragment.style().get_box().container_type.is_normal() {
+                    return None;
+                }
+                let Some(tag) = box_fragment.base.tag else {
+                    return None;
+                };
+                if tag.pseudo_element_chain.primary.is_some() {
+                    return None;
+                }
+                let size = box_fragment.content_rect().size;
+                current.push((tag.node.0, (size.width, size.height)));
+                None
+            });
+        }
+        let changed = layout_api::update_container_sizes(&self.container_nodes, &current);
+        self.container_nodes = current.into_iter().map(|(node, _)| node).collect();
+        changed
+    }
+
     fn restyle_and_build_trees<'dom>(
         &mut self,
         reflow_request: &mut ReflowRequest,
@@ -1256,10 +1312,11 @@ impl LayoutThread {
         // Partii: `:has()` invalidation, conservatively. Stylo's relative selector invalidator is
         // not wired into Servo, so a change below a `:has()` subject would leave it stale. While
         // any stylesheet uses `:has()`, restyle the whole document whenever anything is restyled.
-        let restyle_whole_document = pref!(layout_css_has_selector_enabled) &&
-            self.stylist
-                .iter_origins()
-                .any(|(data, _)| data.relative_invalidation_map_attributes().used);
+        let restyle_whole_document = self.force_full_restyle ||
+            (pref!(layout_css_has_selector_enabled) &&
+                self.stylist
+                    .iter_origins()
+                    .any(|(data, _)| data.relative_invalidation_map_attributes().used));
         if restyle_whole_document {
             if let Some(mut data) = dangerous_root_element.mutate_data() {
                 data.hint.insert(RestyleHint::restyle_subtree());
