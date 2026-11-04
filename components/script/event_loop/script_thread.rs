@@ -1441,7 +1441,7 @@ impl ScriptThread {
                 .unwrap_or_else(Instant::now);
             // With no frame for a while (a rAF was only just requested), the next one is
             // about a frame from now.
-            let frame = Duration::from_micros(16_667);
+            let frame = Duration::from_nanos(16_666_666);
             let now = Instant::now();
             let mut next_frame = last_frame + frame;
             if next_frame <= now {
