@@ -704,13 +704,34 @@ impl<'a> BoxFragmentWithStyle<'a> {
         // overflow together, but from the specification it seems that if the border
         // box of an item is in the "wholly unreachable scrollable overflow region", but
         // its scrollable overflow is not, it should also be excluded.
+        // Partii: absolutely (fixed-) positioned children for which this box is the containing
+        // block are positioned from its padding box, not its content box (they were counted
+        // `padding - left` too far: the launcher's tab ::after made 2 px of scrollable overflow).
+        let padding_origin = physical_padding_rect.origin.to_vector();
+        let style = self.style();
+        let contains_absolute =
+            style.establishes_containing_block_for_absolute_descendants(self.base.flags);
+        let contains_fixed =
+            style.establishes_containing_block_for_all_descendants(self.base.flags);
+        let child_origin = |child: &Fragment| {
+            let position = child
+                .retrieve_box_fragment()
+                .map(|box_fragment| box_fragment.style().clone_position());
+            match position {
+                Some(ComputedPosition::Absolute) if contains_absolute || contains_fixed => {
+                    padding_origin
+                },
+                Some(ComputedPosition::Fixed) if contains_fixed => padding_origin,
+                _ => content_origin,
+            }
+        };
         let mut scrollable_overflow =
             self.children
                 .iter()
                 .fold(physical_padding_rect, |acc, child| {
                     let scrollable_overflow_from_child = child
                         .scrollable_overflow_for_parent()
-                        .translate(content_origin);
+                        .translate(child_origin(child));
 
                     // Note that this doesn't just exclude the wholly unreachable
                     // scrollable overflow area from the rectangle, but also clips it.
