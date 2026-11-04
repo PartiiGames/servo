@@ -2125,6 +2125,18 @@ impl WebGLImpl {
                     webgl::ParameterInt::AlphaBits if state.fake_no_alpha() => 0,
                     webgl::ParameterInt::DepthBits if state.fake_no_depth() => 0,
                     webgl::ParameterInt::StencilBits if state.fake_no_stencil() => 0,
+                    // Desktop core profiles have no GL_RED_BITS etc.: ask the bound draw
+                    // framebuffer's attachments (our default framebuffer is an FBO too).
+                    webgl::ParameterInt::RedBits |
+                    webgl::ParameterInt::GreenBits |
+                    webgl::ParameterInt::BlueBits |
+                    webgl::ParameterInt::AlphaBits |
+                    webgl::ParameterInt::DepthBits |
+                    webgl::ParameterInt::StencilBits
+                        if !gl.version().is_embedded =>
+                    {
+                        framebuffer_bits(gl, param)
+                    },
                     _ => unsafe { gl.get_parameter_i32(param as u32) },
                 };
                 sender.send(value).unwrap()
@@ -3119,6 +3131,43 @@ fn prepare_pixels(
     }
 
     pixels
+}
+
+/// RED_BITS ... STENCIL_BITS of the bound draw framebuffer, from its attachments.
+fn framebuffer_bits(gl: &Gl, param: webgl::ParameterInt) -> i32 {
+    use webgl::ParameterInt as P;
+    let default_framebuffer = unsafe { gl.get_parameter_i32(gl::DRAW_FRAMEBUFFER_BINDING) } == 0;
+    let color = if default_framebuffer {
+        gl::BACK_LEFT
+    } else {
+        gl::COLOR_ATTACHMENT0
+    };
+    let (attachment, pname) = match param {
+        P::RedBits => (color, gl::FRAMEBUFFER_ATTACHMENT_RED_SIZE),
+        P::GreenBits => (color, gl::FRAMEBUFFER_ATTACHMENT_GREEN_SIZE),
+        P::BlueBits => (color, gl::FRAMEBUFFER_ATTACHMENT_BLUE_SIZE),
+        P::AlphaBits => (color, gl::FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE),
+        P::DepthBits if default_framebuffer => (gl::DEPTH, gl::FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE),
+        P::DepthBits => (gl::DEPTH_ATTACHMENT, gl::FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE),
+        P::StencilBits if default_framebuffer => {
+            (gl::STENCIL, gl::FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE)
+        },
+        _ => (
+            gl::STENCIL_ATTACHMENT,
+            gl::FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE,
+        ),
+    };
+    unsafe {
+        let object_type = gl.get_framebuffer_attachment_parameter_i32(
+            gl::DRAW_FRAMEBUFFER,
+            attachment,
+            gl::FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+        );
+        if object_type == gl::NONE as i32 {
+            return 0;
+        }
+        gl.get_framebuffer_attachment_parameter_i32(gl::DRAW_FRAMEBUFFER, attachment, pname)
+    }
 }
 
 /// The glow argument for a compressed sub-image upload.
