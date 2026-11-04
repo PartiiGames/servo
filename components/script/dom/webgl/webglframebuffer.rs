@@ -410,10 +410,16 @@ impl WebGLFramebuffer {
                 constants::DEPTH24_STENCIL8,
                 constants::DEPTH32F_STENCIL8,
             ][..],
-            &[constants::DEPTH_STENCIL][..],
+            // Textures record their sized format (DEPTH24_STENCIL8 from a WebGL 2
+            // texImage2D), renderbuffers the unsized one.
+            &[
+                constants::DEPTH_STENCIL,
+                constants::DEPTH24_STENCIL8,
+                constants::DEPTH32F_STENCIL8,
+            ][..],
         ];
         let webgl2_attachment_constraints = &[
-            &[constants::DEPTH_STENCIL][..],
+            &[constants::DEPTH_STENCIL, constants::DEPTH_COMPONENT][..],
             &[constants::DEPTH_STENCIL][..],
             &[][..],
         ];
