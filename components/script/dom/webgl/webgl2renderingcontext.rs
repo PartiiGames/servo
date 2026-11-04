@@ -71,7 +71,8 @@ use crate::dom::webgl::webglquery::WebGLQuery;
 use crate::dom::webgl::webglrenderbuffer::WebGLRenderbuffer;
 use crate::dom::webgl::webglrenderingcontext::{
     CompressedSource, Operation, TexPixels, TexSource, VertexAttrib, WebGLRenderingContext,
-    array_buffer_type_to_sized_type, is_sampler_type, uniform_get, uniform_typed,
+    array_buffer_type_to_sized_type, clip_copy_to_read_framebuffer, is_sampler_type, uniform_get,
+    uniform_typed,
 };
 use crate::dom::webgl::webglsampler::{WebGLSampler, WebGLSamplerValue};
 use crate::dom::webgl::webglshader::WebGLShader;
@@ -5447,6 +5448,17 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if image_info.internal_format().is_compressed() {
             return self.base.webgl_error(InvalidOperation);
         }
+        let Some((xoffset, yoffset, x, y, width, height)) = clip_copy_to_read_framebuffer(
+            self.base.read_framebuffer_size(),
+            xoffset,
+            yoffset,
+            x,
+            y,
+            width,
+            height,
+        ) else {
+            return;
+        };
         self.base.send_command(WebGLCommand::CopyTexSubImage3D(
             target.as_gl_constant(),
             level,

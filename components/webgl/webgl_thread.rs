@@ -109,6 +109,9 @@ pub struct GLState {
     // True when the default framebuffer is bound to DRAW_FRAMEBUFFER
     drawing_to_default_framebuffer: bool,
     default_vao: Option<NativeVertexArray>,
+    /// WebGL 2 contexts on desktop GL are core profile, which has no ALPHA, LUMINANCE or
+    /// LUMINANCE_ALPHA textures: they are stored as R / RG textures with a swizzle.
+    emulate_luminance: bool,
 }
 
 impl GLState {
@@ -206,6 +209,7 @@ impl Default for GLState {
             _gl_version: GLVersion { major: 1, minor: 0 },
             _webgl_version: WebGLVersion::WebGL1,
             requested_flags: ContextAttributeFlags::empty(),
+            emulate_luminance: false,
             color_write_mask: [true, true, true, true],
             clear_color: (0., 0., 0., 0.),
             scissor_test_enabled: false,
@@ -682,6 +686,7 @@ impl WebGLThread {
             _webgl_version: webgl_version,
             requested_flags,
             default_vao,
+            emulate_luminance: webgl_version == WebGLVersion::WebGL2 && api_type == GlType::Gl,
             ..Default::default()
         };
         debug!("Created state {:?}", state);
@@ -1153,7 +1158,7 @@ impl WebGLImpl {
                 state.color_write_mask = [r, g, b, a];
                 state.restore_alpha_invariant(gl);
             },
-            WebGLCommand::CopyTexImage2D(
+            WebGLCommand::CopyTexImage2D {
                 target,
                 level,
                 internal_format,
@@ -1161,9 +1166,17 @@ impl WebGLImpl {
                 y,
                 width,
                 height,
-                border,
-            ) => unsafe {
-                gl.copy_tex_image_2d(target, level, internal_format, x, y, width, height, border)
+                read_size,
+            } => unsafe {
+                copy_tex_image_2d(
+                    state,
+                    gl,
+                    target,
+                    level,
+                    internal_format,
+                    (x, y, width, height),
+                    read_size,
+                )
             },
             WebGLCommand::CopyTexSubImage2D(
                 target,
@@ -1175,7 +1188,19 @@ impl WebGLImpl {
                 width,
                 height,
             ) => unsafe {
-                gl.copy_tex_sub_image_2d(target, level, xoffset, yoffset, x, y, width, height)
+                match luminance_copy_kind(state, gl, target) {
+                    Some(kind) => copy_luminance_via_cpu(
+                        gl,
+                        target,
+                        level,
+                        (xoffset, yoffset, None),
+                        (x, y, width, height),
+                        kind,
+                    ),
+                    None => gl.copy_tex_sub_image_2d(
+                        target, level, xoffset, yoffset, x, y, width, height,
+                    ),
+                }
             },
             WebGLCommand::CullFace(mode) => unsafe { gl.cull_face(mode) },
             WebGLCommand::DepthFunc(func) => unsafe { gl.depth_func(func) },
@@ -1696,17 +1721,25 @@ impl WebGLImpl {
                     Cow::Borrowed(data),
                 );
 
+                let (internal_format, format) = luminance_formats(
+                    state,
+                    gl,
+                    target,
+                    internal_format,
+                    format,
+                    effective_data_type,
+                );
                 unsafe {
                     gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
                     gl.tex_image_3d(
                         target,
                         level as i32,
-                        internal_format.as_gl_constant() as i32,
+                        internal_format as i32,
                         size.width as i32,
                         size.height as i32,
                         depth as i32,
                         0,
-                        format.as_gl_constant(),
+                        format,
                         effective_data_type,
                         PixelUnpackData::Slice(Some(&pixels)),
                     );
@@ -1737,16 +1770,24 @@ impl WebGLImpl {
                     Cow::Borrowed(data),
                 );
 
+                let (internal_format, format) = luminance_formats(
+                    state,
+                    gl,
+                    target,
+                    internal_format,
+                    format,
+                    effective_data_type,
+                );
                 unsafe {
                     gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
                     gl.tex_image_2d(
                         target,
                         level as i32,
-                        internal_format.as_gl_constant() as i32,
+                        internal_format as i32,
                         size.width as i32,
                         size.height as i32,
                         0,
-                        format.as_gl_constant(),
+                        format,
                         effective_data_type,
                         PixelUnpackData::Slice(Some(&pixels)),
                     );
@@ -1763,16 +1804,24 @@ impl WebGLImpl {
                 unpacking_alignment,
                 offset,
             } => unsafe {
+                let (internal_format, format) = luminance_formats(
+                    state,
+                    gl,
+                    target,
+                    internal_format,
+                    format,
+                    effective_data_type,
+                );
                 gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
                 gl.tex_image_3d(
                     target,
                     level as i32,
-                    internal_format.as_gl_constant() as i32,
+                    internal_format as i32,
                     size.width as i32,
                     size.height as i32,
                     depth as i32,
                     0,
-                    format.as_gl_constant(),
+                    format,
                     effective_data_type,
                     PixelUnpackData::BufferOffset(offset as u32),
                 );
@@ -1816,7 +1865,7 @@ impl WebGLImpl {
                         size.width as i32,
                         size.height as i32,
                         depth as i32,
-                        format.as_gl_constant(),
+                        luminance_transfer_format(state, format),
                         effective_data_type,
                         PixelUnpackData::Slice(Some(&pixels)),
                     );
@@ -1845,7 +1894,7 @@ impl WebGLImpl {
                     size.width as i32,
                     size.height as i32,
                     depth as i32,
-                    format.as_gl_constant(),
+                    luminance_transfer_format(state, format),
                     effective_data_type,
                     PixelUnpackData::BufferOffset(offset as u32),
                 );
@@ -1869,7 +1918,7 @@ impl WebGLImpl {
                     yoffset,
                     size.width as i32,
                     size.height as i32,
-                    format.as_gl_constant(),
+                    luminance_transfer_format(state, format),
                     effective_data_type,
                     PixelUnpackData::BufferOffset(offset as u32),
                 );
@@ -1885,9 +1934,19 @@ impl WebGLImpl {
                 width,
                 height,
             ) => unsafe {
-                gl.copy_tex_sub_image_3d(
-                    target, level, xoffset, yoffset, zoffset, x, y, width, height,
-                )
+                match luminance_copy_kind(state, gl, target) {
+                    Some(kind) => copy_luminance_via_cpu(
+                        gl,
+                        target,
+                        level,
+                        (xoffset, yoffset, Some(zoffset)),
+                        (x, y, width, height),
+                        kind,
+                    ),
+                    None => gl.copy_tex_sub_image_3d(
+                        target, level, xoffset, yoffset, zoffset, x, y, width, height,
+                    ),
+                }
             },
             WebGLCommand::TexImage2DPBO {
                 target,
@@ -1899,16 +1958,24 @@ impl WebGLImpl {
                 unpacking_alignment,
                 offset,
             } => unsafe {
+                let (internal_format, format) = luminance_formats(
+                    state,
+                    gl,
+                    target,
+                    internal_format,
+                    format,
+                    effective_data_type,
+                );
                 gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
 
                 gl.tex_image_2d(
                     target,
                     level as i32,
-                    internal_format.as_gl_constant() as i32,
+                    internal_format as i32,
                     size.width as i32,
                     size.height as i32,
                     0,
-                    format.as_gl_constant(),
+                    format,
                     effective_data_type,
                     PixelUnpackData::BufferOffset(offset as u32),
                 );
@@ -1948,7 +2015,7 @@ impl WebGLImpl {
                         yoffset,
                         size.width as i32,
                         size.height as i32,
-                        format.as_gl_constant(),
+                        luminance_transfer_format(state, format),
                         effective_data_type,
                         glow::PixelUnpackData::Slice(Some(&pixels)),
                     );
@@ -3625,5 +3692,277 @@ fn transform_feedback_type_bytes(type_: u32) -> u32 {
         gl::FLOAT_MAT3x4 | gl::FLOAT_MAT4x3 => 48,
         gl::FLOAT_MAT4 => 64,
         _ => 16,
+    }
+}
+
+/// The texture target texture parameters are set on for an image target: the cube map for
+/// its faces.
+fn texture_parameter_target(target: u32) -> u32 {
+    match target {
+        gl::TEXTURE_CUBE_MAP_POSITIVE_X |
+        gl::TEXTURE_CUBE_MAP_NEGATIVE_X |
+        gl::TEXTURE_CUBE_MAP_POSITIVE_Y |
+        gl::TEXTURE_CUBE_MAP_NEGATIVE_Y |
+        gl::TEXTURE_CUBE_MAP_POSITIVE_Z |
+        gl::TEXTURE_CUBE_MAP_NEGATIVE_Z => gl::TEXTURE_CUBE_MAP,
+        other => other,
+    }
+}
+
+/// The R / RG transfer format standing in for ALPHA, LUMINANCE and LUMINANCE_ALPHA on core
+/// profile contexts (same bytes per pixel, so client data needs no conversion).
+fn luminance_transfer_format(state: &GLState, format: TexFormat) -> u32 {
+    if !state.emulate_luminance {
+        return format.as_gl_constant();
+    }
+    match format.as_gl_constant() {
+        gl::ALPHA | gl::LUMINANCE => gl::RED,
+        gl::LUMINANCE_ALPHA => gl::RG,
+        other => other,
+    }
+}
+
+/// Internal and transfer formats for a texImage: on core profile contexts the legacy
+/// formats become R / RG textures, and the texture gets the swizzle that makes them sample
+/// as the format they stand for. Other formats reset the swizzle, as the texture object may
+/// have held an emulated format before.
+fn luminance_formats(
+    state: &GLState,
+    gl: &Gl,
+    target: u32,
+    internal_format: TexFormat,
+    format: TexFormat,
+    data_type: u32,
+) -> (u32, u32) {
+    if !state.emulate_luminance {
+        return (internal_format.as_gl_constant(), format.as_gl_constant());
+    }
+    let (two_channels, swizzle) = match internal_format.as_gl_constant() {
+        gl::ALPHA => (false, [gl::ZERO, gl::ZERO, gl::ZERO, gl::RED]),
+        gl::LUMINANCE => (false, [gl::RED, gl::RED, gl::RED, gl::ONE]),
+        gl::LUMINANCE_ALPHA => (true, [gl::RED, gl::RED, gl::RED, gl::GREEN]),
+        _ => {
+            set_texture_swizzle(gl, target, [gl::RED, gl::GREEN, gl::BLUE, gl::ALPHA]);
+            return (internal_format.as_gl_constant(), format.as_gl_constant());
+        },
+    };
+    let internal_format = match (data_type, two_channels) {
+        (gl::FLOAT, false) => gl::R32F,
+        (gl::FLOAT, true) => gl::RG32F,
+        (gl::HALF_FLOAT | 0x8D61, false) => gl::R16F,
+        (gl::HALF_FLOAT | 0x8D61, true) => gl::RG16F,
+        (_, false) => gl::R8,
+        (_, true) => gl::RG8,
+    };
+    set_texture_swizzle(gl, target, swizzle);
+    (internal_format, luminance_transfer_format(state, format))
+}
+
+fn set_texture_swizzle(gl: &Gl, target: u32, swizzle: [u32; 4]) {
+    let target = texture_parameter_target(target);
+    let names = [
+        gl::TEXTURE_SWIZZLE_R,
+        gl::TEXTURE_SWIZZLE_G,
+        gl::TEXTURE_SWIZZLE_B,
+        gl::TEXTURE_SWIZZLE_A,
+    ];
+    for (name, value) in names.into_iter().zip(swizzle) {
+        unsafe { gl.tex_parameter_i32(target, name, value as i32) };
+    }
+}
+
+/// Which emulated legacy format copies into the texture bound to `target` must produce,
+/// when a plain copy would take the wrong channels: ALPHA (alpha into R) or
+/// LUMINANCE_ALPHA (red and alpha into RG). LUMINANCE copies red into R and needs nothing.
+#[derive(Clone, Copy)]
+enum LuminanceCopy {
+    Alpha,
+    LuminanceAlpha,
+}
+
+fn luminance_copy_kind(state: &GLState, gl: &Gl, target: u32) -> Option<LuminanceCopy> {
+    if !state.emulate_luminance {
+        return None;
+    }
+    let target = texture_parameter_target(target);
+    let swizzle_r = unsafe { gl.get_tex_parameter_i32(target, gl::TEXTURE_SWIZZLE_R) } as u32;
+    let swizzle_a = unsafe { gl.get_tex_parameter_i32(target, gl::TEXTURE_SWIZZLE_A) } as u32;
+    match (swizzle_r, swizzle_a) {
+        (gl::ZERO, gl::RED) => Some(LuminanceCopy::Alpha),
+        (gl::RED, gl::GREEN) => Some(LuminanceCopy::LuminanceAlpha),
+        _ => None,
+    }
+}
+
+/// Copies a framebuffer region into an emulated ALPHA / LUMINANCE_ALPHA texture through
+/// client memory, picking the channels a GL copy can't. Pixels outside the read framebuffer
+/// come out as zero.
+unsafe fn copy_luminance_via_cpu(
+    gl: &Gl,
+    target: u32,
+    level: i32,
+    (xoffset, yoffset, zoffset): (i32, i32, Option<i32>),
+    (x, y, width, height): (i32, i32, i32, i32),
+    kind: LuminanceCopy,
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let (width_u, height_u) = (width as usize, height as usize);
+    let mut rgba = vec![0u8; width_u * height_u * 4];
+    unsafe {
+        let pack_buffer = gl.get_parameter_buffer(gl::PIXEL_PACK_BUFFER_BINDING);
+        let unpack_buffer = gl.get_parameter_buffer(gl::PIXEL_UNPACK_BUFFER_BINDING);
+        let pack_alignment = gl.get_parameter_i32(gl::PACK_ALIGNMENT);
+        let unpack_alignment = gl.get_parameter_i32(gl::UNPACK_ALIGNMENT);
+        gl.bind_buffer(gl::PIXEL_PACK_BUFFER, None);
+        gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, None);
+        gl.pixel_store_i32(gl::PACK_ALIGNMENT, 4);
+        gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, 1);
+        gl.read_pixels(
+            x,
+            y,
+            width,
+            height,
+            gl::RGBA,
+            gl::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut rgba)),
+        );
+        let (format, data): (u32, Vec<u8>) = match kind {
+            LuminanceCopy::Alpha => (gl::RED, rgba.chunks_exact(4).map(|p| p[3]).collect()),
+            LuminanceCopy::LuminanceAlpha => (
+                gl::RG,
+                rgba.chunks_exact(4).flat_map(|p| [p[0], p[3]]).collect(),
+            ),
+        };
+        match zoffset {
+            Some(zoffset) => gl.tex_sub_image_3d(
+                target,
+                level,
+                xoffset,
+                yoffset,
+                zoffset,
+                width,
+                height,
+                1,
+                format,
+                gl::UNSIGNED_BYTE,
+                PixelUnpackData::Slice(Some(&data)),
+            ),
+            None => gl.tex_sub_image_2d(
+                target,
+                level,
+                xoffset,
+                yoffset,
+                width,
+                height,
+                format,
+                gl::UNSIGNED_BYTE,
+                PixelUnpackData::Slice(Some(&data)),
+            ),
+        }
+        gl.bind_buffer(gl::PIXEL_PACK_BUFFER, pack_buffer);
+        gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, unpack_buffer);
+        gl.pixel_store_i32(gl::PACK_ALIGNMENT, pack_alignment);
+        gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpack_alignment);
+    }
+}
+
+/// copyTexImage2D. WebGL defines pixels outside the read framebuffer as zero where GL leaves
+/// them undefined, so a partly outside copy allocates a zeroed image and copies the inside
+/// part. Copies into emulated legacy formats (see `luminance_formats`) allocate the R / RG
+/// image and copy through `copy_luminance_via_cpu` when the channels need picking.
+unsafe fn copy_tex_image_2d(
+    state: &GLState,
+    gl: &Gl,
+    target: u32,
+    level: i32,
+    internal_format: u32,
+    (x, y, width, height): (i32, i32, i32, i32),
+    (read_width, read_height): (i32, i32),
+) {
+    let unsized_format = matches!(
+        internal_format,
+        gl::ALPHA | gl::LUMINANCE | gl::LUMINANCE_ALPHA | gl::RGB | gl::RGBA
+    );
+    let emulated = state.emulate_luminance &&
+        matches!(
+            internal_format,
+            gl::ALPHA | gl::LUMINANCE | gl::LUMINANCE_ALPHA
+        );
+    let inside = x >= 0 &&
+        y >= 0 &&
+        x as i64 + width as i64 <= read_width as i64 &&
+        y as i64 + height as i64 <= read_height as i64;
+    if inside && !emulated {
+        unsafe { gl.copy_tex_image_2d(target, level, internal_format, x, y, width, height, 0) };
+        return;
+    }
+    if !unsized_format {
+        // Sized formats would need their own transfer format and type for the zeroed image;
+        // leave the outside pixels to the GL.
+        unsafe { gl.copy_tex_image_2d(target, level, internal_format, x, y, width, height, 0) };
+        return;
+    }
+    let format = TexFormat::from_gl_constant(internal_format).unwrap_or(TexFormat::RGBA);
+    let (gl_internal_format, gl_format) =
+        luminance_formats(state, gl, target, format, format, gl::UNSIGNED_BYTE);
+    let bytes_per_pixel = match gl_format {
+        gl::RED | gl::ALPHA | gl::LUMINANCE => 1,
+        gl::RG | gl::LUMINANCE_ALPHA => 2,
+        gl::RGB => 3,
+        _ => 4,
+    };
+    let zeros = vec![0u8; width.max(0) as usize * height.max(0) as usize * bytes_per_pixel];
+    unsafe {
+        let unpack_buffer = gl.get_parameter_buffer(gl::PIXEL_UNPACK_BUFFER_BINDING);
+        let unpack_alignment = gl.get_parameter_i32(gl::UNPACK_ALIGNMENT);
+        gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, None);
+        gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, 1);
+        gl.tex_image_2d(
+            target,
+            level,
+            gl_internal_format as i32,
+            width,
+            height,
+            0,
+            gl_format,
+            gl::UNSIGNED_BYTE,
+            PixelUnpackData::Slice(Some(&zeros)),
+        );
+        gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, unpack_buffer);
+        gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpack_alignment);
+    }
+    // The part of the source inside the read framebuffer.
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x as i64 + width as i64).min(read_width as i64) as i32;
+    let y1 = (y as i64 + height as i64).min(read_height as i64) as i32;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let destination = (x0 - x, y0 - y, None);
+    let source = (x0, y0, x1 - x0, y1 - y0);
+    let kind = match (emulated, internal_format) {
+        (true, gl::ALPHA) => Some(LuminanceCopy::Alpha),
+        (true, gl::LUMINANCE_ALPHA) => Some(LuminanceCopy::LuminanceAlpha),
+        _ => None,
+    };
+    match kind {
+        Some(kind) => unsafe {
+            copy_luminance_via_cpu(gl, target, level, destination, source, kind)
+        },
+        None => unsafe {
+            gl.copy_tex_sub_image_2d(
+                target,
+                level,
+                destination.0,
+                destination.1,
+                source.0,
+                source.1,
+                source.2,
+                source.3,
+            )
+        },
     }
 }

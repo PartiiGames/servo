@@ -552,6 +552,14 @@ impl WebGLRenderingContext {
         self.send_command(WebGLCommand::VertexAttrib(indx, x, y, z, w));
     }
 
+    /// The size of the framebuffer copies and readPixels read from.
+    pub(crate) fn read_framebuffer_size(&self) -> (i32, i32) {
+        match self.bound_read_framebuffer.get() {
+            Some(fb) => fb.size().unwrap_or((0, 0)),
+            None => (self.DrawingBufferWidth(), self.DrawingBufferHeight()),
+        }
+    }
+
     pub(crate) fn get_current_framebuffer_size(&self) -> Option<(i32, i32)> {
         match self.bound_draw_framebuffer.get() {
             Some(fb) => fb.size(),
@@ -2947,7 +2955,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             internal_format,
             width,
             height,
-            border,
+            border: _,
         } = match validator.validate() {
             Ok(result) => result,
             Err(_) => return,
@@ -3028,16 +3036,16 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             texture.initialize(target, width, height, 1, internal_format, level, None)
         );
 
-        let msg = WebGLCommand::CopyTexImage2D(
-            target.as_gl_constant(),
-            level as i32,
-            internal_format.as_gl_constant(),
+        let msg = WebGLCommand::CopyTexImage2D {
+            target: target.as_gl_constant(),
+            level: level as i32,
+            internal_format: internal_format.as_gl_constant(),
             x,
             y,
-            width as i32,
-            height as i32,
-            border as i32,
-        );
+            width: width as i32,
+            height: height as i32,
+            read_size: self.read_framebuffer_size(),
+        };
 
         self.send_command(msg);
 
@@ -3101,6 +3109,19 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return;
         }
 
+        // Pixels outside the read framebuffer are left alone (WebGL 1.0 5.14.8; GL leaves
+        // them undefined), so only the part inside is copied.
+        let Some((xoffset, yoffset, x, y, width, height)) = clip_copy_to_read_framebuffer(
+            self.read_framebuffer_size(),
+            xoffset,
+            yoffset,
+            x,
+            y,
+            width as i32,
+            height as i32,
+        ) else {
+            return;
+        };
         let msg = WebGLCommand::CopyTexSubImage2D(
             target.as_gl_constant(),
             level as i32,
@@ -3108,8 +3129,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             yoffset,
             x,
             y,
-            width as i32,
-            height as i32,
+            width,
+            height,
         );
 
         self.send_command(msg);
@@ -5601,4 +5622,32 @@ pub(crate) fn array_buffer_type_to_sized_type(type_: Type) -> Option<SizedDataTy
         Type::Int64 |
         Type::Simd128 => None,
     }
+}
+
+/// Clips a copyTexSubImage source rectangle to the read framebuffer, moving the destination
+/// offset with it. None when nothing is inside.
+pub(crate) fn clip_copy_to_read_framebuffer(
+    (read_width, read_height): (i32, i32),
+    xoffset: i32,
+    yoffset: i32,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Option<(i32, i32, i32, i32, i32, i32)> {
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x as i64 + width as i64).min(read_width as i64);
+    let y1 = (y as i64 + height as i64).min(read_height as i64);
+    if x1 <= x0 as i64 || y1 <= y0 as i64 {
+        return None;
+    }
+    Some((
+        xoffset + (x0 - x),
+        yoffset + (y0 - y),
+        x0,
+        y0,
+        (x1 - x0 as i64) as i32,
+        (y1 - y0 as i64) as i32,
+    ))
 }
