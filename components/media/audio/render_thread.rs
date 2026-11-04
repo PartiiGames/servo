@@ -314,6 +314,7 @@ impl AudioRenderThread {
                     response.send(context.current_time).unwrap()
                 },
                 AudioRenderThreadMsg::MessageNode(id, msg) => {
+                    let msg = msg.clamped_to(context.current_time);
                     context.graph.node_mut(id).message(msg, sample_rate)
                 },
                 AudioRenderThreadMsg::SinkNeedData => {

@@ -60,6 +60,10 @@ pub struct Param {
     /// If true, `blocks` has been summed together into a single block
     summed: bool,
     dirty: bool,
+    /// The last tick `update` ran for. A SetValueAtTime whose time fell between two updates
+    /// (the node skipped quanta, e.g. a GainNode with silent input or a source not started
+    /// yet) still takes effect, once, at the next update.
+    last_tick: Option<Tick>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, MallocSizeOf)]
@@ -86,6 +90,7 @@ impl Param {
             block_mix_val: 0.,
             summed: false,
             dirty: false,
+            last_tick: None,
         }
     }
 
@@ -104,6 +109,7 @@ impl Param {
             block_mix_val: 0.,
             summed: false,
             dirty: false,
+            last_tick: None,
         }
     }
 
@@ -164,6 +170,7 @@ impl Param {
         }
 
         let current_tick = block.absolute_tick(tick);
+        let since = self.last_tick.replace(current_tick);
         let mut current_event = &self.events[self.current_event];
 
         // Update then move to next event if necessary.
@@ -174,6 +181,7 @@ impl Param {
             // Run the event automation if it is active.
             if current_event.is_active(
                 current_tick,
+                since,
                 self.get_previous_event(self.current_event),
                 maybe_next_event,
             ) {
@@ -212,6 +220,7 @@ impl Param {
             if let Some(next_event) = maybe_next_event &&
                 next_event.is_active(
                     current_tick,
+                    since,
                     Some(current_event),
                     self.events.get(self.current_event + 2),
                 )
@@ -435,6 +444,26 @@ pub enum UserAutomationEvent {
 }
 
 impl UserAutomationEvent {
+    /// Every automation method clamps its time to the context's current time:
+    /// > If startTime (endTime, cancelTime) is less than currentTime, it is clamped to
+    /// > currentTime.
+    ///
+    /// <https://webaudio.github.io/web-audio-api/#AudioParam-methods>. Without this, an event
+    /// in the past (Tone.js schedules `setValueAtTime(v, 0)` on a running context) never fires.
+    pub(crate) fn clamp_to(self, current_time: f64) -> Self {
+        use UserAutomationEvent::*;
+        let c = |t: f64| t.max(current_time);
+        match self {
+            SetValue(v) => SetValue(v),
+            SetValueAtTime(v, t) => SetValueAtTime(v, c(t)),
+            RampToValueAtTime(kind, v, t) => RampToValueAtTime(kind, v, c(t)),
+            SetTargetAtTime(v, t, tau) => SetTargetAtTime(v, c(t), tau),
+            SetValueCurveAtTime(values, t, duration) => SetValueCurveAtTime(values, c(t), duration),
+            CancelAndHoldAtTime(t) => CancelAndHoldAtTime(c(t)),
+            CancelScheduledValues(t) => CancelScheduledValues(c(t)),
+        }
+    }
+
     pub(crate) fn convert_to_event(self, rate: f32) -> AutomationEvent {
         match self {
             UserAutomationEvent::SetValue(val) => AutomationEvent::SetValue(val),
@@ -543,11 +572,15 @@ impl AutomationEvent {
     fn is_active(
         &self,
         current_tick: Tick,
+        since: Option<Tick>,
         previous_event: Option<&AutomationEvent>,
         next_event: Option<&AutomationEvent>,
     ) -> bool {
         match self {
-            AutomationEvent::SetValueAtTime(_, time) => *time == current_tick,
+            // Active at its tick, or at the first update after it if that tick was skipped.
+            AutomationEvent::SetValueAtTime(_, time) => {
+                *time <= current_tick && since.is_none_or(|since| *time > since)
+            },
             // https://webaudio.github.io/web-audio-api/#dom-audioparam-linearramptovalueattime
             AutomationEvent::RampToValueAtTime(..) => {
                 // Ramp always has a done time.
@@ -561,7 +594,7 @@ impl AutomationEvent {
                     // If previous event is an active SetTarget, then this ramp will be active,
                     // because T0 is set to current time.
                     if event.is_set_target() {
-                        event.is_active(current_tick, None, None)
+                        event.is_active(current_tick, since, None, None)
                     } else {
                         // > The value during the time interval T0≤t<T1
                         // > (where T0 is the time of the previous event
@@ -654,7 +687,7 @@ impl AutomationEvent {
 
         match *self {
             AutomationEvent::SetValueAtTime(val, time) => {
-                if current_tick == time {
+                if time <= current_tick {
                     *value = val;
                     *value_time = time;
                     true
@@ -716,5 +749,81 @@ impl AutomationEvent {
                 unreachable!("CancelScheduledValues/SetValue should never appear in the timeline")
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automation_times_before_current_time_are_clamped() {
+        let now = 1.5;
+        assert_eq!(
+            UserAutomationEvent::SetValueAtTime(0.5, 0.).clamp_to(now),
+            UserAutomationEvent::SetValueAtTime(0.5, now)
+        );
+        assert_eq!(
+            UserAutomationEvent::SetValueAtTime(0.5, 2.).clamp_to(now),
+            UserAutomationEvent::SetValueAtTime(0.5, 2.)
+        );
+        assert_eq!(
+            UserAutomationEvent::SetTargetAtTime(1., 0.25, 0.1).clamp_to(now),
+            UserAutomationEvent::SetTargetAtTime(1., now, 0.1)
+        );
+        assert_eq!(
+            UserAutomationEvent::CancelScheduledValues(0.).clamp_to(now),
+            UserAutomationEvent::CancelScheduledValues(now)
+        );
+    }
+
+    fn block(frame: u64) -> BlockInfo {
+        BlockInfo {
+            sample_rate: 48000.,
+            frame: Tick(frame),
+            time: frame as f64 / 48000.,
+        }
+    }
+
+    #[test]
+    fn set_value_at_time_fires_once_even_if_its_tick_was_skipped() {
+        let mut p = Param::new(1.);
+        p.insert_event(AutomationEvent::SetValueAtTime(0.25, Tick(100)));
+        p.update(&block(0), Tick(0));
+        assert_eq!(p.value(), 1.);
+        // The node was not processed for the quantum holding tick 100 (silent input).
+        p.update(&block(256), Tick(0));
+        assert_eq!(p.value(), 0.25);
+        // The value setter afterwards is not overridden by the same event again.
+        p.insert_event(AutomationEvent::SetValue(0.9));
+        p.update(&block(384), Tick(0));
+        assert_eq!(p.value(), 0.9);
+    }
+
+    #[test]
+    fn set_value_at_time_on_its_tick_still_works() {
+        let mut p = Param::new(1.);
+        p.insert_event(AutomationEvent::SetValueAtTime(0.5, Tick(130)));
+        p.update(&block(128), Tick(0));
+        p.update(&block(128), Tick(1));
+        assert_eq!(p.value(), 1.);
+        p.update(&block(128), Tick(2));
+        assert_eq!(p.value(), 0.5);
+    }
+
+    #[test]
+    fn set_value_at_time_in_the_past_takes_effect_at_the_next_tick() {
+        // A context at frame 4800 (0.1 s at 48 kHz) receives setValueAtTime(0.5, 0).
+        let rate = 48000.;
+        let mut p = Param::new(1.);
+        let event = UserAutomationEvent::SetValueAtTime(0.5, 0.).clamp_to(0.1);
+        p.insert_event(event.convert_to_event(rate));
+        let info = BlockInfo {
+            sample_rate: rate,
+            frame: Tick(4800),
+            time: 0.1,
+        };
+        p.update(&info, Tick(0));
+        assert_eq!(p.value(), 0.5);
     }
 }

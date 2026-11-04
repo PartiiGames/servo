@@ -262,6 +262,19 @@ pub enum AudioNodeMessage {
     WaveShaperNode(WaveShaperNodeMessage),
 }
 
+impl AudioNodeMessage {
+    /// Clamp automation times to the context's current time (see
+    /// [`UserAutomationEvent::clamp_to`]).
+    pub(crate) fn clamped_to(self, current_time: f64) -> Self {
+        match self {
+            AudioNodeMessage::SetParam(id, event) => {
+                AudioNodeMessage::SetParam(id, event.clamp_to(current_time))
+            },
+            other => other,
+        }
+    }
+}
+
 pub struct OnEndedCallback(pub Box<dyn FnOnce() + Send + 'static>);
 
 impl OnEndedCallback {

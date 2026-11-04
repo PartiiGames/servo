@@ -7,6 +7,8 @@ use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock};
 
 use malloc_size_of_derive::MallocSizeOf;
+use num_complex::Complex;
+use realfft::{RealFftPlanner, RealToComplex};
 use servo_base::generic_channel::GenericCallback;
 
 use crate::audio_node::{
@@ -80,6 +82,11 @@ pub struct AnalysisEngine {
     /// The windowed time domain data
     /// Used during FFT computation
     windowed: Vec<f32>,
+    /// The real FFT plan for the current size, and its output.
+    #[ignore_malloc_size_of = "FFT plan"]
+    fft: Option<(usize, Arc<dyn RealToComplex<f32>>)>,
+    #[ignore_malloc_size_of = "scratch"]
+    spectrum: Vec<Complex<f32>>,
 }
 
 impl AnalysisEngine {
@@ -106,6 +113,8 @@ impl AnalysisEngine {
             computed_fft_data: Vec::with_capacity(fft_size / 2),
             smoothed_fft_data: Vec::with_capacity(fft_size / 2),
             windowed: Vec::with_capacity(fft_size),
+            fft: None,
+            spectrum: Vec::new(),
         }
     }
 
@@ -228,22 +237,31 @@ impl AnalysisEngine {
         self.computed_fft_data.resize(self.fft_size / 2, 0.);
         self.smoothed_fft_data.resize(self.fft_size / 2, 0.);
 
+        // X[k] = sum_n windowed[n] e^(-2 pi i k n / N), by a real FFT (this was an O(N^2)
+        // direct sum, ~10^9 terms at the 32768 maximum).
+        if self.fft.as_ref().is_none_or(|(size, _)| *size != self.fft_size) {
+            let plan = RealFftPlanner::<f32>::new().plan_fft_forward(self.fft_size);
+            self.fft = Some((self.fft_size, plan));
+        }
+        let plan = &self.fft.as_ref().expect("planned above").1;
+        self.spectrum.resize(self.fft_size / 2 + 1, Complex::default());
+        plan.process(&mut self.windowed, &mut self.spectrum)
+            .expect("FFT sizes match the plan");
         for k in 0..(self.fft_size / 2) {
-            let mut sum_real = 0.;
-            let mut sum_imaginary = 0.;
-            let factor = -2. * PI * k as f32 / self.fft_size as f32;
-            for n in 0..(self.fft_size) {
-                sum_real += self.windowed[n] * (factor * n as f32).cos();
-                sum_imaginary += self.windowed[n] * (factor * n as f32).sin();
-            }
-            let sum_real = sum_real / self.fft_size as f32;
-            let sum_imaginary = sum_imaginary / self.fft_size as f32;
-            let magnitude = (sum_real * sum_real + sum_imaginary * sum_imaginary).sqrt();
+            let bin = self.spectrum[k] / self.fft_size as f32;
+            let magnitude = bin.norm();
             self.smoothed_fft_data[k] = (self.smoothing_constant * self.smoothed_fft_data[k] as f64 +
                 (1. - self.smoothing_constant) * magnitude as f64)
                 as f32;
             self.computed_fft_data[k] = 20. * self.smoothed_fft_data[k].log(10.);
         }
+    }
+
+    /// The windowed input of the last FFT. The FFT works in place, so this recomputes it.
+    #[cfg(test)]
+    fn windowed_for_test(&mut self) -> Vec<f32> {
+        self.apply_blackman_window();
+        self.windowed.clone()
     }
 
     pub fn fill_time_domain_data(&self, dest: &mut [f32]) {
@@ -289,5 +307,45 @@ fn clamp_255(val: f32) -> u8 {
         0
     } else {
         val as u8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The direct sum this engine used before the FFT, for reference.
+    fn direct_db(windowed: &[f32]) -> Vec<f32> {
+        let n_total = windowed.len();
+        (0..n_total / 2)
+            .map(|k| {
+                let (mut re, mut im) = (0f64, 0f64);
+                for (n, x) in windowed.iter().enumerate() {
+                    let a = -2. * std::f64::consts::PI * (k * n) as f64 / n_total as f64;
+                    re += *x as f64 * a.cos();
+                    im += *x as f64 * a.sin();
+                }
+                let m = ((re * re + im * im).sqrt() / n_total as f64) as f32;
+                20. * m.log10()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fft_matches_the_direct_sum() {
+        let size = 256;
+        let mut engine = AnalysisEngine::new(size, 0., -100., -30.);
+        let signal: Vec<f32> = (0..size)
+            .map(|n| (0.3 * n as f32).sin() + 0.25 * (1.7 * n as f32).cos())
+            .collect();
+        for chunk in signal.chunks(FRAMES_PER_BLOCK_USIZE) {
+            engine.push(Block::for_vec(chunk.to_vec()));
+        }
+        let mut fast = vec![0.; size / 2];
+        engine.fill_frequency_data(&mut fast);
+        let expected = direct_db(&engine.windowed_for_test());
+        for (k, (a, e)) in fast.iter().zip(&expected).enumerate() {
+            assert!((a - e).abs() < 0.01 || *e < -100., "bin {k}: {a} vs {e}");
+        }
     }
 }
