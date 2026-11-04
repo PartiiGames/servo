@@ -2,8 +2,8 @@ import enum
 import errno
 import os
 import platform
-import random
 import socket
+import threading
 import time
 import traceback
 from abc import ABCMeta, abstractmethod
@@ -52,6 +52,12 @@ def certificate_domain_list(list_of_domains: List[str],
     return cert_list
 
 
+# WPT_FREE_PORT_RANGE state (see get_free_port).
+_range_port_lock = threading.Lock()
+_range_port_next = [0]
+_range_ports_issued: List[int] = []
+
+
 def get_free_port() -> int:
     """Get a random unbound port.
 
@@ -61,18 +67,26 @@ def get_free_port() -> int:
     port_range = os.environ.get("WPT_FREE_PORT_RANGE")
     if port_range:
         low, high = (int(part) for part in port_range.split("-"))
-        candidates = list(range(low, high + 1))
-        random.shuffle(candidates)
-        for candidate in candidates:
-            s = socket.socket()
-            try:
-                s.bind(("127.0.0.1", candidate))
-            except OSError:
-                continue
-            else:
+        # Hand ports out round-robin and never re-issue one of the most recently issued ones:
+        # several TestRunnerManager threads ask at once, and a port is only free until the
+        # browser binds it (a random pick let two browsers collide: WebDriver AddrInUse).
+        with _range_port_lock:
+            span = high - low + 1
+            for step in range(span):
+                candidate = low + (_range_port_next[0] + step) % span
+                if candidate in _range_ports_issued:
+                    continue
+                s = socket.socket()
+                try:
+                    s.bind(("127.0.0.1", candidate))
+                except OSError:
+                    continue
+                finally:
+                    s.close()
+                _range_port_next[0] = (candidate - low + 1) % span
+                _range_ports_issued.append(candidate)
+                del _range_ports_issued[:-max(1, span // 2)]
                 return candidate
-            finally:
-                s.close()
         raise OSError(f"no free port in WPT_FREE_PORT_RANGE={port_range}")
     while True:
         s = socket.socket()
