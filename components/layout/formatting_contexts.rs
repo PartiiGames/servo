@@ -46,6 +46,9 @@ pub(crate) struct IndependentFormattingContext {
     /// If this [`IndependentFormattingContext`] was a layout root, this stores the data
     /// necessary to lay it out again.
     pub layout_root_layout_inputs: AtomicRefCell<Option<Box<LayoutRootLayoutInputs>>>,
+    /// Partii: for a textual `<input>`, its `size`: the min/max-content inline size is at least
+    /// that many characters wide (`width` stays `auto`, so the input stretches).
+    pub text_input_size: Option<u32>,
 }
 
 #[derive(Debug, MallocSizeOf)]
@@ -111,6 +114,7 @@ impl IndependentFormattingContext {
             contents,
             propagated_data,
             layout_root_layout_inputs: None.into(),
+            text_input_size: None,
         }
     }
 
@@ -142,6 +146,7 @@ impl IndependentFormattingContext {
             self.propagated_data,
         );
 
+        self.text_input_size = node_and_style_info.node.text_input_size();
         self.base.clear_fragments_and_dirty_fragment_cache();
         *self.base.cached_inline_content_size.borrow_mut() = None;
         self.base.repair_style(&node_and_style_info.style);
@@ -172,6 +177,7 @@ impl IndependentFormattingContext {
             contents,
             propagated_data,
             layout_root_layout_inputs: None.into(),
+            text_input_size: node_and_style_info.node.text_input_size(),
         }
     }
 
@@ -285,8 +291,19 @@ impl IndependentFormattingContext {
         layout_context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
-        self.base
-            .inline_content_sizes(layout_context, constraint_space, &self.contents)
+        let mut result = self
+            .base
+            .inline_content_sizes(layout_context, constraint_space, &self.contents);
+        // Partii: a textual input is at least `size` characters wide (HTML's "average character
+        // width" approximated as Stylo's ServoCharacterWidth: half the font size per character,
+        // a full font size for the last).
+        if let Some(size) = self.text_input_size {
+            let font_size = self.style().get_font().font_size.computed_size().px();
+            let width = Au::from_f32_px(font_size * 0.5 * (size as f32 - 1.0) + font_size);
+            result.sizes.min_content.max_assign(width);
+            result.sizes.max_content.max_assign(width);
+        }
+        result
     }
 
     /// Computes the tentative intrinsic block sizes that may be needed while computing

@@ -1194,6 +1194,30 @@ pub(crate) fn get_attr_for_layout<'dom>(
 }
 
 impl<'dom> LayoutDom<'dom, Element> {
+    /// Partii: the `size` of a textual input (text entry and domain-specific widgets), its
+    /// intrinsic width in characters.
+    /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-a-text-entry-widget>
+    /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-domain-specific-widgets>
+    pub(crate) fn text_input_size_for_layout(self) -> Option<u32> {
+        // A textarea's `cols` (no scrollbar width yet: see
+        // <https://html.spec.whatwg.org/multipage/#textarea-effective-width>).
+        if let Some(textarea) = self.downcast::<HTMLTextAreaElement>() {
+            return match textarea.get_cols() {
+                0 => None,
+                cols => Some(cols),
+            };
+        }
+        let input_element = self.downcast::<HTMLInputElement>()?;
+        match self.get_attr_val_for_layout(&ns!(), &local_name!("type")) {
+            Some("hidden") | Some("range") | Some("color") | Some("checkbox") | Some("radio") |
+            Some("file") | Some("submit") | Some("image") | Some("reset") | Some("button") => None,
+            _ => match input_element.size_for_layout() {
+                0 => None,
+                size => Some(size),
+            },
+        }
+    }
+
     #[inline]
     pub(crate) fn is_root(&self) -> bool {
         self.upcast::<Node>()
@@ -1368,35 +1392,10 @@ impl<'dom> LayoutDom<'dom, Element> {
             ));
         }
 
-        // Textual input, specifically text entry and domain specific input has
-        // a default preferred size.
-        //
-        // <https://html.spec.whatwg.org/multipage/#the-input-element-as-a-text-entry-widget>
-        // <https://html.spec.whatwg.org/multipage/#the-input-element-as-domain-specific-widgets>
-        let size = self
-            .downcast::<HTMLInputElement>()
-            .and_then(|input_element| {
-                // FIXME(pcwalton): More use of atoms, please!
-                match self.get_attr_val_for_layout(&ns!(), &local_name!("type")) {
-                    Some("hidden") | Some("range") | Some("color") | Some("checkbox") |
-                    Some("radio") | Some("file") | Some("submit") | Some("image") |
-                    Some("reset") | Some("button") => None,
-                    // Others
-                    _ => match input_element.size_for_layout() {
-                        0 => None,
-                        s => Some(s as i32),
-                    },
-                }
-            });
-
-        if let Some(size) = size {
-            let value = specified::NoCalcLength::from_servo_character_width(size);
-            push(PropertyDeclaration::Width(
-                specified::Size::LengthPercentage(NonNegative(
-                    specified::LengthPercentage::Length(value),
-                )),
-            ));
-        }
+        // Partii: a textual input's `size` is its intrinsic (preferred) width, not a `width`
+        // hint: layout uses `text_input_size_for_layout` for the input's min/max-content
+        // sizes, so `width` stays `auto` and the input stretches in flex and grid like other
+        // boxes.
 
         let width = if let Some(this) = self.downcast::<HTMLIFrameElement>() {
             this.get_width()
@@ -1495,25 +1494,8 @@ impl<'dom> LayoutDom<'dom, Element> {
             push(PropertyDeclaration::AspectRatio(Box::new(aspect_ratio)));
         }
 
-        let cols = self
-            .downcast::<HTMLTextAreaElement>()
-            .map(LayoutDom::get_cols);
-        if let Some(cols) = cols {
-            let cols = cols as i32;
-            if cols > 0 {
-                // TODO(mttr) ServoCharacterWidth uses the size math for <input type="text">, but
-                // the math for <textarea> is a little different since we need to take
-                // scrollbar size into consideration (but we don't have a scrollbar yet!)
-                //
-                // https://html.spec.whatwg.org/multipage/#textarea-effective-width
-                let value = specified::NoCalcLength::from_servo_character_width(cols);
-                push(PropertyDeclaration::Width(
-                    specified::Size::LengthPercentage(NonNegative(
-                        specified::LengthPercentage::Length(value),
-                    )),
-                ));
-            }
-        }
+        // Partii: a textarea's `cols` is its intrinsic width (see
+        // `text_input_size_for_layout`), not a `width` hint, so it stretches like other boxes.
 
         let rows = self
             .downcast::<HTMLTextAreaElement>()

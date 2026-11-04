@@ -330,6 +330,15 @@ impl<'dom> LayoutNode<'dom> for ServoLayoutNode<'dom> {
     fn is_root_of_user_agent_widget(&self) -> bool {
         self.node.is_root_of_user_agent_widget()
     }
+
+    fn text_input_size(&self) -> Option<u32> {
+        if !self.pseudo_element_chain.is_empty() {
+            return None;
+        }
+        self.node
+            .downcast::<Element>()?
+            .text_input_size_for_layout()
+    }
 }
 
 impl NodeInfo for ServoLayoutNode<'_> {

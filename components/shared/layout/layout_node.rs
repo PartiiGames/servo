@@ -225,6 +225,11 @@ pub trait LayoutNode<'dom>: Copy + Debug + NodeInfo + Send + Sync {
     /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-a-text-entry-widget>
     fn is_single_line_text_input(&self) -> bool;
 
+    /// Partii: for a textual `<input>`, its `size` (intrinsic width in characters).
+    fn text_input_size(&self) -> Option<u32> {
+        None
+    }
+
     /// Whether or not this [`LayoutNode`] is in a user agent widget shadow DOM.
     fn is_root_of_user_agent_widget(&self) -> bool;
 
