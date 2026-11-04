@@ -25,10 +25,12 @@ use crate::dom::bindings::root::DomRoot;
 use crate::dom::window::Window;
 use crate::realms::enter_auto_realm;
 
-// Spec mandates at least [8000, 96000], we use [8000, 192000] to match Firefox
+// The nominal sample-rate range for AudioBuffers and OfflineAudioContexts. The spec mandates at
+// least [8000, 96000]; we use [3000, 768000], as Chrome does and as AudioContext does here, so a
+// buffer or offline context can use any rate a real-time context accepts.
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbuffer
-pub(crate) const MIN_SAMPLE_RATE: f32 = 8000.;
-pub(crate) const MAX_SAMPLE_RATE: f32 = 192000.;
+pub(crate) const MIN_SAMPLE_RATE: f32 = 3000.;
+pub(crate) const MAX_SAMPLE_RATE: f32 = 768000.;
 
 /// The AudioBuffer keeps its data in shared_channels until the first GetChannelData, then in
 /// js_channels. Unlike the spec's "acquire the content", nodes that use the buffer get a copy and
