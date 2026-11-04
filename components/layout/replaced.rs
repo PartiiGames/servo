@@ -293,7 +293,18 @@ impl ReplacedContents {
             ratio,
         };
 
+        // Partii: the serialized SVG has the element's `color` baked in (`currentColor`);
+        // serialize it again when that color changed (e.g. :hover).
+        let color_changed = svg_data
+            .serialized_color
+            .is_some_and(|serialized| serialized != parent_style.get_inherited_text().color);
         let svg_source = match svg_data.source {
+            Some(Ok(_)) if color_changed => {
+                context
+                    .image_resolver
+                    .queue_svg_element_for_serialization(node);
+                None
+            },
             None => {
                 // The SVGSVGElement is not yet serialized, so we add it to a list
                 // and hand it over to script to peform the serialization.

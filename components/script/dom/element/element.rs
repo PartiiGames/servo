@@ -1074,6 +1074,15 @@ impl Element {
         document.finish_handle_scroll_event(self.upcast());
     }
 
+    /// Partii: the element's last computed style, without a style query (for callers that run
+    /// right after layout, e.g. SVG serialization).
+    pub(crate) fn style_without_reflow(&self) -> Option<ServoArc<ComputedValues>> {
+        self.style_data
+            .borrow()
+            .as_ref()
+            .map(|data| data.element_data.borrow().styles.primary().clone())
+    }
+
     pub(crate) fn style(&self) -> Option<ServoArc<ComputedValues>> {
         self.owner_window().layout_reflow(QueryMsg::StyleQuery);
         self.style_data

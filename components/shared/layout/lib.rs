@@ -160,6 +160,8 @@ pub struct HTMLCanvasData {
 pub struct SVGElementData<'dom> {
     /// The SVG's XML source represented as a base64 encoded `data:` url.
     pub source: Option<Result<ServoUrl, ()>>,
+    /// Partii: the CSS `color` the source was serialized with (`currentColor` inside the SVG).
+    pub serialized_color: Option<style::color::AbsoluteColor>,
     pub width: Option<&'dom AttrValue>,
     pub height: Option<&'dom AttrValue>,
     pub svg_id: Uuid,

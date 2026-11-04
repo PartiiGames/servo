@@ -12,10 +12,11 @@ use js::rust::HandleObject;
 use layout_api::SVGElementData;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
+use style::color::AbsoluteColor;
 use style::parser::ParserContext;
 use style::stylesheets::Origin;
 use style::values::specified::LengthPercentage;
-use style_traits::ParsingMode;
+use style_traits::{ParsingMode, ToCss};
 use uuid::Uuid;
 use xml5ever::serialize::TraversalScope;
 
@@ -44,6 +45,11 @@ pub(crate) struct SVGSVGElement {
     // on each layout and must be invalidated when the subtree changes.
     #[no_trace]
     cached_serialized_data_url: AtomicRefCell<Option<Result<ServoUrl, ()>>>,
+    /// Partii: the element's CSS `color` when it was serialized; the serialized root carries
+    /// it as its `color` attribute, so `currentColor` in the SVG resolves to it.
+    #[no_trace]
+    #[ignore_malloc_size_of = "Copy color"]
+    serialized_color: AtomicRefCell<Option<AbsoluteColor>>,
 }
 
 impl SVGSVGElement {
@@ -56,6 +62,7 @@ impl SVGSVGElement {
             svggraphicselement: SVGGraphicsElement::new_inherited(local_name, prefix, document),
             uuid: Uuid::new_v4(),
             cached_serialized_data_url: Default::default(),
+            serialized_color: Default::default(),
         }
     }
 
@@ -95,6 +102,21 @@ impl SVGSVGElement {
         }
 
         self.process_use_elements(cx, &cloned_node);
+
+        // Partii: the SVG is rasterized on its own, where `currentColor` would be black; give
+        // its root the element's CSS `color`.
+        let color = self
+            .upcast::<Element>()
+            .style_without_reflow()
+            .map(|style| style.get_inherited_text().color);
+        *self.serialized_color.borrow_mut() = color;
+        if let (Some(color), Some(root)) = (color, cloned_node.downcast::<Element>()) {
+            root.set_attribute(
+                cx,
+                &local_name!("color"),
+                AttrValue::String(color.to_css_string()),
+            );
+        }
 
         let Ok(xml_source) = cloned_node.xml_serialize(TraversalScope::IncludeNode) else {
             *self.cached_serialized_data_url.borrow_mut() = Some(Err(()));
@@ -195,6 +217,7 @@ impl<'dom> LayoutDom<'dom, SVGSVGElement> {
                 .cached_serialized_data_url
                 .borrow()
                 .clone(),
+            serialized_color: *self.unsafe_get().serialized_color.borrow(),
             width,
             height,
             view_box,
