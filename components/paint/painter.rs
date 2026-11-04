@@ -259,6 +259,12 @@ impl Painter {
                 render_backend_hooks: Some(Box::new(BoostWebRenderThread)),
                 scene_builder_hooks: Some(Box::new(BoostWebRenderThread)),
                 shared_font_namespace: Some(painter_id.into()),
+                // Partii (perf stream, experiment): PARTII_WR_TILE=WxH sets WebRender's picture
+                // cache tile size (default 1024x512).
+                picture_tile_size: std::env::var("PARTII_WR_TILE").ok().and_then(|v| {
+                    let (w, h) = v.split_once('x')?;
+                    Some(webrender_api::units::DeviceIntSize::new(w.parse().ok()?, h.parse().ok()?))
+                }),
                 ..Default::default()
             },
             None,
