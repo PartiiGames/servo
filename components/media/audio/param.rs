@@ -206,6 +206,27 @@ impl Param {
                 if let Some(start_time) = current_event.start_time() {
                     // If the current event just started, update the param event start time and val
                     if start_time == current_tick {
+                        // SetTarget's V0 is the value at T0. When it follows another
+                        // SetTarget still running at T0, that is the earlier curve at
+                        // T0, not its value one tick before.
+                        if current_event.is_set_target() &&
+                            let Some(previous) = self
+                                .current_event
+                                .checked_sub(1)
+                                .and_then(|index| self.events.get(index)) &&
+                            previous.is_set_target() &&
+                            previous.done_time().is_none_or(|done| done >= current_tick)
+                        {
+                            let mut time = self.time;
+                            previous.run(
+                                &mut self.val,
+                                &mut time,
+                                current_tick,
+                                self.event_start_time,
+                                self.event_start_value,
+                            );
+                            self.time = time;
+                        }
                         self.event_start_time = self.time;
                         self.event_start_value = self.val;
                         // > If the preceding event is a SetTarget event,
@@ -858,6 +879,26 @@ mod tests {
         assert_eq!(p.value(), 1.5);
         p.update(&block(512), Tick(0));
         assert_eq!(p.value(), 1.);
+    }
+
+    #[test]
+    fn set_target_after_set_target_starts_from_the_earlier_curve() {
+        // setTargetAtTime-after-event-within-block.html: tau = 1 tick, curves at 125 and 126.
+        let target1 = 1.582_f32;
+        let mut p = Param::new(0.);
+        p.insert_event(AutomationEvent::SetTargetAtTime(target1, Tick(125), 1., None));
+        p.insert_event(AutomationEvent::SetTargetAtTime(0., Tick(126), 1., None));
+        let mut out = vec![];
+        for tick in 0..129 {
+            let info = block(tick / 128 * 128);
+            p.update(&info, Tick(tick % 128));
+            out.push(p.value());
+        }
+        assert_eq!(out[125], 0.);
+        let at126 = target1 * (1. - (-1_f32).exp());
+        assert!((out[126] - at126).abs() < 1e-6, "{} vs {}", out[126], at126);
+        assert!((out[127] - at126 * (-1_f32).exp()).abs() < 1e-6);
+        assert!((out[128] - at126 * (-2_f32).exp()).abs() < 1e-6);
     }
 
     #[test]
