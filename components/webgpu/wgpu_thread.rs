@@ -244,6 +244,16 @@ impl WGPU {
                             );
 
                             self.maybe_dispatch_wgpu_error(device_id, error);
+                        } else {
+                            // The descriptor failed to convert (script has reported that
+                            // error). The id must still name a resource, an invalid one:
+                            // using a missing id panics wgpu-core and kills this thread,
+                            // and with it WebGPU for every page.
+                            global.create_bind_group_layout_error(
+                                device_id,
+                                Some(bind_group_layout_id),
+                                None,
+                            );
                         }
                     },
                     WebGPURequest::CreateBuffer {
@@ -457,6 +467,23 @@ impl WGPU {
                             );
 
                             self.maybe_dispatch_wgpu_error(device_id, error);
+                        } else {
+                            // As for bind group layouts: register an invalid view under the
+                            // id. wgpu-core has no create_texture_view_error, but a failed
+                            // creation registers one; a zero mip level count always fails.
+                            // Script already reported the real error, so drop this one.
+                            let invalid = wgpu_core::resource::TextureViewDescriptor {
+                                range: wgpu_types::ImageSubresourceRange {
+                                    mip_level_count: Some(0),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            };
+                            let _ = global.texture_create_view(
+                                texture_id,
+                                &invalid,
+                                Some(texture_view_id),
+                            );
                         }
                     },
                     WebGPURequest::DestroyBuffer(buffer) => {
