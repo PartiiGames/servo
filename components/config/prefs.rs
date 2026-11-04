@@ -252,6 +252,8 @@ pub struct Preferences {
     pub dom_webxr_openxr_enabled: bool,
     pub dom_webxr_sessionavailable: bool,
     pub dom_webxr_unsafe_assume_user_intent: bool,
+    /// AudioWorklet (Partii Runtime; needs dom_worklet_enabled too)
+    pub dom_audioworklet_enabled: bool,
     pub dom_worklet_enabled: bool,
     pub dom_worklet_blockingsleep_enabled: bool,
     pub dom_worklet_testing_enabled: bool,
@@ -521,6 +523,7 @@ impl Preferences {
             dom_webxr_test: false,
             dom_webxr_unsafe_assume_user_intent: false,
             dom_worklet_blockingsleep_enabled: false,
+            dom_audioworklet_enabled: false,
             dom_worklet_enabled: false,
             dom_worklet_testing_enabled: false,
             dom_worklet_timeout_ms: 10,

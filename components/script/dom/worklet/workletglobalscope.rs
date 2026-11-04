@@ -110,6 +110,9 @@ impl WorkletGlobalScope {
                 init,
                 closing,
             )),
+            WorkletGlobalScopeType::Audio => {
+                unreachable!("AudioWorkletGlobalScope is created on the render thread")
+            },
         };
 
         let mut realm = enter_auto_realm(cx, &*scope);
@@ -194,6 +197,10 @@ impl WorkletGlobalScope {
             .expect("Worklet thread outlived script thread.");
     }
 
+    pub(crate) fn to_script_thread_sender(&self) -> &Sender<MainThreadScriptMsg> {
+        &self.to_script_thread_sender
+    }
+
     /// The base URL of this global.
     pub(crate) fn base_url(&self) -> ServoUrl {
         self.base_url.clone()
@@ -268,4 +275,6 @@ pub(crate) enum WorkletGlobalScopeType {
     Test,
     /// A paint worklet
     Paint,
+    /// The audio worklet (its global is created by `AudioWorkletThreadPool`, not here)
+    Audio,
 }

@@ -3,6 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 pub(crate) use self::worklet::*;
+pub(crate) mod audioworkletglobalscope;
+pub(crate) mod audioworkletprocessor;
 pub(crate) mod paintsize;
 pub(crate) mod paintworkletglobalscope;
 #[allow(clippy::module_inception, reason = "The interface name is Worklet")]
