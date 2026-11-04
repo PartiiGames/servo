@@ -6,7 +6,6 @@
 //! symphonia on its own thread a little ahead of playback, and plays through the shared output.
 //! Files with no decodable audio track (e.g. video-only) report an error, as unsupported media.
 
-use std::collections::VecDeque;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -32,6 +31,7 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
 use crate::output::{OutputSource, add_stereo, output};
+use crate::queue::FrameQueue;
 
 /// Decode ahead of playback by this much (seconds).
 const LOW_WATER_SECS: f64 = 0.5;
@@ -40,9 +40,7 @@ const POSITION_INTERVAL: Duration = Duration::from_millis(100);
 const TICK: Duration = Duration::from_millis(15);
 
 struct PlayState {
-    fifo: VecDeque<[f32; 2]>,
-    prev: [f32; 2],
-    frac: f64,
+    fifo: FrameQueue,
     src_rate: u32,
     playing: bool,
     suspended: bool,
@@ -80,7 +78,7 @@ pub(crate) struct PlayerShared {
 }
 
 impl PlayerShared {
-    /// Pull `frames` frames at `rate` from the FIFO (linear resampling), calling `put` per frame.
+    /// Pull `frames` frames at `rate` from the FIFO (resampled), calling `put` per frame.
     fn pull(st: &mut PlayState, frames: usize, rate: u32, mut put: impl FnMut(usize, f32, f32)) {
         let gain = if st.muted || st.context_muted {
             0.
@@ -88,26 +86,9 @@ impl PlayerShared {
             st.volume
         };
         let step = st.src_rate as f64 * st.playback_rate / rate as f64;
-        for i in 0..frames {
-            while st.frac >= 1. {
-                match st.fifo.pop_front() {
-                    Some(f) => {
-                        st.prev = f;
-                        st.frac -= 1.;
-                        st.consumed += 1;
-                    },
-                    None => break,
-                }
-            }
-            let Some(cur) = st.fifo.front().copied() else {
-                break;
-            };
-            let t = st.frac as f32;
-            let l = st.prev[0] + (cur[0] - st.prev[0]) * t;
-            let r = st.prev[1] + (cur[1] - st.prev[1]) * t;
-            put(i, l * gain, r * gain);
-            st.frac += step;
-        }
+        st.consumed += st
+            .fifo
+            .read(frames, step, |i, l, r| put(i, l * gain, r * gain));
     }
 }
 
@@ -172,9 +153,7 @@ impl NativePlayer {
     ) -> Self {
         let shared = Arc::new(PlayerShared {
             state: Mutex::new(PlayState {
-                fifo: VecDeque::new(),
-                prev: [0.; 2],
-                frac: 0.,
+                fifo: FrameQueue::new(),
                 src_rate: 0,
                 playing: false,
                 suspended: false,
@@ -681,7 +660,6 @@ impl PlayerThread {
             st.fifo.clear();
             st.base_time = 0.;
             st.consumed = 0;
-            st.frac = 0.;
         }
         self.stream = Some(stream);
         self.set_duration(duration);
@@ -737,7 +715,6 @@ impl PlayerThread {
         {
             let mut st = self.shared.state.lock().unwrap();
             st.fifo.clear();
-            st.frac = 0.;
             st.base_time = time;
             st.consumed = 0;
         }
@@ -770,6 +747,10 @@ impl PlayerThread {
         let mut st = self.shared.state.lock().unwrap();
         st.src_rate = stream.rate;
         st.fifo.extend(self.scratch.drain(..));
+        if stream.finished {
+            // Let the resampler play out the last frames.
+            st.fifo.flush();
+        }
     }
 
     fn report(&mut self) {

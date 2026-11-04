@@ -12,8 +12,10 @@
 //! - Video, capture, media streams and WebRTC behave like the dummy backend.
 
 pub mod decoder;
+mod device;
 pub mod output;
 pub mod player;
+pub mod queue;
 pub mod resample;
 pub mod sink;
 

@@ -15,7 +15,7 @@ path = "lib.rs"
 
 # Partii: the pure-Rust native backend everywhere (no GStreamer).
 [dependencies]
-servo-media-native = { workspace = true }
+servo-media-native = { workspace = true, features = ["device"] }
 
 [lints]
 workspace = true

@@ -59,8 +59,10 @@ js_backtrace = ["script/js_backtrace"]
 js_jit = ["script/js_jit"]
 media-gstreamer = ["servo-media-gstreamer", "gstreamer"]
 # Partii: the pure-Rust media backend (cpal output, symphonia decoding). Ignored if
-# media-gstreamer is also on.
+# media-gstreamer is also on. media-native alone has no sound device (always the null output, no
+# libasound link); media-native-device adds the cpal output.
 media-native = ["dep:servo-media-native"]
+media-native-device = ["media-native", "servo-media-native/device"]
 
 # Allows multiprocess and ipc mode. If enabled this still needs the correct preference flags to use multi process mode.
 multiprocess = ["servo-base/multiprocess", "servo-constellation/multiprocess"]

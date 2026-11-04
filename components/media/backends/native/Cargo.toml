@@ -14,7 +14,7 @@ name = "servo_media_native"
 path = "lib.rs"
 
 [dependencies]
-cpal = "0.17"
+cpal = { version = "0.17", optional = true }
 log = { workspace = true }
 mime = { workspace = true }
 servo-base = { workspace = true }
@@ -29,7 +29,13 @@ symphonia = { version = "0.5.5", default-features = false, features = ["aac", "a
 
 # cpal's own ALSA binding: to keep alsa-lib's probe errors off stderr when there's no sound card.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
-alsa = "0.11"
+alsa = { version = "0.11", optional = true }
+
+[features]
+default = ["device"]
+# Sound output through cpal (links libasound on Linux). Without it the output is always the null
+# output: Web Audio and <audio> still run, silently (headless servers without ALSA libraries).
+device = ["dep:cpal", "dep:alsa"]
 
 [lints]
 workspace = true

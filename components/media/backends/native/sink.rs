@@ -3,11 +3,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! The Web Audio sink. The render thread pushes 128-frame blocks at the context's rate; the output
-//! pulls at the device's rate. Between them sits a small FIFO of stereo frames and a linear
-//! resampler on the pull side. When the FIFO drops under its target the sink wakes the render
+//! pulls at the device's rate. Between them sits a small FIFO of stereo frames, resampled on the
+//! pull side (queue.rs). When the FIFO drops under its target the sink wakes the render
 //! thread with `SinkNeedData` (the push/pull model `AudioRenderThread::event_loop` expects).
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, Weak};
@@ -18,20 +17,14 @@ use servo_media_audio::sink::{AudioSink, AudioSinkError};
 use servo_media_streams::MediaSocket;
 
 use crate::output::{OutputSource, add_stereo, output};
+use crate::queue::FrameQueue;
 
 /// Minimum FIFO level (context-rate frames) before the render thread may block.
 const MIN_TARGET_FRAMES: usize = 1024;
 
-struct Fifo {
-    /// Interleaved stereo frames at the context's rate.
-    frames: VecDeque<[f32; 2]>,
-    /// Linear resampler state: the previous frame and the fractional position past it.
-    prev: [f32; 2],
-    frac: f64,
-}
-
 pub(crate) struct SinkShared {
-    fifo: Mutex<Fifo>,
+    /// Stereo frames at the context's rate.
+    fifo: Mutex<FrameQueue>,
     sample_rate: Mutex<f32>,
     playing: AtomicBool,
     target: AtomicUsize,
@@ -41,7 +34,7 @@ pub(crate) struct SinkShared {
 
 impl SinkShared {
     fn level(&self) -> usize {
-        self.fifo.lock().unwrap().frames.len()
+        self.fifo.lock().unwrap().len()
     }
 
     fn wake_render_thread(&self) {
@@ -66,30 +59,10 @@ impl OutputSource for SinkShared {
         if wanted > self.target.load(Ordering::Relaxed) {
             self.target.store(wanted, Ordering::Relaxed);
         }
-        {
-            let mut fifo = self.fifo.lock().unwrap();
-            let fifo = &mut *fifo;
-            for frame in out.chunks_exact_mut(channels) {
-                while fifo.frac >= 1. {
-                    match fifo.frames.pop_front() {
-                        Some(f) => {
-                            fifo.prev = f;
-                            fifo.frac -= 1.;
-                        },
-                        None => break,
-                    }
-                }
-                let Some(cur) = fifo.frames.front().copied() else {
-                    // Underrun: emit silence, keep our place.
-                    break;
-                };
-                let t = fifo.frac as f32;
-                let l = fifo.prev[0] + (cur[0] - fifo.prev[0]) * t;
-                let r = fifo.prev[1] + (cur[1] - fifo.prev[1]) * t;
-                add_stereo(frame, l, r);
-                fifo.frac += step;
-            }
-        }
+        // On underrun the rest stays silent and the queue keeps its place.
+        self.fifo.lock().unwrap().read(frames_out, step, |i, l, r| {
+            add_stereo(&mut out[i * channels..(i + 1) * channels], l, r)
+        });
         if self.level() < self.target.load(Ordering::Relaxed) {
             self.wake_render_thread();
         }
@@ -107,11 +80,7 @@ impl NativeAudioSink {
     pub fn new() -> Self {
         Self {
             shared: Arc::new(SinkShared {
-                fifo: Mutex::new(Fifo {
-                    frames: VecDeque::new(),
-                    prev: [0.; 2],
-                    frac: 0.,
-                }),
+                fifo: Mutex::new(FrameQueue::new()),
                 sample_rate: Mutex::new(44100.),
                 playing: AtomicBool::new(false),
                 target: AtomicUsize::new(MIN_TARGET_FRAMES),
@@ -182,15 +151,14 @@ impl AudioSink for NativeAudioSink {
                     let chans = block.chan_count();
                     if chans == 1 {
                         let c = block.data_chan(0);
-                        fifo.frames.extend(c.iter().map(|s| [*s, *s]));
+                        fifo.extend(c.iter().map(|s| [*s, *s]));
                     } else {
                         let l = block.data_chan(0);
                         let r = block.data_chan(1);
-                        fifo.frames
-                            .extend(l.iter().zip(r.iter()).map(|(l, r)| [*l, *r]));
+                        fifo.extend(l.iter().zip(r.iter()).map(|(l, r)| [*l, *r]));
                     }
                 },
-                _ => fifo.frames.extend(std::iter::repeat_n([0.; 2], n)),
+                _ => fifo.extend(std::iter::repeat_n([0.; 2], n)),
             }
         }
         self.shared.need_data_sent.store(false, Ordering::Release);
