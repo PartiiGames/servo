@@ -160,7 +160,7 @@ impl WebGLSampler {
         if !self.is_valid() {
             return Err(InvalidOperation);
         }
-        context.send_command(WebGLCommand::BindSampler(unit, self.id()));
+        context.send_command(WebGLCommand::BindSampler(unit, Some(self.id())));
         Ok(())
     }
 

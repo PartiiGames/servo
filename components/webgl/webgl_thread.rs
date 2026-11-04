@@ -2644,7 +2644,7 @@ impl WebGLImpl {
                 unsafe { gl.delete_sampler(sampler_id.glow()) };
             },
             WebGLCommand::BindSampler(unit, sampler_id) => {
-                unsafe { gl.bind_sampler(unit, Some(sampler_id.glow())) };
+                unsafe { gl.bind_sampler(unit, sampler_id.map(|id| id.glow())) };
             },
             WebGLCommand::SetSamplerParameterInt(sampler_id, pname, value) => {
                 unsafe { gl.sampler_parameter_i32(sampler_id.glow(), pname, value) };

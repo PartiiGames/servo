@@ -6604,6 +6604,14 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 Ok(_) => self.samplers[unit as usize].set(Some(sampler)),
                 Err(error) => self.base.webgl_error(error),
             }
+        } else {
+            if unit as usize >= self.samplers.len() {
+                self.base.webgl_error(InvalidValue);
+                return;
+            }
+            self.base
+                .send_command(WebGLCommand::BindSampler(unit, None));
+            self.samplers[unit as usize].set(None);
         }
     }
 
