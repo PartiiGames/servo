@@ -267,6 +267,23 @@ impl Backend for NativeBackend {
         // default 48000).
         output::context_rate(output::output().format().0) as f32
     }
+
+    fn base_latency(&self, sample_rate: f32) -> f64 {
+        // The sink's minimum queue between the render thread and the output (1024 frames). A
+        // fixed figure, so every context at one rate reports the same baseLatency (WPT
+        // audiocontextoptions.html compares contexts); slow devices queue more, which
+        // outputLatency's two periods account for.
+        sink::MIN_TARGET_FRAMES as f64 / sample_rate.max(1.) as f64
+    }
+
+    fn output_latency(&self) -> f64 {
+        // The device's own buffering: about two periods (none for the null output).
+        let output = output::output();
+        match output.format().2 {
+            output::OutputKind::Device => 2. * output.period_secs(),
+            output::OutputKind::Null => 0.,
+        }
+    }
 }
 
 impl AudioBackend for NativeBackend {

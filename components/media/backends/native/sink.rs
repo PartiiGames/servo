@@ -20,7 +20,7 @@ use crate::output::{OutputSource, add_stereo, output};
 use crate::queue::FrameQueue;
 
 /// Minimum FIFO level (context-rate frames) before the render thread may block.
-const MIN_TARGET_FRAMES: usize = 1024;
+pub(crate) const MIN_TARGET_FRAMES: usize = 1024;
 
 pub(crate) struct SinkShared {
     /// Stereo frames at the context's rate.

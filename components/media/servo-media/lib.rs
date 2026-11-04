@@ -92,6 +92,17 @@ pub trait Backend: Send + Sync {
     fn preferred_sample_rate(&self) -> f32 {
         44100.
     }
+
+    /// AudioContext.baseLatency for a realtime context at `sample_rate`: the seconds of audio
+    /// queued between the render thread and the audio subsystem. 0 when unknown.
+    fn base_latency(&self, _sample_rate: f32) -> f64 {
+        0.
+    }
+
+    /// AudioContext.outputLatency: the audio subsystem's own latency, in seconds. 0 when unknown.
+    fn output_latency(&self) -> f64 {
+        0.
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

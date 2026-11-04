@@ -11,6 +11,7 @@
 //! real time, so render threads and players run (and AnalyserNodes see real samples) on machines
 //! without a sound card.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
@@ -33,6 +34,8 @@ pub enum OutputKind {
 pub struct Output {
     sources: Mutex<Vec<Weak<dyn OutputSource>>>,
     format: Mutex<(u32, usize, OutputKind)>,
+    /// Frames per output callback (the device's period), last seen; 0 before the first one.
+    period: AtomicUsize,
 }
 
 static OUTPUT: OnceLock<Arc<Output>> = OnceLock::new();
@@ -58,7 +61,18 @@ impl Output {
         self.sources.lock().unwrap().push(source);
     }
 
+    /// Seconds of audio one output callback covers (10 ms until the first callback).
+    pub fn period_secs(&self) -> f64 {
+        let (rate, _, _) = self.format();
+        match self.period.load(Ordering::Relaxed) {
+            0 => 0.01,
+            frames => frames as f64 / rate.max(1) as f64,
+        }
+    }
+
     pub(crate) fn render(&self, out: &mut [f32], channels: usize, rate: u32) {
+        self.period
+            .store(out.len() / channels.max(1), Ordering::Relaxed);
         out.iter_mut().for_each(|s| *s = 0.);
         let sources: Vec<Arc<dyn OutputSource>> = {
             let mut sources = self.sources.lock().unwrap();
@@ -76,6 +90,7 @@ impl Output {
     fn start() -> Arc<Output> {
         let output = Arc::new(Output {
             sources: Mutex::new(Vec::new()),
+            period: AtomicUsize::new(0),
             format: Mutex::new((NULL_DEFAULT_RATE, 2, OutputKind::Null)),
         });
         let force_null = std::env::var("PARTII_AUDIO")

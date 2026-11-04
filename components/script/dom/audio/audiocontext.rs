@@ -74,11 +74,16 @@ impl AudioContext {
         // Steps 5 and 6 of the construction algorithm will happen in `resume`,
         // after reflecting dom object.
 
+        // The backend's estimates, taken once at construction.
+        let media = ServoMedia::get();
+        let base_latency = media.base_latency(*context.SampleRate());
+        let output_latency = media.output_latency();
+
         Ok(AudioContext {
             context,
             latency_hint,
-            base_latency: 0.,   // TODO
-            output_latency: 0., // TODO
+            base_latency,
+            output_latency,
         })
     }
 
