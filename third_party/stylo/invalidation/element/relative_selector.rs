@@ -944,7 +944,11 @@ where
                             &sib,
                             ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING,
                         ) {
-                            return;
+                            // Partii: no anchor among this ancestor's earlier siblings, but an
+                            // anchor can still be an earlier sibling of a further ancestor
+                            // (`:has(~ div .test)` with `.test` in a later sibling of the
+                            // sibling's child). Upstream returns here.
+                            break;
                         }
                         self.handle_anchor(sib, invalidation.dependency, invalidation.host);
                         sibling = sib.prev_sibling_element();
