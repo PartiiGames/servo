@@ -304,7 +304,11 @@ impl HTMLIFrameElement {
                     opener: None,
                     load_data,
                     viewport_details,
-                    user_content_manager_id: None,
+                    // Partii: the parent's user scripts and stylesheets (upstream passes None, so
+                    // in-process iframes got no user scripts at all).
+                    user_content_manager_id: with_script_thread(|script_thread| {
+                        script_thread.user_content_manager_id_for(window.pipeline_id())
+                    }),
                     target_snapshot_params,
                     frame_name: self.frozen_name.borrow().clone(),
                 };

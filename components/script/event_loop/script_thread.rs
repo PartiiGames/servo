@@ -174,6 +174,19 @@ fn with_optional_script_thread<R>(f: impl FnOnce(Option<&ScriptThread>) -> R) ->
     })
 }
 
+impl ScriptThread {
+    /// Partii: the user content manager a pipeline of this script thread was created with.
+    pub(crate) fn user_content_manager_id_for(
+        &self,
+        pipeline_id: PipelineId,
+    ) -> Option<UserContentManagerId> {
+        self.user_content_manager_for_pipeline
+            .borrow()
+            .get(&pipeline_id)
+            .copied()
+    }
+}
+
 pub(crate) fn with_script_thread<R: Default>(f: impl FnOnce(&ScriptThread) -> R) -> R {
     with_optional_script_thread(|script_thread| script_thread.map(f).unwrap_or_default())
 }
@@ -382,6 +395,12 @@ pub struct ScriptThread {
     #[no_trace]
     user_contents_for_manager_id:
         RefCell<FxHashMap<UserContentManagerId, ScriptThreadUserContents>>,
+
+    /// Partii: the [`UserContentManagerId`] each of this thread's pipelines was created with, so an
+    /// iframe created in this script thread gets its parent's user scripts and stylesheets (the
+    /// constellation does the same for iframes it creates).
+    #[no_trace]
+    user_content_manager_for_pipeline: RefCell<FxHashMap<PipelineId, UserContentManagerId>>,
 
     /// Application window's GL Context for Media player
     #[no_trace]
@@ -980,6 +999,7 @@ impl ScriptThread {
                     unminify_css: opts.unminify_css,
                     shared_style_locks,
                     user_contents_for_manager_id: RefCell::new(user_contents_for_manager_id),
+                    user_content_manager_for_pipeline: Default::default(),
                     player_context: state.player_context,
                     pipeline_to_node_ids: Default::default(),
                     is_user_interacting: Rc::new(Cell::new(false)),
@@ -3572,6 +3592,11 @@ impl ScriptThread {
             font_resolver,
         );
 
+        if let Some(id) = incomplete.user_content_manager_id {
+            self.user_content_manager_for_pipeline
+                .borrow_mut()
+                .insert(incomplete.pipeline_id, id);
+        }
         let (user_contents, user_stylesheets) = incomplete
             .user_content_manager_id
             .and_then(|user_content_manager_id| {
