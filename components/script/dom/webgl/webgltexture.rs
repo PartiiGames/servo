@@ -127,6 +127,9 @@ pub(crate) struct WebGLTexture {
     immutable_levels: Cell<Option<u32>>,
     /// TEXTURE_COMPARE_MODE, for the draw-time sampler type check.
     compare_mode: Cell<u32>,
+    /// TEXTURE_BASE_LEVEL and TEXTURE_MAX_LEVEL (WebGL 2), for the draw-time feedback-loop check.
+    base_level: Cell<u32>,
+    max_level: Cell<u32>,
     droppable: DroppableWebGLTexture,
 }
 
@@ -141,6 +144,8 @@ impl WebGLTexture {
             target: Cell::new(None),
             immutable_levels: Cell::new(None),
             compare_mode: Cell::new(constants::NONE),
+            base_level: Cell::new(0),
+            max_level: Cell::new(1000),
             face_count: Cell::new(0),
             base_mipmap_level: 0,
             min_filter: Cell::new(constants::NEAREST_MIPMAP_LINEAR),
@@ -347,6 +352,27 @@ impl WebGLTexture {
         self.droppable.is_deleted.get()
     }
 
+    /// The mip levels a draw samples: TEXTURE_BASE_LEVEL alone without a mipmapping min filter,
+    /// otherwise up to TEXTURE_MAX_LEVEL, clamped to an immutable texture's levels.
+    pub(crate) fn sampled_levels(&self) -> (u32, u32) {
+        let mut base = self.base_level.get();
+        let mipmapped = !matches!(
+            self.min_filter.get(),
+            constants::NEAREST | constants::LINEAR
+        );
+        let mut max = if mipmapped {
+            self.max_level.get().max(base)
+        } else {
+            base
+        };
+        if let Some(levels) = self.immutable_levels.get() {
+            let last = levels.saturating_sub(1);
+            base = base.min(last);
+            max = max.min(last).max(base);
+        }
+        (base, max)
+    }
+
     pub(crate) fn compare_mode(&self) -> u32 {
         self.compare_mode.get()
     }
@@ -403,6 +429,14 @@ impl WebGLTexture {
         if is_webgl2 {
             match param {
                 constants::TEXTURE_BASE_LEVEL | constants::TEXTURE_MAX_LEVEL => {
+                    if int_value < 0 {
+                        return Err(WebGLError::InvalidValue);
+                    }
+                    if param == constants::TEXTURE_BASE_LEVEL {
+                        self.base_level.set(int_value as u32);
+                    } else {
+                        self.max_level.set(int_value as u32);
+                    }
                     context.send_command(WebGLCommand::TexParameteri(target, param, int_value));
                     return Ok(());
                 },

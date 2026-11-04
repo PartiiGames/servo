@@ -1612,7 +1612,8 @@ impl WebGL2RenderingContext {
     /// integer one, and shadow samplers a depth texture whose effective TEXTURE_COMPARE_MODE
     /// (the bound sampler object's, else the texture's) is COMPARE_REF_TO_TEXTURE. A depth
     /// texture in that mode is no longer a float texture. Otherwise the draw fails with
-    /// INVALID_OPERATION. Units without a complete texture are left alone.
+    /// INVALID_OPERATION. Units without a complete texture are left alone. Also catches
+    /// texture/framebuffer feedback loops.
     fn validate_sampler_types_for_draw(&self) -> bool {
         let Some(program) = self.base.current_program() else {
             return true;
@@ -1639,6 +1640,19 @@ impl WebGL2RenderingContext {
                 if texture_kind(format, compare_mode) != sampler_kind {
                     self.base.webgl_error(InvalidOperation);
                     return false;
+                }
+                // WebGL 2.0, 5.19: sampling a texture level that the draw framebuffer renders
+                // into is a feedback loop.
+                if let Some(framebuffer) = self.base.get_draw_framebuffer_slot().get() {
+                    let (first, last) = texture.sampled_levels();
+                    if framebuffer
+                        .texture_attachment_levels(&texture)
+                        .into_iter()
+                        .any(|level| level >= 0 && (first..=last).contains(&(level as u32)))
+                    {
+                        self.base.webgl_error(InvalidOperation);
+                        return false;
+                    }
                 }
             }
         }
