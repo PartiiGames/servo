@@ -790,11 +790,27 @@ impl WebGL2RenderingContext {
         }
     }
 
+    /// The component class (`color_component_class`) of the image that draw buffer `index`
+    /// writes to, or None when it writes nothing. The canvas is normalized.
+    fn draw_buffer_class(&self, index: usize) -> Option<u8> {
+        match self.base.get_draw_framebuffer_slot().get() {
+            None => (index == 0).then_some(0),
+            Some(fb) => match fb.draw_buffer_i(index) {
+                constants::NONE => None,
+                attachment => fb
+                    .attachment_internal_format(attachment)
+                    .map(color_component_class),
+            },
+        }
+    }
+
+    #[expect(clippy::too_many_arguments)]
     fn clear_buffer<T: Clone>(
         &self,
         buffer: u32,
         draw_buffer: i32,
         valid_buffers: &[u32],
+        color_classes: &[u8],
         src_offset: u32,
         array: Vec<T>,
         msg: fn(u32, i32, Vec<T>) -> WebGLCommand,
@@ -808,6 +824,14 @@ impl WebGL2RenderingContext {
             self.clearbuffer_array_size(buffer, draw_buffer),
             return
         );
+        // WebGL 2.0 5.13: clearBufferfv clears float and normalized buffers, clearBufferiv
+        // signed and clearBufferuiv unsigned integer ones; anything else is INVALID_OPERATION.
+        if buffer == constants::COLOR &&
+            self.draw_buffer_class(draw_buffer as usize)
+                .is_some_and(|class| !color_classes.contains(&class))
+        {
+            return self.base.webgl_error(InvalidOperation);
+        }
         let src_offset = src_offset as usize;
 
         if array.len() < src_offset + array_size {
@@ -3512,6 +3536,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn Clear(&self, mask: u32) {
+        // WebGL 2.0 5.13: clear() on an integer colour buffer is INVALID_OPERATION.
+        if mask & constants::COLOR_BUFFER_BIT != 0 &&
+            (0..self.base.limits().max_draw_buffers as usize)
+                .any(|i| matches!(self.draw_buffer_class(i), Some(2 | 3)))
+        {
+            return self.base.webgl_error(InvalidOperation);
+        }
         self.base.Clear(mask)
     }
 
@@ -7316,6 +7347,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             buffer,
             draw_buffer,
             &[constants::COLOR, constants::DEPTH],
+            &[0, 1],
             src_offset,
             array,
             WebGLCommand::ClearBufferfv,
@@ -7338,6 +7370,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             buffer,
             draw_buffer,
             &[constants::COLOR, constants::STENCIL],
+            &[2],
             src_offset,
             array,
             WebGLCommand::ClearBufferiv,
@@ -7360,6 +7393,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             buffer,
             draw_buffer,
             &[constants::COLOR],
+            &[3],
             src_offset,
             array,
             WebGLCommand::ClearBufferuiv,
