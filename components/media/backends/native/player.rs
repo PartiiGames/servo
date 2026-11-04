@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use log::warn;
 use servo_base::generic_channel::GenericCallback;
 use servo_media::MediaInstanceError;
+use servo_media_player::audio::AudioRenderer;
 use servo_media_player::metadata::Metadata;
 use servo_media_player::{PlaybackState, Player, PlayerError, PlayerEvent};
 use servo_media_streams::registry::MediaStreamId;
@@ -53,6 +54,8 @@ struct PlayState {
     base_time: f64,
     /// Frames played since `base_time`.
     consumed: u64,
+    /// The media's duration once known (the whole file is in memory, so all of it is buffered).
+    duration: Option<f64>,
 }
 
 impl PlayState {
@@ -64,24 +67,28 @@ impl PlayState {
     }
 }
 
+/// MediaElementAudioSourceNode renders at the context's rate, which the player isn't told; the
+/// DOM creates contexts at 44100 Hz unless the page asks otherwise.
+const RENDERER_RATE: u32 = 44100;
+
 pub(crate) struct PlayerShared {
     state: Mutex<PlayState>,
+    /// Set for `createMediaElementSource`: the audio goes to the Web Audio graph, not the output.
+    renderer: Option<Arc<Mutex<dyn AudioRenderer>>>,
+    /// Fractional renderer frames carried between output callbacks.
+    renderer_carry: Mutex<f64>,
 }
 
-impl OutputSource for PlayerShared {
-    fn mix(&self, out: &mut [f32], channels: usize, rate: u32) {
-        let mut guard = self.state.lock().unwrap();
-        let st = &mut *guard;
-        if !st.playing || st.suspended || st.src_rate == 0 || st.playback_rate <= 0. {
-            return;
-        }
+impl PlayerShared {
+    /// Pull `frames` frames at `rate` from the FIFO (linear resampling), calling `put` per frame.
+    fn pull(st: &mut PlayState, frames: usize, rate: u32, mut put: impl FnMut(usize, f32, f32)) {
         let gain = if st.muted || st.context_muted {
             0.
         } else {
             st.volume
         };
         let step = st.src_rate as f64 * st.playback_rate / rate as f64;
-        for frame in out.chunks_exact_mut(channels) {
+        for i in 0..frames {
             while st.frac >= 1. {
                 match st.fifo.pop_front() {
                     Some(f) => {
@@ -98,8 +105,42 @@ impl OutputSource for PlayerShared {
             let t = st.frac as f32;
             let l = st.prev[0] + (cur[0] - st.prev[0]) * t;
             let r = st.prev[1] + (cur[1] - st.prev[1]) * t;
-            add_stereo(frame, l * gain, r * gain);
+            put(i, l * gain, r * gain);
             st.frac += step;
+        }
+    }
+}
+
+impl OutputSource for PlayerShared {
+    fn mix(&self, out: &mut [f32], channels: usize, rate: u32) {
+        let mut guard = self.state.lock().unwrap();
+        let st = &mut *guard;
+        if !st.playing || st.suspended || st.src_rate == 0 || st.playback_rate <= 0. {
+            return;
+        }
+        let frames_out = out.len() / channels;
+        match self.renderer {
+            None => Self::pull(st, frames_out, rate, |i, l, r| {
+                add_stereo(&mut out[i * channels..(i + 1) * channels], l, r)
+            }),
+            Some(ref renderer) => {
+                // The output's callbacks are the clock: render the same span of time at the
+                // renderer's rate.
+                let mut carry = self.renderer_carry.lock().unwrap();
+                let exact = frames_out as f64 * RENDERER_RATE as f64 / rate as f64 + *carry;
+                let frames = exact.floor() as usize;
+                *carry = exact - frames as f64;
+                let mut left = vec![0f32; frames];
+                let mut right = vec![0f32; frames];
+                Self::pull(st, frames, RENDERER_RATE, |i, l, r| {
+                    left[i] = l;
+                    right[i] = r;
+                });
+                drop(guard);
+                let mut renderer = renderer.lock().unwrap();
+                renderer.render(Box::new(left), 1);
+                renderer.render(Box::new(right), 2);
+            },
         }
     }
 }
@@ -124,7 +165,11 @@ pub struct NativePlayer {
 }
 
 impl NativePlayer {
-    pub fn new(id: usize, sender: GenericCallback<PlayerEvent>) -> Self {
+    pub fn new(
+        id: usize,
+        sender: GenericCallback<PlayerEvent>,
+        renderer: Option<Arc<Mutex<dyn AudioRenderer>>>,
+    ) -> Self {
         let shared = Arc::new(PlayerShared {
             state: Mutex::new(PlayState {
                 fifo: VecDeque::new(),
@@ -139,7 +184,10 @@ impl NativePlayer {
                 playback_rate: 1.,
                 base_time: 0.,
                 consumed: 0,
+                duration: None,
             }),
+            renderer,
+            renderer_carry: Mutex::new(0.),
         });
         let source: Arc<dyn OutputSource> = shared.clone();
         output().add_source(Arc::downgrade(&source) as Weak<dyn OutputSource>);
@@ -281,7 +329,10 @@ impl Player for NativePlayer {
     }
 
     fn buffered(&self) -> Vec<Range<f64>> {
-        vec![]
+        match self.shared.state.lock().unwrap().duration {
+            Some(d) => vec![0.0..d],
+            None => vec![],
+        }
     }
 
     fn set_stream(&self, _: &MediaStreamId, _: bool) -> Result<(), PlayerError> {
@@ -544,13 +595,21 @@ impl PlayerThread {
         }
     }
 
+    fn set_duration(&mut self, duration: Option<f64>) {
+        self.duration = duration;
+        self.shared.state.lock().unwrap().duration = duration;
+    }
+
     fn emit(&self, event: PlayerEvent) {
+        log::debug!("player event: {event:?}");
         if let Err(e) = self.events.send(event) {
             warn!("player: could not send event: {e:?}");
         }
     }
 
     fn run(mut self, rx: Receiver<Cmd>) {
+        // The DOM holds the fetched bytes back until the player asks for data.
+        self.emit(PlayerEvent::NeedData);
         loop {
             match rx.recv_timeout(TICK) {
                 Ok(Cmd::Quit) | Err(RecvTimeoutError::Disconnected) => break,
@@ -563,6 +622,16 @@ impl PlayerThread {
     }
 
     fn handle(&mut self, cmd: Cmd) {
+        if log::log_enabled!(log::Level::Debug) {
+            let name = match &cmd {
+                Cmd::Open(b) => format!("open ({} bytes)", b.len()),
+                Cmd::Play => "play".to_owned(),
+                Cmd::Pause => "pause".to_owned(),
+                Cmd::Seek(t) => format!("seek {t}"),
+                Cmd::Quit => "quit".to_owned(),
+            };
+            log::debug!("player command: {name}");
+        }
         match cmd {
             Cmd::Open(bytes) => self.open(bytes),
             Cmd::Play => {
@@ -615,7 +684,7 @@ impl PlayerThread {
             st.frac = 0.;
         }
         self.stream = Some(stream);
-        self.duration = duration;
+        self.set_duration(duration);
         let metadata = Metadata {
             duration: duration.map(Duration::from_secs_f64),
             width: 0,
@@ -725,7 +794,7 @@ impl PlayerThread {
                 let end = match self.duration {
                     Some(d) if (d - position).abs() < 0.5 => d,
                     _ => {
-                        self.duration = Some(position);
+                        self.set_duration(Some(position));
                         self.emit(PlayerEvent::DurationChanged(Some(Duration::from_secs_f64(
                             position,
                         ))));

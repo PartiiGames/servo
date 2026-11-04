@@ -836,9 +836,9 @@ impl HTMLMediaElement {
         // Step 2. Let other cues be a list of cues, initialized to contain
         // all the cues of hidden and showing text tracks of the media element
         // that are not present in current cues.
-        let Some(text_tracks_list) = self.text_tracks_list.get() else {
-            return;
-        };
+        // Partii (w1-audio): don't return when the page never touched `textTracks`: the list is
+        // created lazily, and returning here meant timeupdate never fired.
+        let text_tracks_list = self.TextTracks(cx);
         let Some((current_cues, other_cues)) =
             self.current_and_other_cues(cx.no_gc(), &text_tracks_list)
         else {

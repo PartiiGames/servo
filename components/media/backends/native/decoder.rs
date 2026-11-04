@@ -144,3 +144,49 @@ impl AudioDecoder for NativeAudioDecoder {
         callbacks.eos();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 16-bit PCM WAV of a 440 Hz sine, `secs` long.
+    fn wav(rate: u32, channels: u16, secs: f32) -> Vec<u8> {
+        let frames = (rate as f32 * secs) as u32;
+        let data_len = frames * channels as u32 * 2;
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&(36 + data_len).to_le_bytes());
+        v.extend_from_slice(b"WAVEfmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&channels.to_le_bytes());
+        v.extend_from_slice(&rate.to_le_bytes());
+        v.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
+        v.extend_from_slice(&(channels * 2).to_le_bytes());
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..frames {
+            let s = ((i as f32 * 440. * std::f32::consts::TAU / rate as f32).sin() * 16000.) as i16;
+            for _ in 0..channels {
+                v.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn decodes_wav() {
+        let d = decode_all(wav(22050, 2, 0.5)).expect("decodes");
+        assert_eq!(d.rate, 22050);
+        assert_eq!(d.channels.len(), 2);
+        assert_eq!(d.channels[0].len(), 11025);
+        let peak = d.channels[1].iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!((peak - 16000. / 32768.).abs() < 0.01, "peak {peak}");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(decode_all(vec![7u8; 4096]).is_err());
+    }
+}

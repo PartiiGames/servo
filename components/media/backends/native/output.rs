@@ -85,8 +85,30 @@ impl Output {
             .name("PartiiAudioOutput".to_owned())
             .spawn(move || {
                 if !force_null {
+                    // alsa-lib prints its probe errors (no card, unknown PCM) to stderr; collect
+                    // them on this thread instead and log them only at debug level.
+                    #[cfg(any(
+                        target_os = "linux",
+                        target_os = "dragonfly",
+                        target_os = "freebsd",
+                        target_os = "netbsd"
+                    ))]
+                    let alsa_errors = alsa::Output::local_error_handler().ok();
                     let (err_tx, err_rx) = mpsc::channel();
-                    match open_device(output_.clone(), err_tx) {
+                    let opened = open_device(output_.clone(), err_tx);
+                    #[cfg(any(
+                        target_os = "linux",
+                        target_os = "dragonfly",
+                        target_os = "freebsd",
+                        target_os = "netbsd"
+                    ))]
+                    if let Some(errors) = alsa_errors {
+                        let text = errors.borrow().to_string();
+                        if !text.trim().is_empty() {
+                            log::debug!("audio output: alsa-lib said: {}", text.trim());
+                        }
+                    }
+                    match opened {
                         Ok((stream, rate, channels)) => {
                             *output_.format.lock().unwrap() = (rate, channels, OutputKind::Device);
                             info!("audio output: device, {rate} Hz, {channels} ch");

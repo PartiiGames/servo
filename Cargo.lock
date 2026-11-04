@@ -9111,6 +9111,7 @@ dependencies = [
 name = "servo-media-native"
 version = "0.7.0"
 dependencies = [
+ "alsa",
  "cpal",
  "log",
  "mime",

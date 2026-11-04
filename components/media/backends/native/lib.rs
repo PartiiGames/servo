@@ -177,7 +177,7 @@ impl Backend for NativeBackend {
         stream_type: StreamType,
         sender: GenericCallback<PlayerEvent>,
         _video_renderer: Option<Arc<Mutex<dyn video::VideoFrameRenderer>>>,
-        _audio_renderer: Option<Arc<Mutex<dyn audio::AudioRenderer>>>,
+        audio_renderer: Option<Arc<Mutex<dyn audio::AudioRenderer>>>,
         _gl_context: Box<dyn PlayerGLContext>,
     ) -> Arc<Mutex<dyn Player>> {
         let id = self.next_instance_id.fetch_add(1, Ordering::Relaxed);
@@ -185,7 +185,11 @@ impl Backend for NativeBackend {
             // MediaStream sources (srcObject) are unsupported, as in the dummy backend.
             return Arc::new(Mutex::new(DummyPlayer));
         }
-        let player = Arc::new(Mutex::new(player::NativePlayer::new(id, sender)));
+        let player = Arc::new(Mutex::new(player::NativePlayer::new(
+            id,
+            sender,
+            audio_renderer,
+        )));
         let weak: Weak<Mutex<player::NativePlayer>> = Arc::downgrade(&player);
         self.register(context_id, id, weak);
         player
