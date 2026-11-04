@@ -296,19 +296,18 @@ impl WebGL2RenderingContext {
         ];
         let vao = self.current_vao(cx);
         for prog_attrib in program.active_attribs().iter() {
+            // Built-ins such as gl_VertexID (which three.js morph targets read) are active
+            // attributes without a location; there is nothing to check for them.
+            let Some(location) = prog_attrib.location else {
+                continue;
+            };
             let attrib = handle_potential_webgl_error!(
                 self.base,
-                // TODO(#34300): remove unwrap
-                vao.get_vertex_attrib(prog_attrib.location.unwrap_or(u32::MAX))
-                    .ok_or(InvalidOperation),
+                vao.get_vertex_attrib(location).ok_or(InvalidOperation),
                 return
             );
 
-            // TODO(#34300): remove unwrap
-            let current_vertex_attrib = self.base.current_vertex_attribs()[prog_attrib
-                .location
-                .map(|l| l as usize)
-                .unwrap_or(usize::MAX)];
+            let current_vertex_attrib = self.base.current_vertex_attribs()[location as usize];
             let attrib_data_base_type = if !attrib.enabled_as_array {
                 match current_vertex_attrib {
                     VertexAttrib::Int(_, _, _, _) => constants::INT,

@@ -857,7 +857,9 @@ impl WebGLRenderingContext {
         size: Size2D<u32>,
         source: TexSource,
     ) {
-        // TexImage2D depth is always equal to 1.
+        // TexImage2D depth is always equal to 1. Record the internal format (sized in WebGL 2,
+        // e.g. RGBA16F), not the transfer format: completeness, readPixels and blitFramebuffer
+        // look at it.
         handle_potential_webgl_error!(
             self,
             texture.initialize(
@@ -865,7 +867,7 @@ impl WebGLRenderingContext {
                 size.width,
                 size.height,
                 1,
-                format,
+                internal_format,
                 level,
                 Some(data_type)
             )
@@ -2957,7 +2959,12 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             },
         };
 
-        match (framebuffer_format, internal_format) {
+        // Compare base formats: attachments may have sized formats (RGBA8, from texStorage2D
+        // or renderbufferStorage) where copyTexImage2D asks for an unsized one.
+        match (
+            framebuffer_format.to_unsized(),
+            internal_format.to_unsized(),
+        ) {
             (a, b) if a == b => (),
             (TexFormat::RGBA, TexFormat::RGB) => (),
             (TexFormat::RGBA, TexFormat::Alpha) => (),
