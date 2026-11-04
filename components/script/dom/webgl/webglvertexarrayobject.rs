@@ -86,6 +86,18 @@ impl WebGLVertexArrayObject {
             .vertex_attrib_pointer(index, size, type_, normalized, stride, offset)
     }
 
+    pub(crate) fn vertex_attrib_i_pointer(
+        &self,
+        index: u32,
+        size: i32,
+        type_: u32,
+        stride: i32,
+        offset: i64,
+    ) -> WebGLResult<()> {
+        self.array_object
+            .vertex_attrib_i_pointer(index, size, type_, stride, offset)
+    }
+
     pub(crate) fn vertex_attrib_divisor(&self, index: u32, value: u32) {
         self.array_object.vertex_attrib_divisor(index, value);
     }

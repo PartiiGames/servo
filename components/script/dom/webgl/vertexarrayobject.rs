@@ -105,6 +105,32 @@ impl VertexArrayObject {
         stride: i32,
         offset: i64,
     ) -> WebGLResult<()> {
+        self.set_vertex_attrib_pointer(index, size, type_, normalized, false, stride, offset)
+    }
+
+    /// vertexAttribIPointer (WebGL 2): the caller has checked that `type_` is an integer type.
+    pub(crate) fn vertex_attrib_i_pointer(
+        &self,
+        index: u32,
+        size: i32,
+        type_: u32,
+        stride: i32,
+        offset: i64,
+    ) -> WebGLResult<()> {
+        self.set_vertex_attrib_pointer(index, size, type_, false, true, stride, offset)
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn set_vertex_attrib_pointer(
+        &self,
+        index: u32,
+        size: i32,
+        type_: u32,
+        normalized: bool,
+        integer: bool,
+        stride: i32,
+        offset: i64,
+    ) -> WebGLResult<()> {
         let mut attribs = self.vertex_attribs.borrow_mut();
         let data = attribs
             .get_mut(index as usize)
@@ -153,14 +179,11 @@ impl VertexArrayObject {
             },
             _ => {},
         }
-        context.send_command(WebGLCommand::VertexAttribPointer(
-            index,
-            size,
-            type_,
-            normalized,
-            stride,
-            offset as u32,
-        ));
+        context.send_command(if integer {
+            WebGLCommand::VertexAttribIPointer(index, size, type_, stride, offset as u32)
+        } else {
+            WebGLCommand::VertexAttribPointer(index, size, type_, normalized, stride, offset as u32)
+        });
         if let Some(old) = data.buffer() {
             old.decrement_attached_counter(Operation::Infallible);
         }
@@ -171,6 +194,7 @@ impl VertexArrayObject {
             type_,
             bytes_per_vertex: size as u8 * bytes_per_component as u8,
             normalized,
+            integer,
             stride: stride as u8,
             offset: offset as u32,
             buffer: buffer.map(|b| Dom::from_ref(&*b)),
@@ -299,6 +323,8 @@ pub(crate) struct VertexAttribData {
     pub(crate) type_: u32,
     bytes_per_vertex: u8,
     pub(crate) normalized: bool,
+    /// Set by vertexAttribIPointer (VERTEX_ATTRIB_ARRAY_INTEGER).
+    pub(crate) integer: bool,
     pub(crate) stride: u8,
     pub(crate) offset: u32,
     pub(crate) buffer: Option<Dom<WebGLBuffer>>,
@@ -313,6 +339,7 @@ impl Default for VertexAttribData {
             type_: constants::FLOAT,
             bytes_per_vertex: 16,
             normalized: false,
+            integer: false,
             stride: 0,
             offset: 0,
             buffer: None,
