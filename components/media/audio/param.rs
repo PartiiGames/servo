@@ -61,6 +61,10 @@ pub struct Param {
     block_mix_val: f32,
     /// If true, `blocks` has been summed together into a single block
     summed: bool,
+    /// The render quantum (its first frame) `blocks` were summed for. Inputs are delivered
+    /// afresh every quantum: blocks from an earlier one (the input was disconnected, or its
+    /// source was skipped as inactive) must not be applied again.
+    summed_frame: Option<Tick>,
     dirty: bool,
     /// The last tick `update` ran for. A SetValueAtTime whose time fell between two updates
     /// (the node skipped quanta, e.g. a GainNode with silent input or a source not started
@@ -91,6 +95,7 @@ impl Param {
             blocks: Vec::new(),
             block_mix_val: 0.,
             summed: false,
+            summed_frame: None,
             dirty: false,
             last_tick: None,
         }
@@ -110,6 +115,7 @@ impl Param {
             blocks: Vec::new(),
             block_mix_val: 0.,
             summed: false,
+            summed_frame: None,
             dirty: false,
             last_tick: None,
         }
@@ -140,8 +146,16 @@ impl Param {
     pub fn update(&mut self, block: &BlockInfo, tick: Tick) -> bool {
         let mut changed = self.dirty;
         self.dirty = false;
-        if tick.0 == 0 {
+        if tick.0 == 0 && self.summed {
+            // Called again in this quantum (some nodes update tick 0 twice), or a later quantum
+            // in which no input block arrived: then the old inputs no longer apply.
+            if self.summed_frame != Some(block.frame) {
+                self.blocks.clear();
+                self.summed_frame = Some(block.frame);
+            }
+        } else if tick.0 == 0 {
             self.summed = true;
+            self.summed_frame = Some(block.frame);
             if let Some(first) = self.blocks.pop() {
                 // first sum them together
                 // https://webaudio.github.io/web-audio-api/#dom-audionode-connect-destinationparam-output
@@ -162,6 +176,10 @@ impl Param {
         changed |= if let Some(block) = self.blocks.first() {
             // store to be summed with `val` later
             self.block_mix_val = block.data_chan_frame(tick.0 as usize, 0);
+            true
+        } else if self.block_mix_val != 0. {
+            // No inputs (any more): their last value must not stick.
+            self.block_mix_val = 0.;
             true
         } else {
             false
@@ -369,6 +387,7 @@ impl Param {
         // and should clear our inputs
         if self.summed {
             self.blocks.clear();
+            self.summed = false;
         }
         self.blocks.push(block)
     }
@@ -389,9 +408,9 @@ impl Param {
             }
         // if the value is zero, our buffer is already zeroed
         } else {
-            for block_tick in &mut block[0..FRAMES_PER_BLOCK_USIZE] {
-                self.update(info, Tick(*block_tick as u64));
-                *block_tick = self.val;
+            for (tick, value) in block[0..FRAMES_PER_BLOCK_USIZE].iter_mut().enumerate() {
+                self.update(info, Tick(tick as u64));
+                *value = self.val;
             }
         }
     }
@@ -811,6 +830,27 @@ mod tests {
         assert_eq!(p.value(), 1.);
         p.update(&block(128), Tick(2));
         assert_eq!(p.value(), 0.5);
+    }
+
+    #[test]
+    fn inputs_stop_applying_once_none_arrive() {
+        let mut p = Param::new(1.);
+        let mut input = Block::default();
+        input.explicit_silence();
+        input.data_chan_mut(0).fill(0.5);
+        p.add_block(input);
+        p.update(&block(0), Tick(0));
+        assert_eq!(p.value(), 1.5);
+        // Some nodes update tick 0 twice in a quantum: the inputs still apply.
+        p.update(&block(0), Tick(0));
+        assert_eq!(p.value(), 1.5);
+        p.update(&block(0), Tick(1));
+        assert_eq!(p.value(), 1.5);
+        // Next quantum, no input block (disconnected, or its source skipped as inactive).
+        p.update(&block(128), Tick(0));
+        assert_eq!(p.value(), 1.);
+        p.update(&block(128), Tick(5));
+        assert_eq!(p.value(), 1.);
     }
 
     #[test]
