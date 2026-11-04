@@ -693,6 +693,19 @@ impl WebGLThread {
                 }
             }
         }
+        // GLES (and so WebGL) always encodes writes, blends, clears and blits into sRGB attachments;
+        // desktop GL only does with FRAMEBUFFER_SRGB on. It has no effect on linear attachments,
+        // so the default framebuffer is unchanged.
+        if api_type == GlType::Gl {
+            unsafe {
+                gl.enable(gl::FRAMEBUFFER_SRGB);
+                let error = gl.get_error();
+                if error != gl::NO_ERROR {
+                    warn!("FRAMEBUFFER_SRGB is unsupported ({error:#x})");
+                }
+            }
+        }
+
         let state = GLState {
             _gl_version: gl_version,
             _webgl_version: webgl_version,
