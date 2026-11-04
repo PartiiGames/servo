@@ -1607,6 +1607,7 @@ impl<'a> BuilderForBoxFragment<'a> {
             return;
         }
 
+        self.build_backdrop_filter(builder, state);
         self.build_background(builder, state);
         self.build_box_shadow(builder, state);
         if !self.fragment.is_table_grid_with_collapsed_borders() {
@@ -1639,6 +1640,29 @@ impl<'a> BuilderForBoxFragment<'a> {
                     .to_webrender(),
             );
         }
+    }
+
+    /// <https://drafts.fxtf.org/filter-effects-2/#BackdropFilterProperty>: filter what is
+    /// painted behind this box (up to its backdrop root, which WebRender finds), clipped to the
+    /// border edge, before the box paints its own background.
+    fn build_backdrop_filter(&self, builder: &mut DisplayListBuilder, state: &TraversalState) {
+        let style = self.fragment.style();
+        let effects = style.get_effects();
+        if effects.backdrop_filter.0.is_empty() {
+            return;
+        }
+        let current_color = &style.get_inherited_text().color;
+        let filters: Vec<_> = effects
+            .backdrop_filter
+            .0
+            .iter()
+            .map(|filter| FilterToWebRender::to_webrender(filter, current_color))
+            .collect();
+        let mut common = builder.common_properties(state, self.border_rect, style);
+        if let Some(clip_chain_id) = self.border_edge_clip(builder, state, false) {
+            common.clip_chain_id = clip_chain_id;
+        }
+        builder.wr().push_backdrop_filter(&common, &filters, &[]);
     }
 
     fn build_hit_test(

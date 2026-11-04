@@ -172,6 +172,7 @@ def add_css_properties_attributes(css_properties_json: str, parser: Parser) -> N
             ["layout.container-queries.enabled", "layout_container_queries_enabled"],
             ["layout.variable_fonts.enabled", "layout_variable_fonts_enabled"],
             ["layout.flexbox.balance", "layout_flexbox_balance"],
+            ["layout.css.backdrop-filter.enabled", "layout_css_backdrop_filter_enabled"],
         ]
         for mapping in MAPPING:
             if mapping[0] == preference_name:

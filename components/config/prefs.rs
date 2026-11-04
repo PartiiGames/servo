@@ -74,6 +74,10 @@ pub fn set(preferences: Preferences) {
         preferences.layout_variable_fonts_enabled
     );
     stylo_static_prefs::set_pref!("layout.flexbox.balance", preferences.layout_flexbox_balance);
+    stylo_static_prefs::set_pref!(
+        "layout.css.backdrop-filter.enabled",
+        preferences.layout_css_backdrop_filter_enabled
+    );
 
     *PREFERENCES.write().unwrap() = preferences;
 
@@ -323,6 +327,8 @@ pub struct Preferences {
     // feature: CSS Grid | #34479 | Web/CSS/Guides/Grid_layout
     pub layout_grid_enabled: bool,
     pub layout_container_queries_enabled: bool,
+    /// Partii: `backdrop-filter` (vendored Stylo, third_party/PARTII.md).
+    pub layout_css_backdrop_filter_enabled: bool,
     pub layout_css_ellipse_corners_enabled: bool,
     pub layout_css_progress_function_enabled: bool,
     pub layout_style_sharing_cache_enabled: bool,
@@ -576,6 +582,7 @@ impl Preferences {
             layout_animations_test_enabled: false,
             layout_columns_enabled: false,
             layout_container_queries_enabled: false,
+            layout_css_backdrop_filter_enabled: false,
             layout_css_ellipse_corners_enabled: false,
             layout_css_progress_function_enabled: false,
             layout_flexbox_balance: false,
