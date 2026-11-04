@@ -61,10 +61,10 @@ pub struct Param {
     block_mix_val: f32,
     /// If true, `blocks` has been summed together into a single block
     summed: bool,
-    /// The render quantum (its first frame) `blocks` were summed for. Inputs are delivered
-    /// afresh every quantum: blocks from an earlier one (the input was disconnected, or its
-    /// source was skipped as inactive) must not be applied again.
-    summed_frame: Option<Tick>,
+    /// The render quantum (its first frame) `blocks` were delivered in. Inputs come afresh every
+    /// quantum: blocks from an earlier one (the input was disconnected, its source was skipped
+    /// as inactive, or this node didn't update its params then) must not apply again, nor pile up.
+    input_frame: Option<Tick>,
     dirty: bool,
     /// The last tick `update` ran for. A SetValueAtTime whose time fell between two updates
     /// (the node skipped quanta, e.g. a GainNode with silent input or a source not started
@@ -95,7 +95,7 @@ impl Param {
             blocks: Vec::new(),
             block_mix_val: 0.,
             summed: false,
-            summed_frame: None,
+            input_frame: None,
             dirty: false,
             last_tick: None,
         }
@@ -115,7 +115,7 @@ impl Param {
             blocks: Vec::new(),
             block_mix_val: 0.,
             summed: false,
-            summed_frame: None,
+            input_frame: None,
             dirty: false,
             last_tick: None,
         }
@@ -146,25 +146,23 @@ impl Param {
     pub fn update(&mut self, block: &BlockInfo, tick: Tick) -> bool {
         let mut changed = self.dirty;
         self.dirty = false;
-        if tick.0 == 0 && self.summed {
-            // Called again in this quantum (some nodes update tick 0 twice), or a later quantum
-            // in which no input block arrived: then the old inputs no longer apply.
-            if self.summed_frame != Some(block.frame) {
+        if tick.0 == 0 {
+            if self.input_frame != Some(block.frame) {
+                // No input block arrived this quantum: the old ones no longer apply.
                 self.blocks.clear();
-                self.summed_frame = Some(block.frame);
+            } else if !self.summed {
+                // (Some nodes update tick 0 twice in a quantum: sum only once.)
+                if let Some(first) = self.blocks.pop() {
+                    // first sum them together
+                    // https://webaudio.github.io/web-audio-api/#dom-audionode-connect-destinationparam-output
+                    let block = self
+                        .blocks
+                        .drain(..)
+                        .fold(first, |acc, block| acc.sum(block));
+                    self.blocks.push(block);
+                }
             }
-        } else if tick.0 == 0 {
             self.summed = true;
-            self.summed_frame = Some(block.frame);
-            if let Some(first) = self.blocks.pop() {
-                // first sum them together
-                // https://webaudio.github.io/web-audio-api/#dom-audionode-connect-destinationparam-output
-                let block = self
-                    .blocks
-                    .drain(..)
-                    .fold(first, |acc, block| acc.sum(block));
-                self.blocks.push(block);
-            }
         } else if self.kind == ParamRate::KRate {
             return changed;
         }
@@ -379,15 +377,16 @@ impl Param {
         // of the current one
     }
 
-    pub(crate) fn add_block(&mut self, block: Block) {
+    /// An input block for the render quantum starting at `frame`.
+    pub(crate) fn add_block(&mut self, block: Block, frame: Tick) {
         debug_assert!(block.chan_count() == 1);
-        // summed only becomes true during a node's process() call,
-        // but add_block is called during graph traversal before processing,
-        // so if summed is true that means we've moved on to the next block
-        // and should clear our inputs
-        if self.summed {
+        // summed only becomes true during a node's process() call, but add_block is called
+        // during graph traversal before processing: if summed is true, or the blocks are from
+        // an earlier quantum, this is the first input of a new quantum.
+        if self.summed || self.input_frame != Some(frame) {
             self.blocks.clear();
             self.summed = false;
+            self.input_frame = Some(frame);
         }
         self.blocks.push(block)
     }
@@ -838,7 +837,7 @@ mod tests {
         let mut input = Block::default();
         input.explicit_silence();
         input.data_chan_mut(0).fill(0.5);
-        p.add_block(input);
+        p.add_block(input.clone(), Tick(0));
         p.update(&block(0), Tick(0));
         assert_eq!(p.value(), 1.5);
         // Some nodes update tick 0 twice in a quantum: the inputs still apply.
@@ -850,6 +849,14 @@ mod tests {
         p.update(&block(128), Tick(0));
         assert_eq!(p.value(), 1.);
         p.update(&block(128), Tick(5));
+        assert_eq!(p.value(), 1.);
+        // A node that skips its param updates for a quantum (a GainNode with silent input):
+        // that quantum's input neither piles up with the next one nor applies later.
+        p.add_block(input.clone(), Tick(256));
+        p.add_block(input.clone(), Tick(384));
+        p.update(&block(384), Tick(0));
+        assert_eq!(p.value(), 1.5);
+        p.update(&block(512), Tick(0));
         assert_eq!(p.value(), 1.);
     }
 

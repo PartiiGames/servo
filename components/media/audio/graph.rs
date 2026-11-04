@@ -473,7 +473,7 @@ impl AudioGraph {
                 // Step 4.2.6: the DelayReader. Its output comes only from frames written in
                 // earlier render quanta. AudioParam inputs from outside its cycle have run
                 // already (see `processing_order`): use them for this quantum's delayTime.
-                self.gather_ready_param_inputs(ix, &mut curr);
+                self.gather_ready_param_inputs(ix, &mut curr, info.frame);
                 let out = curr
                     .as_delay_node()
                     .expect("cycle breakers are DelayNodes")
@@ -493,7 +493,7 @@ impl AudioGraph {
                 continue;
             }
 
-            let chunk = self.gather_inputs(ix, &mut curr);
+            let chunk = self.gather_inputs(ix, &mut curr, info.frame);
 
             // actually run the node engine
             let out = curr.process(chunk, info);
@@ -508,7 +508,7 @@ impl AudioGraph {
         // The DelayWriters: every node that feeds a cycle breaker has run by now.
         for ix in cycle_breakers {
             let mut curr = self.graph[*ix].node.borrow_mut();
-            let chunk = self.gather_inputs(*ix, &mut curr);
+            let chunk = self.gather_inputs(*ix, &mut curr, info.frame);
             curr.as_delay_node()
                 .expect("cycle breakers are DelayNodes")
                 .process_writer(chunk, info);
@@ -577,6 +577,7 @@ impl AudioGraph {
         &self,
         ix: NodeIndex<DefaultIx>,
         curr: &mut RefMut<'_, Box<dyn AudioNodeEngine>>,
+        frame: Tick,
     ) -> Chunk {
         let mut chunk = Chunk::default();
         chunk
@@ -612,7 +613,7 @@ impl AudioGraph {
                         // param inputs are downmixed to mono
                         // https://webaudio.github.io/web-audio-api/#dom-audionode-connect-destinationparam-output
                         block.mix(1, ChannelInterpretation::Speakers);
-                        curr.get_param(param).add_block(block)
+                        curr.get_param(param).add_block(block, frame)
                     },
                     PortIndex::Listener(_) => curr.set_listenerdata(block),
                 }
@@ -695,6 +696,7 @@ impl AudioGraph {
         &self,
         ix: NodeIndex<DefaultIx>,
         curr: &mut RefMut<'_, Box<dyn AudioNodeEngine>>,
+        frame: Tick,
     ) {
         for edge in self.graph.edges_directed(ix, Direction::Incoming) {
             for connection in &edge.weight().connections {
@@ -702,7 +704,7 @@ impl AudioGraph {
                     let Some(mut block) = connection.cache.borrow_mut().take()
                 {
                     block.mix(1, ChannelInterpretation::Speakers);
-                    curr.get_param(param).add_block(block);
+                    curr.get_param(param).add_block(block, frame);
                 }
             }
         }
