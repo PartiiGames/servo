@@ -20,6 +20,12 @@ pub enum AudioSinkError {
 }
 
 pub trait AudioSink: Send {
+    /// Underruns since the stream started: (events, missing frames). Device-side truth for the
+    /// render thread's stats (`PARTII_AUDIO_STATS`); `None` when the sink doesn't count them.
+    fn underrun_stats(&self) -> Option<(u64, u64)> {
+        None
+    }
+
     fn init(
         &self,
         sample_rate: f32,

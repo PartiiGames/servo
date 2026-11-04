@@ -40,7 +40,7 @@ use servo_media::audio::audio_node::BlockInfo;
 use servo_media::audio::audio_worklet_node::AudioWorkletProcessorHandle;
 use servo_media::audio::block::{Block, FRAMES_PER_BLOCK_USIZE};
 use servo_media::audio::context::RenderTaskSender;
-use servo_media::audio::render_thread::on_render_thread_exit;
+use servo_media::audio::render_thread::{on_render_thread_exit, on_render_thread_idle};
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use style::thread_state::{self, ThreadState};
 
@@ -791,6 +791,18 @@ fn ensure_host(init: HostInit) {
             runtime,
         })
     });
+    // Collect garbage while the sink is full, not inside process() (see `idle_gc`).
+    unsafe {
+        let cx = host_cx_for_params();
+        // An eager nursery collection becomes due at this size (see IdleGc).
+        js::jsapi::JS_SetGCParameter(
+            cx,
+            js::jsapi::JSGCParamKey::JSGC_NURSERY_EAGER_COLLECTION_THRESHOLD_KB,
+            IDLE_NURSERY_THRESHOLD_KB,
+        );
+    }
+    let mut gc_policy = IdleGc::new();
+    on_render_thread_idle(Box::new(move || gc_policy.run()));
     // Tear down in order when the context closes and the render loop ends.
     on_render_thread_exit(Box::new(|| {
         HOST.with(|host| {
@@ -805,6 +817,101 @@ fn ensure_host(init: HostInit) {
             }
         });
     }));
+}
+
+/// The raw JSContext of the render thread's runtime (only for setting GC parameters).
+#[expect(unsafe_code)]
+unsafe fn host_cx_for_params() -> *mut js::jsapi::JSContext {
+    js::rust::Runtime::get().expect("worklet runtime").as_ptr()
+}
+
+/// The worklet runtime's GC policy. Servo keeps SpiderMonkey's incremental GC off (pre-barriers
+/// aren't implemented correctly), so a collection is one pause. Left alone, SpiderMonkey starts
+/// one when an allocation crosses its trigger, which happens inside `process()`, so the pause
+/// lands in a render quantum. Instead, whenever the render thread is about to wait with the sink
+/// full, collect if the heap has grown by half since the last collection (and is past a small
+/// floor). The pause is then covered by the buffered audio, and SpiderMonkey's own triggers
+/// (much higher) are rarely reached.
+struct IdleGc {
+    /// GC heap bytes after the last collection.
+    after_last: u32,
+    stats: bool,
+    /// PARTII_AUDIOWORKLET_IDLE_GC=0 turns the policy off (for A/B measurements).
+    enabled: bool,
+}
+
+/// Don't bother below this (a fresh worklet heap is around 1 MB).
+const IDLE_GC_FLOOR_BYTES: u32 = 8 * 1024 * 1024;
+
+/// Collect the nursery in idle time once it holds this much, so minor GCs (cheap, but not free:
+/// their cost is the surviving objects) rarely land inside `process()`.
+const IDLE_NURSERY_THRESHOLD_KB: u32 = 64;
+
+impl IdleGc {
+    fn new() -> IdleGc {
+        IdleGc {
+            after_last: 0,
+            stats: std::env::var_os("PARTII_AUDIO_STATS").is_some_and(|v| v != "0"),
+            enabled: std::env::var("PARTII_AUDIOWORKLET_IDLE_GC").map_or(true, |v| v != "0"),
+        }
+    }
+
+    #[expect(unsafe_code)]
+    fn run(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        HOST.with(|host| {
+            let Ok(host) = host.try_borrow() else {
+                return;
+            };
+            let Some(host) = host.as_ref() else {
+                return;
+            };
+            if host.closing.load(Ordering::SeqCst) {
+                return;
+            }
+            // Minor GC first: empty the nursery if it holds more than the eager threshold.
+            let started = std::time::Instant::now();
+            unsafe {
+                let rt = js::jsapi::JS_GetRuntime(host_cx_for_params());
+                js::jsapi::JS::MaybeRunNurseryCollection(
+                    rt,
+                    js::jsapi::GCReason::EAGER_NURSERY_COLLECTION,
+                );
+            }
+            servo_media::audio::render_stats::note_idle_work(started.elapsed());
+            let bytes = unsafe {
+                js::rust::wrappers2::JS_GetGCParameter(
+                    host.runtime.cx_no_gc(),
+                    js::jsapi::JSGCParamKey::JSGC_BYTES,
+                )
+            };
+            let trigger = IDLE_GC_FLOOR_BYTES.max(self.after_last.saturating_mul(2));
+            if bytes < trigger {
+                return;
+            }
+            let started = std::time::Instant::now();
+            let mut cx = unsafe { host.runtime.cx() };
+            unsafe { js::rust::wrappers2::JS_GC(&mut cx, js::jsapi::GCReason::API) };
+            self.after_last = unsafe {
+                js::rust::wrappers2::JS_GetGCParameter(
+                    host.runtime.cx_no_gc(),
+                    js::jsapi::JSGCParamKey::JSGC_BYTES,
+                )
+            };
+            let took = started.elapsed();
+            servo_media::audio::render_stats::note_idle_work(took);
+            if self.stats {
+                eprintln!(
+                    "[audioworklet-gc] idle GC {:.2}ms, {} -> {} KB",
+                    took.as_secs_f64() * 1000.,
+                    bytes / 1024,
+                    self.after_last / 1024
+                );
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
