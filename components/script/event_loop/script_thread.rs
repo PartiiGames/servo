@@ -2164,8 +2164,9 @@ impl ScriptThread {
                 msg,
             } => {
                 let global = self.documents.borrow().find_global(pipeline_id).unwrap();
-                let _ac = enter_auto_realm(cx, &*global);
-                global.gpu_device_lost(device, reason, msg);
+                let mut realm = enter_auto_realm(cx, &*global);
+                let cx = &mut realm.current_realm();
+                global.gpu_device_lost(cx, device, reason, msg);
             },
             WebGPUMsg::UncapturedError {
                 device,
