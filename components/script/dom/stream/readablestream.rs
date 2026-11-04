@@ -2474,6 +2474,16 @@ pub(crate) fn bytes_from_chunk_jsval(
     cx: &mut JSContext,
     chunk: &RootedTraceableBox<Heap<JSVal>>,
 ) -> Result<Vec<u8>, Error> {
+    // Partii: a Uint8Array chunk (what a fetch body stream enqueues, and what the read-all-bytes loop
+    // requires) is copied as one slice. The generic sequence conversion below reads it element by
+    // element through the JS API: about 1 s for a 4 MB fetch body (J10, Tauri invoke replies).
+    if chunk.get().is_object() {
+        if let Ok(array) = js::typedarray::Uint8Array::from(chunk.get().to_object()) {
+            if let Some(vec) = array.to_vec() {
+                return Ok(vec);
+            }
+        }
+    }
     match Vec::<u8>::from_jsval(cx, chunk.handle(), ConversionBehavior::EnforceRange) {
         Ok(ConversionResult::Success(vec)) => Ok(vec),
         Ok(ConversionResult::Failure(error)) => Err(Error::Type(error.into_owned())),
