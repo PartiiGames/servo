@@ -32,6 +32,7 @@ use crate::dom::audio::audiobuffersourcenode::AudioBufferSourceNode;
 use crate::dom::audio::audiodestinationnode::AudioDestinationNode;
 use crate::dom::audio::audiolistener::AudioListener;
 use crate::dom::audio::audionode::MAX_CHANNEL_COUNT;
+use crate::dom::audio::audioworkletnode::AudioWorkletNode;
 use crate::dom::audio::biquadfilternode::BiquadFilterNode;
 use crate::dom::audio::channelmergernode::ChannelMergerNode;
 use crate::dom::audio::channelsplitternode::ChannelSplitterNode;
@@ -78,6 +79,7 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::weakref::WeakRef;
 use crate::dom::domexception::{DOMErrorName, DOMException};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::promise::{Promise, RootedPromise, TracedPromise};
@@ -147,6 +149,10 @@ pub(crate) struct BaseAudioContext {
     node_lifetimes: DomRefCell<HashMap<NodeId, Weak<NodeUnreferencedOnDrop>>>,
     /// Engine nodes created since the last GC nudge (see `register_node_lifetime`).
     nodes_since_gc_nudge: Cell<u32>,
+    /// AudioWorkletNodes by processor id, for `processorerror`. Weak, so that a node the page
+    /// has dropped can be collected (and its engine node and processor freed); dead entries are
+    /// pruned as it grows.
+    audio_worklet_nodes: DomRefCell<HashMap<u64, WeakRef<AudioWorkletNode>>>,
 }
 
 impl BaseAudioContext {
@@ -182,6 +188,7 @@ impl BaseAudioContext {
             channel_count: channel_count.into(),
             node_lifetimes: Default::default(),
             nodes_since_gc_nudge: Cell::new(0),
+            audio_worklet_nodes: Default::default(),
         })
     }
 
@@ -358,6 +365,28 @@ impl BaseAudioContext {
             self.nodes_since_gc_nudge.set(created);
         }
         lifetime
+    }
+
+    /// A new AudioWorkletNode whose processor is `processor_id` (see `audio_worklet_nodes`).
+    pub(crate) fn register_audio_worklet_node(&self, processor_id: u64, node: &AudioWorkletNode) {
+        let mut nodes = self.audio_worklet_nodes.borrow_mut();
+        if nodes.len() >= 64 && nodes.len().is_power_of_two() {
+            nodes.retain(|_, weak| weak.is_alive());
+        }
+        nodes.insert(processor_id, WeakRef::new(node));
+    }
+
+    /// The AudioWorkletNode of processor `processor_id`, if the page still has it.
+    pub(crate) fn audio_worklet_node(
+        &self,
+        processor_id: u64,
+    ) -> Option<DomRoot<AudioWorkletNode>> {
+        let mut nodes = self.audio_worklet_nodes.borrow_mut();
+        let node = nodes.get(&processor_id).and_then(WeakRef::root);
+        if node.is_none() {
+            nodes.remove(&processor_id);
+        }
+        node
     }
 
     /// For an AudioParam of `node`: shares the node's lifetime, so the engine node stays while

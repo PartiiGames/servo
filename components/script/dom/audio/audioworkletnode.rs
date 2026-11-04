@@ -4,12 +4,14 @@
 
 //! <https://webaudio.github.io/web-audio-api/#AudioWorkletNode>
 
+use std::rc::Rc;
+
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::jsval::{ObjectValue, UInt32Value};
 use js::rust::wrappers2::{JS_DefineProperty, JS_NewPlainObject};
 use js::rust::{CustomAutoRooter, HandleObject};
-use script_bindings::reflector::{DomObject, reflect_dom_object_with_proto};
+use script_bindings::reflector::{DomObject, reflect_weak_referenceable_dom_object_with_proto};
 use servo_media::audio::audio_node::{AudioNodeInit, AudioNodeType};
 use servo_media::audio::audio_worklet_node::{AudioWorkletNodeOptions as MediaOptions, AudioWorkletParamOptions};
 use servo_media::audio::param::{ParamRate, ParamType};
@@ -19,7 +21,7 @@ use crate::dom::bindings::codegen::Bindings::MessageChannelBinding::MessageChann
 use crate::dom::audio::audioparam::AudioParam;
 use crate::dom::audio::audioparammap::AudioParamMap;
 use crate::dom::audio::baseaudiocontext::BaseAudioContext;
-use crate::dom::audioworkletglobalscope::{NodeSlot, ProcessorHandle};
+use crate::dom::audioworkletglobalscope::ProcessorHandle;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
     ChannelCountMode, ChannelInterpretation,
 };
@@ -29,7 +31,6 @@ use crate::dom::bindings::codegen::Bindings::AudioWorkletNodeBinding::{
 };
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::structuredclone;
@@ -146,16 +147,15 @@ impl AudioWorkletNode {
                 .unwrap_or(2, ChannelCountMode::Max, ChannelInterpretation::Speakers);
 
         // The processor reports errors to the node, which doesn't exist until the engine does:
-        // it gets the node through this slot, filled below (errors are queued tasks, so they
-        // always run after that).
-        let node_slot: NodeSlot = Default::default();
+        // the context maps the processor's id to the node (weakly), registered below. Errors are
+        // queued tasks, so they always run after that.
         let handle = ProcessorHandle::new(
             name,
             serialized,
-            node_slot.clone(),
             number_of_inputs as usize,
             number_of_outputs as usize,
         );
+        let processor_id = handle.id();
         let init = AudioNodeInit::AudioWorkletNode(MediaOptions {
             number_of_inputs,
             number_of_outputs,
@@ -173,9 +173,11 @@ impl AudioWorkletNode {
         )?;
         let node_id = audio_node.node_id();
         let parameters = AudioParamMap::new(cx, window);
-        let node = reflect_dom_object_with_proto(
+        // Weak-referenceable: nothing outside the page holds the node strongly, so it can be
+        // collected, which unreferences its engine node (node lifetime) and frees the processor.
+        let node = reflect_weak_referenceable_dom_object_with_proto(
             cx,
-            Box::new(AudioWorkletNode {
+            Rc::new(AudioWorkletNode {
                 node: audio_node,
                 parameters: Dom::from_ref(&*parameters),
                 port: Dom::from_ref(&*port1),
@@ -183,7 +185,7 @@ impl AudioWorkletNode {
             window,
             proto,
         );
-        *node_slot.lock().unwrap() = Some(Trusted::new(&*node));
+        context.register_audio_worklet_node(processor_id, &node);
 
         // Step 9. parameters: an AudioParam per descriptor.
         for (index, descriptor) in descriptors.iter().enumerate() {

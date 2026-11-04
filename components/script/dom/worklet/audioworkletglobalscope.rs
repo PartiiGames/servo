@@ -47,7 +47,6 @@ use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use style::thread_state::{self, ThreadState};
 
 use crate::dom::RootedPromise;
-use crate::dom::audio::audioworkletnode::AudioWorkletNode;
 use crate::dom::audio::baseaudiocontext::{AudioParamDescriptorData, BaseAudioContext};
 use crate::dom::bindings::codegen::Bindings::AudioParamBinding::AutomationRate;
 use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContextMethods;
@@ -115,9 +114,6 @@ struct ProcessorState {
     param_names: Vec<String>,
     /// Which of the two arrays `parameters[name]` holds now (None: not set yet).
     param_constant: Vec<Cell<Option<bool>>>,
-    /// The node, for `processorerror` (rooted on the main thread only).
-    #[no_trace]
-    node: NodeSlot,
     dead: Cell<bool>,
 }
 
@@ -223,7 +219,6 @@ impl AudioWorkletGlobalScope {
         id: u64,
         name: &str,
         options: StructuredSerializedData,
-        node: NodeSlot,
         number_of_inputs: usize,
         number_of_outputs: usize,
     ) {
@@ -238,7 +233,7 @@ impl AudioWorkletGlobalScope {
                 definition.descriptors.iter().map(|d| d.name.clone()).collect()
             },
             None => {
-                self.processor_error(node);
+                self.processor_error(id);
                 return;
             },
         };
@@ -247,14 +242,14 @@ impl AudioWorkletGlobalScope {
         // Platform objects that AudioWorkletGlobalScope doesn't expose (a Blob, an ImageBitmap...)
         // can't be deserialized here: that is a processor error.
         if has_objects_unexposed_in_audio_worklet(&options) {
-            self.processor_error(node);
+            self.processor_error(id);
             return;
         }
         rooted!(&in(cx) let mut options_value = UndefinedValue());
         let ports = match structuredclone::read(cx, global, options, options_value.handle_mut()) {
             Ok(ports) => ports,
             Err(_) => {
-                self.processor_error(node);
+                self.processor_error(id);
                 return;
             },
         };
@@ -278,7 +273,7 @@ impl AudioWorkletGlobalScope {
         self.pending_processor_port.set(None);
         if !ok || instance.get().is_null() {
             let details = report_pending_exception_with_info(cx);
-            self.processor_error_with(node, details);
+            self.processor_error_with(id, details);
             return;
         }
 
@@ -293,12 +288,10 @@ impl AudioWorkletGlobalScope {
             param_one: Vec::new(),
             param_constant: param_names.iter().map(|_| Cell::new(None)).collect(),
             param_names,
-            node,
             dead: Cell::new(false),
         });
         state.instance.set(ObjectValue(instance.get()));
         // Into the traced map first, so the arrays built next are rooted from the start.
-        let node = state.node.clone();
         self.processors.borrow_mut().insert(id, state);
         let built = {
             let mut processors = self.processors.borrow_mut();
@@ -308,7 +301,7 @@ impl AudioWorkletGlobalScope {
         if built.is_err() {
             self.processors.borrow_mut().0.remove(&id);
             report_pending_exception(cx);
-            self.processor_error(node);
+            self.processor_error(id);
         }
     }
 
@@ -482,29 +475,31 @@ impl AudioWorkletGlobalScope {
     }
 
     fn fail_with(&self, id: u64, details: Option<(String, String, u32, u32)>) {
-        let node = {
+        {
             let processors = self.processors.borrow();
             let Some(state) = processors.get(&id) else {
                 return;
             };
             state.dead.set(true);
-            state.node.clone()
-        };
-        self.processor_error_with(node, details);
+        }
+        self.processor_error_with(id, details);
     }
 
-    /// Queue a task to fire `processorerror` at the node.
+    /// Queue a task to fire `processorerror` at the node of processor `id`.
     /// <https://webaudio.github.io/web-audio-api/#dom-audioworkletnode-onprocessorerror>
-    fn processor_error(&self, node: NodeSlot) {
-        self.processor_error_with(node, None);
+    fn processor_error(&self, id: u64) {
+        self.processor_error_with(id, None);
     }
 
     /// The same, with the exception's (message, filename, line, column) for the ErrorEvent.
-    fn processor_error_with(&self, node: NodeSlot, details: Option<(String, String, u32, u32)>) {
+    /// The context holds the node weakly (a strong reference from here would keep the node,
+    /// and so its engine and this processor, alive forever): a node the page has dropped and
+    /// the GC has collected gets no event, which nothing could observe.
+    fn processor_error_with(&self, id: u64, details: Option<(String, String, u32, u32)>) {
+        let context = self.context.clone();
         self.queue_main_thread_task(task!(audio_worklet_processor_error: move |cx| {
-            let node = node.lock().unwrap().clone();
-            if let Some(node) = node {
-                node.root().fire_processor_error(cx, details);
+            if let Some(node) = context.root().audio_worklet_node(id) {
+                node.fire_processor_error(cx, details);
             }
         }));
     }
@@ -1151,16 +1146,12 @@ impl WorkletThreadPool for AudioWorkletThreadPool {
 // The processor handle given to servo-media
 // ---------------------------------------------------------------------------------------------
 
-/// The AudioWorkletNode a processor reports to, filled on the main thread once the node exists.
-pub(crate) type NodeSlot = Arc<std::sync::Mutex<Option<Trusted<AudioWorkletNode>>>>;
-
 static NEXT_PROCESSOR_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct ProcessorHandle {
     id: u64,
     name: String,
     options: Option<StructuredSerializedData>,
-    node: Option<NodeSlot>,
     number_of_inputs: usize,
     number_of_outputs: usize,
 }
@@ -1169,7 +1160,6 @@ impl ProcessorHandle {
     pub(crate) fn new(
         name: String,
         options: StructuredSerializedData,
-        node: NodeSlot,
         number_of_inputs: usize,
         number_of_outputs: usize,
     ) -> ProcessorHandle {
@@ -1177,16 +1167,20 @@ impl ProcessorHandle {
             id: NEXT_PROCESSOR_ID.fetch_add(1, Ordering::Relaxed),
             name,
             options: Some(options),
-            node: Some(node),
             number_of_inputs,
             number_of_outputs,
         }
+    }
+
+    /// The processor's id: the key of its node in the context's weak map (for `processorerror`).
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 }
 
 impl AudioWorkletProcessorHandle for ProcessorHandle {
     fn construct(&mut self, info: &BlockInfo) {
-        let (Some(options), Some(node)) = (self.options.take(), self.node.take()) else {
+        let Some(options) = self.options.take() else {
             return;
         };
         let id = self.id;
@@ -1194,7 +1188,7 @@ impl AudioWorkletProcessorHandle for ProcessorHandle {
         let name = std::mem::take(&mut self.name);
         run_task_in_host(|cx, global| {
             global.set_time(info);
-            global.construct_processor(cx, id, &name, options, node, inputs, outputs);
+            global.construct_processor(cx, id, &name, options, inputs, outputs);
         });
     }
 

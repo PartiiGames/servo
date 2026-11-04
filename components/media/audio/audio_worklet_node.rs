@@ -162,10 +162,14 @@ impl AudioNodeEngine for AudioWorkletNode {
         AudioNodeType::AudioWorkletNode
     }
 
-    /// Conservative until w3 implements the processor's keep-alive (`process()` returning
-    /// true keeps it actively processing): never removed.
+    /// <https://webaudio.github.io/web-audio-api/#AudioNode-actively-processing>: an
+    /// AudioWorkletNode stays actively processing while its processor's last `process()`
+    /// returned true (before the first call, it may yet). A failed processor returns false.
+    /// The graph asks this of an unreferenced node with no inputs left, and of a node whose
+    /// inputs are silent (it is then skipped, as `process` would output silence anyway).
+    /// Dropping the engine drops the processor handle, which frees the JS processor.
     fn removable(&self, _now: Tick) -> bool {
-        false
+        !self.keep_alive
     }
 
     fn process(&mut self, inputs: Chunk, info: &BlockInfo) -> Chunk {
@@ -296,5 +300,18 @@ mod tests {
         let out = n.process(Chunk::default(), &info(128));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(out.blocks[0].data_chan(0)[0], 0.);
+    }
+
+    #[test]
+    fn removable_follows_keep_alive() {
+        let calls: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
+        let mut alive = node(true, calls.clone());
+        assert!(!alive.removable(Tick(0)), "not removable before the first process()");
+        alive.process(Chunk::default(), &info(0));
+        assert!(!alive.removable(Tick(128)));
+        let mut done = node(false, calls);
+        assert!(!done.removable(Tick(0)));
+        done.process(Chunk::default(), &info(0));
+        assert!(done.removable(Tick(128)));
     }
 }
