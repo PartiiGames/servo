@@ -6201,15 +6201,18 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         let src_color_attachment = src_fb
             .as_ref()
             .map_or(constants::BACK, |fb| fb.read_buffer());
-        let dst_color_attachment =
-            dst_fb
-                .as_ref()
-                .map_or(constants::BACK, |fb| match fb.draw_buffer_i(0) {
-                    constants::NONE => constants::COLOR_ATTACHMENT0,
-                    buffer => buffer,
-                });
+        // A colour blit writes every draw buffer (GL ES 3.0 4.3.3).
+        let dst_color_attachments: Vec<u32> = match &dst_fb {
+            None => vec![constants::BACK],
+            Some(fb) => (0..self.base.limits().max_draw_buffers as usize)
+                .map(|i| fb.draw_buffer_i(i))
+                .filter(|&buffer| buffer != constants::NONE)
+                .collect(),
+        };
         if (bits.intersects(BlitFrameBufferFlags::COLOR) &&
-            same_image(src_color_attachment, dst_color_attachment)) ||
+            dst_color_attachments
+                .iter()
+                .any(|&dst| same_image(src_color_attachment, dst))) ||
             (bits.intersects(BlitFrameBufferFlags::DEPTH) &&
                 (same_image(constants::DEPTH_ATTACHMENT, constants::DEPTH_ATTACHMENT) ||
                     same_image(
@@ -6234,10 +6237,19 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             class => class,
         };
         if bits.intersects(BlitFrameBufferFlags::COLOR) &&
-            let (Some(src), Some(dst)) = (src_color, dst_color) &&
-            blit_class(src) != blit_class(dst)
+            let Some(src) = src_color
         {
-            return self.base.webgl_error(InvalidOperation);
+            let mismatch =
+                |dst: Option<u32>| dst.is_some_and(|dst| blit_class(src) != blit_class(dst));
+            let any_mismatch = match &dst_fb {
+                None => mismatch(dst_color),
+                Some(fb) => dst_color_attachments
+                    .iter()
+                    .any(|&dst| mismatch(fb.attachment_internal_format(dst))),
+            };
+            if any_mismatch {
+                return self.base.webgl_error(InvalidOperation);
+            }
         }
         if bits.intersects(BlitFrameBufferFlags::DEPTH) && src_depth != dst_depth {
             return self.base.webgl_error(InvalidOperation);
