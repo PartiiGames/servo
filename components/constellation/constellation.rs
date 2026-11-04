@@ -4012,6 +4012,18 @@ where
         );
         if changed {
             self.send_animation_frame_callbacks_state_if_changed(pipeline_id);
+            if active {
+                // Worker rAF only advances on renderer ticks, and the renderer only ticks
+                // while it paints. A document whose rAF callbacks don't change the DOM is
+                // ticked by its ScriptThread's own timer, so its pipeline can already count
+                // as animating while nothing paints: then the state above doesn't change,
+                // Paint hears nothing, and this worker would wait for an unrelated repaint
+                // (seconds, or forever on a static page). Ask for a frame to start ticking.
+                self.paint_proxy
+                    .send(PaintMessage::GenerateFrame(vec![PainterId::from(
+                        provider_webview_id,
+                    )]));
+            }
         } else if active && tick_was_pending {
             // Worker only rAF may not produce a display list so request a frame
             // for the next refresh-driver tick.
