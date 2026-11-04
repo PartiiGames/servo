@@ -144,6 +144,11 @@ pub(crate) struct Navigator {
 }
 
 impl Navigator {
+    /// `navigator.wakeLock` if the page has touched it (it holds the document's active locks).
+    pub(crate) fn wake_lock_if_created(&self) -> Option<DomRoot<WakeLock>> {
+        self.wake_lock.get()
+    }
+
     fn new_inherited() -> Navigator {
         Navigator {
             reflector_: Reflector::new(),

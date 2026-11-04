@@ -935,6 +935,9 @@ impl Servo {
         // messages to client may need to pump a platform-specific event loop
         // to deliver the message.
         let event_loop_waker = builder.event_loop_waker;
+        let wake_lock_delegate = builder
+            .wake_lock_delegate
+            .unwrap_or_else(|| Box::new(DefaultWakeLockDelegate));
         let (paint_proxy, paint_receiver) = create_paint_channel(event_loop_waker.clone());
         let (constellation_proxy, embedder_to_constellation_receiver) = ConstellationProxy::new();
         let (embedder_proxy, embedder_receiver) = create_embedder_channel(event_loop_waker.clone());
@@ -1017,6 +1020,7 @@ impl Servo {
             async_runtime,
             public_storage_threads.clone(),
             private_storage_threads.clone(),
+            wake_lock_delegate,
         );
 
         net::connector::prewarm_tls();
@@ -1238,6 +1242,7 @@ fn create_constellation(
     async_runtime: Box<dyn net_traits::AsyncRuntime>,
     public_storage_threads: StorageThreads,
     private_storage_threads: StorageThreads,
+    wake_lock_delegate: Box<dyn WakeLockDelegate>,
 ) {
     // Global configuration options, parsed from the command line.
     let opts = opts::get();
@@ -1281,7 +1286,7 @@ fn create_constellation(
         wgpu_image_map: paint.webgpu_image_map(),
         async_runtime,
         privileged_urls,
-        wake_lock_provider: Box::new(DefaultWakeLockDelegate),
+        wake_lock_provider: wake_lock_delegate,
     };
 
     let layout_factory = Arc::new(LayoutFactoryImpl());
@@ -1450,6 +1455,7 @@ pub struct ServoBuilder {
     preferences: Option<Box<Preferences>>,
     event_loop_waker: Box<dyn EventLoopWaker>,
     protocol_registry: ProtocolRegistry,
+    wake_lock_delegate: Option<Box<dyn WakeLockDelegate>>,
 }
 
 impl Default for ServoBuilder {
@@ -1459,6 +1465,7 @@ impl Default for ServoBuilder {
             preferences: Default::default(),
             event_loop_waker: Box::new(DefaultEventLoopWaker),
             protocol_registry: Default::default(),
+            wake_lock_delegate: None,
         }
     }
 }
@@ -1485,6 +1492,13 @@ impl ServoBuilder {
 
     pub fn protocol_registry(mut self, protocol_registry: ProtocolRegistry) -> Self {
         self.protocol_registry = protocol_registry;
+        self
+    }
+
+    /// The OS hook for the Screen Wake Lock API: acquired when the first page holds a screen wake
+    /// lock, released when the last one lets go. Defaults to a no-op.
+    pub fn wake_lock_delegate(mut self, wake_lock_delegate: Box<dyn WakeLockDelegate>) -> Self {
+        self.wake_lock_delegate = Some(wake_lock_delegate);
         self
     }
 }

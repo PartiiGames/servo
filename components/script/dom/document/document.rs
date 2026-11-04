@@ -5210,6 +5210,13 @@ impl Document {
         // Step 6 Run any page visibility change steps which may be defined in other specifications, with visibility
         // state and document. Any other specs' visibility steps will go here.
 
+        // <https://w3c.github.io/screen-wake-lock/#handling-document-loss-of-visibility>
+        if visibility_state == DocumentVisibilityState::Hidden {
+            if let Some(wake_lock) = self.window.Navigator(cx).wake_lock_if_created() {
+                wake_lock.release_all(cx);
+            }
+        }
+
         // <https://www.w3.org/TR/gamepad/#handling-visibility-change>
         #[cfg(feature = "gamepad")]
         if visibility_state == DocumentVisibilityState::Hidden {
