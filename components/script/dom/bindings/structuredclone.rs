@@ -56,6 +56,7 @@ use crate::dom::dompoint::DOMPoint;
 use crate::dom::dompointreadonly::DOMPointReadOnly;
 use crate::dom::file::File;
 use crate::dom::filelist::FileList;
+use crate::dom::bindings::wasm_module::WasmModuleRef;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::imagebitmap::ImageBitmap;
 use crate::dom::imagedata::ImageData;
@@ -99,6 +100,8 @@ pub(super) enum StructuredCloneTags {
     ImageData = 0xFFFF8014,
     #[cfg(feature = "webcrypto")]
     CryptoKey = 0xFFFF8015,
+    /// A `WebAssembly.Module`, in-process clones only (see `wasm_module.rs`).
+    WasmModule = 0xFFFF8016,
     Max = 0xFFFFFFFF,
 }
 
@@ -263,6 +266,13 @@ unsafe extern "C" fn read_callback(
 
     let sc_reader = unsafe { &mut *(closure as *mut StructuredDataReader<'_>) };
 
+    if tag == StructuredCloneTags::WasmModule as u32 {
+        return match sc_reader.wasm_modules.get(_data as usize) {
+            Some(module) => module.create_object(unsafe { cx.raw_cx() }),
+            None => ptr::null_mut(),
+        };
+    }
+
     let mut realm = CurrentRealm::assert(cx);
     let global = GlobalScope::from_current_realm(&mut realm);
 
@@ -338,6 +348,19 @@ unsafe extern "C" fn write_callback(
     let cx = &mut cx;
 
     let sc_writer = unsafe { &mut *(closure as *mut StructuredDataWriter) };
+
+    // A WebAssembly.Module: by reference, within this process only.
+    if let Some(module) = WasmModuleRef::from_object(obj) {
+        if !sc_writer.in_process {
+            sc_writer.error = Some(Error::DataClone(Some(
+                "A WebAssembly.Module can only be sent within its agent cluster".to_owned(),
+            )));
+            return false;
+        }
+        let index = sc_writer.wasm_modules.len() as u32;
+        sc_writer.wasm_modules.push(module);
+        return unsafe { JS_WriteUint32PairUnchecked(w, StructuredCloneTags::WasmModule as u32, index) };
+    }
 
     let mut realm = CurrentRealm::assert(cx);
     let global = GlobalScope::from_current_realm(&mut realm);
@@ -641,7 +664,7 @@ unsafe extern "C" fn sab_cloned_callback(
 
 /// A SpiderMonkey clone buffer written with the `SameProcess` scope, carried whole (never as
 /// bytes) inside `StructuredSerializedData::in_process` to its one reader.
-struct InProcessCloneBuffer(JSAutoStructuredCloneBufferWrapper);
+struct InProcessCloneBuffer(JSAutoStructuredCloneBufferWrapper, Vec<WasmModuleRef>);
 
 // SAFETY: the buffer is filled on the writing thread and then owned by exactly one message, which
 // one thread at a time reads or drops. Dropping it unread only releases `SharedArrayRawBuffer`
@@ -711,6 +734,8 @@ pub(crate) struct StructuredDataReader<'a> {
     pub(crate) image_data: Option<FxHashMap<ImageDataId, SerializableImageData>>,
     // A map of serialized crypto keys.
     pub(crate) crypto_keys: Option<FxHashMap<CryptoKeyId, SerializableCryptoKey>>,
+    /// The `WebAssembly.Module`s of an in-process clone, by index.
+    pub(crate) wasm_modules: Vec<WasmModuleRef>,
 }
 
 /// A data holder for transferred and serialized objects.
@@ -755,6 +780,11 @@ pub(crate) struct StructuredDataWriter {
     pub(crate) image_data: Option<FxHashMap<ImageDataId, SerializableImageData>>,
     // A map of serialized crypto keys.
     pub(crate) crypto_keys: Option<FxHashMap<CryptoKeyId, SerializableCryptoKey>>,
+    /// Whether this clone travels in-process (`write_for_same_agent_cluster` with a cross-origin
+    /// isolated global), which is the only way a `WebAssembly.Module` can be cloned.
+    pub(crate) in_process: bool,
+    /// The `WebAssembly.Module`s written, by index (tag `WasmModule`, data = index).
+    pub(crate) wasm_modules: Vec<WasmModuleRef>,
 }
 
 /// Writes a structured clone. Returns a `DataClone` error if that fails.
@@ -806,7 +836,10 @@ fn write_impl(
         if let Some(transfer) = transfer {
             transfer.to_jsval(cx, val.handle_mut());
         }
-        let mut sc_writer = StructuredDataWriter::default();
+        let mut sc_writer = StructuredDataWriter {
+            in_process: allow_shared_memory,
+            ..Default::default()
+        };
         let sc_writer_ptr = &mut sc_writer as *mut _;
 
         let scbuf = JSAutoStructuredCloneBufferWrapper::new(scope, &STRUCTURED_CLONE_CALLBACKS);
@@ -838,7 +871,10 @@ fn write_impl(
         let (data, in_process) = if allow_shared_memory {
             (
                 Vec::new(),
-                Some(InProcessCloneData(Box::new(InProcessCloneBuffer(scbuf)))),
+                Some(InProcessCloneData(Box::new(InProcessCloneBuffer(
+                    scbuf,
+                    std::mem::take(&mut sc_writer.wasm_modules),
+                )))),
             )
         } else {
             let nbytes = GetLengthOfJSStructuredCloneData(scdata);
@@ -904,8 +940,8 @@ pub(crate) fn read(
         offscreen_canvases: data.offscreen_canvases.take(),
         image_data: data.image_data.take(),
         crypto_keys: data.crypto_keys.take(),
+        wasm_modules: Vec::new(),
     };
-    let sc_reader_ptr = &mut sc_reader as *mut _;
     // A SameProcess clone (see `write_for_same_agent_cluster`) is read straight from its buffer;
     // everything else from bytes. Shared memory is accepted only by a cross-origin isolated
     // reader (SpiderMonkey also refuses it unless the reader's realm has shared memory enabled).
@@ -914,9 +950,15 @@ pub(crate) fn read(
         .take()
         .and_then(|payload| payload.0.downcast::<InProcessCloneBuffer>().ok());
     let allow_shared_memory = in_process.is_some() && global.cross_origin_isolated_capability();
+    let in_process = in_process.map(|buffer| {
+        let InProcessCloneBuffer(scbuf, wasm_modules) = *buffer;
+        sc_reader.wasm_modules = wasm_modules;
+        scbuf
+    });
+    let sc_reader_ptr = &mut sc_reader as *mut _;
     unsafe {
         let (scope, scbuf) = match in_process {
-            Some(buffer) => (StructuredCloneScope::SameProcess, buffer.0),
+            Some(scbuf) => (StructuredCloneScope::SameProcess, scbuf),
             None => {
                 let scbuf = JSAutoStructuredCloneBufferWrapper::new(
                     StructuredCloneScope::DifferentProcess,
