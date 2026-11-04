@@ -227,7 +227,10 @@ impl PannerNode {
 
         let normalized_source_orientation = normalize_zero(source_orientation);
 
-        let source_to_listener = normalize_zero(source_position - listener_position);
+        // https://webaudio.github.io/web-audio-api/#Spatialization-sound-cones:
+        // sourceToListener = listenerPosition - sourcePosition (it was reversed, so a source
+        // facing the listener got coneOuterGain and one facing away got full gain).
+        let source_to_listener = normalize_zero(listener_position - source_position);
         // Angle between the source orientation vector and the source-listener vector
         let angle = 180. * source_to_listener.dot(normalized_source_orientation).acos() / PI32;
         let abs_angle = angle.abs() as f64;
