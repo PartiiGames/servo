@@ -7,6 +7,7 @@ use std::sync::{Arc, mpsc};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use script_bindings::cell::DomRefCell;
 use script_bindings::cformat;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use servo_media::audio::context::NodeUnreferencedOnDrop;
@@ -19,7 +20,8 @@ use crate::dom::audio::baseaudiocontext::BaseAudioContext;
 use crate::dom::bindings::codegen::Bindings::AudioParamBinding::{
     AudioParamMethods, AutomationRate,
 };
-use crate::dom::bindings::error::{Error, Fallible};
+use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContextMethods;
+use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
@@ -42,6 +44,10 @@ pub(crate) struct AudioParam {
     #[no_trace]
     #[ignore_malloc_size_of = "servo_media"]
     _node_lifetime: Option<Arc<NodeUnreferencedOnDrop>>,
+    /// The scheduled automation events, (time, Some(duration) for a SetValueCurve), so that an
+    /// event overlapping a curve throws NotSupportedError (see `check_overlap`). Events that
+    /// ended before currentTime are pruned as the list grows.
+    events: DomRefCell<Vec<(f64, Option<f64>)>>,
 }
 
 impl AudioParam {
@@ -67,7 +73,31 @@ impl AudioParam {
             min_value,
             max_value,
             _node_lifetime: node.and_then(|id| context.node_lifetime(id)),
+            events: Default::default(),
         }
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-audioparam-setvaluecurveattime>: a curve
+    /// [T, T + D) may not contain another event's time (strictly after T) nor overlap another
+    /// curve; any other event may not fall in a curve's [T, T + D). NotSupportedError if it
+    /// would; else the event is recorded. `duration` is Some for a curve.
+    fn check_overlap(&self, time: f64, duration: Option<f64>) -> ErrorResult {
+        let mut events = self.events.borrow_mut();
+        let overlaps = events.iter().any(|&(t, d)| match (duration, d) {
+            (Some(duration), Some(d)) => time < t + d && t < time + duration,
+            (Some(duration), None) => t > time && t < time + duration,
+            (None, Some(d)) => time >= t && time < t + d,
+            (None, None) => false,
+        });
+        if overlaps {
+            return Err(Error::NotSupported(None));
+        }
+        if events.len() >= 64 && events.len().is_power_of_two() {
+            let now = *self.context.CurrentTime();
+            events.retain(|&(t, d)| t + d.unwrap_or(0.) >= now);
+        }
+        events.push((time, duration));
+        Ok(())
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -170,11 +200,23 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
     }
 
     /// <https://webaudio.github.io/web-audio-api/#dom-audioparam-value>
-    fn SetValue(&self, value: Finite<f32>) {
+    fn SetValue(&self, value: Finite<f32>) -> ErrorResult {
+        // > Setting this attribute has the effect of [...] calling setValueAtTime() with the
+        // > current AudioContext's currentTime: it throws during a SetValueCurve.
+        let now = *self.context.CurrentTime();
+        if self
+            .events
+            .borrow()
+            .iter()
+            .any(|&(t, d)| d.is_some_and(|d| now >= t && now < t + d))
+        {
+            return Err(Error::NotSupported(None));
+        }
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
             UserAutomationEvent::SetValue(*value),
         ));
+        Ok(())
     }
 
     /// <https://webaudio.github.io/web-audio-api/#dom-audioparam-defaultvalue>
@@ -204,6 +246,7 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
                 *start_time
             )));
         }
+        self.check_overlap(*start_time, None)?;
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
             UserAutomationEvent::SetValueAtTime(*value, *start_time),
@@ -223,6 +266,7 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
                 *end_time
             )));
         }
+        self.check_overlap(*end_time, None)?;
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
             UserAutomationEvent::RampToValueAtTime(RampKind::Linear, *value, *end_time),
@@ -248,6 +292,7 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
                 *value
             )));
         }
+        self.check_overlap(*end_time, None)?;
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
             UserAutomationEvent::RampToValueAtTime(RampKind::Exponential, *value, *end_time),
@@ -274,6 +319,7 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
                 *time_constant
             )));
         }
+        self.check_overlap(*start_time, None)?;
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
             UserAutomationEvent::SetTargetAtTime(*target, *start_time, (*time_constant).into()),
@@ -298,12 +344,13 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
             return Err(Error::InvalidState(None));
         }
 
-        if *end_time < 0. {
+        if *end_time <= 0. {
             return Err(Error::Range(cformat!(
-                "end time {} should not be negative",
+                "duration {} should be positive",
                 *end_time
             )));
         }
+        self.check_overlap(*start_time, Some(*end_time))?;
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
             UserAutomationEvent::SetValueCurveAtTime(
@@ -323,6 +370,8 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
                 *cancel_time
             )));
         }
+        // Events at or after cancelTime are removed (a curve that started before goes on).
+        self.events.borrow_mut().retain(|&(t, _)| t < *cancel_time);
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
             UserAutomationEvent::CancelScheduledValues(*cancel_time),
@@ -338,9 +387,21 @@ impl AudioParamMethods<crate::DomTypeHolder> for AudioParam {
                 *cancel_time
             )));
         }
+        // Events after cancelTime are removed and a curve running at cancelTime ends there.
+        let cancel_time = *cancel_time;
+        let mut events = self.events.borrow_mut();
+        events.retain(|&(t, _)| t <= cancel_time);
+        for (t, d) in events.iter_mut() {
+            if let Some(duration) = d &&
+                *t + *duration > cancel_time
+            {
+                *duration = cancel_time - *t;
+            }
+        }
+        drop(events);
         self.message_node(AudioNodeMessage::SetParam(
             self.param,
-            UserAutomationEvent::CancelAndHoldAtTime(*cancel_time),
+            UserAutomationEvent::CancelAndHoldAtTime(cancel_time),
         ));
         Ok(DomRoot::from_ref(self))
     }

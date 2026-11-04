@@ -371,16 +371,16 @@ impl PannerNodeMethods<crate::DomTypeHolder> for PannerNode {
 
     /// <https://webaudio.github.io/web-audio-api/#dom-pannernode-setposition>
     fn SetPosition(&self, x: Finite<f32>, y: Finite<f32>, z: Finite<f32>) {
-        self.position_x.SetValue(x);
-        self.position_y.SetValue(y);
-        self.position_z.SetValue(z);
+        let _ = self.position_x.SetValue(x);
+        let _ = self.position_y.SetValue(y);
+        let _ = self.position_z.SetValue(z);
     }
 
     /// <https://webaudio.github.io/web-audio-api/#dom-pannernode-setorientation>
     fn SetOrientation(&self, x: Finite<f32>, y: Finite<f32>, z: Finite<f32>) {
-        self.orientation_x.SetValue(x);
-        self.orientation_y.SetValue(y);
-        self.orientation_z.SetValue(z);
+        let _ = self.orientation_x.SetValue(x);
+        let _ = self.orientation_y.SetValue(y);
+        let _ = self.orientation_z.SetValue(z);
     }
 }
 

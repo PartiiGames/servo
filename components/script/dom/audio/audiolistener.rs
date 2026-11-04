@@ -235,12 +235,12 @@ impl AudioListenerMethods<crate::DomTypeHolder> for AudioListener {
         yUp: Finite<f32>,
         zUp: Finite<f32>,
     ) -> Fallible<DomRoot<AudioListener>> {
-        self.forward_x.SetValue(x);
-        self.forward_y.SetValue(y);
-        self.forward_z.SetValue(z);
-        self.up_x.SetValue(xUp);
-        self.up_y.SetValue(yUp);
-        self.up_z.SetValue(zUp);
+        let _ = self.forward_x.SetValue(x);
+        let _ = self.forward_y.SetValue(y);
+        let _ = self.forward_z.SetValue(z);
+        let _ = self.up_x.SetValue(xUp);
+        let _ = self.up_y.SetValue(yUp);
+        let _ = self.up_z.SetValue(zUp);
         Ok(DomRoot::from_ref(self))
     }
 
@@ -251,9 +251,9 @@ impl AudioListenerMethods<crate::DomTypeHolder> for AudioListener {
         y: Finite<f32>,
         z: Finite<f32>,
     ) -> Fallible<DomRoot<AudioListener>> {
-        self.position_x.SetValue(x);
-        self.position_y.SetValue(y);
-        self.position_z.SetValue(z);
+        let _ = self.position_x.SetValue(x);
+        let _ = self.position_y.SetValue(y);
+        let _ = self.position_z.SetValue(z);
         Ok(DomRoot::from_ref(self))
     }
 }
