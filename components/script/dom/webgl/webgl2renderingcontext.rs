@@ -5826,7 +5826,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             Ok((color, depth, stencil))
         };
 
-        let (src_color, src_depth, src_stencil) = match src_fb {
+        let (src_color, src_depth, src_stencil) = match &src_fb {
             Some(fb) => handle_potential_webgl_error!(
                 self.base,
                 fb.get_attachment_formats(fb.read_buffer()),
@@ -5834,7 +5834,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             ),
             None => handle_potential_webgl_error!(self.base, get_default_formats(), return),
         };
-        let (dst_color, dst_depth, dst_stencil) = match dst_fb {
+        let (dst_color, dst_depth, dst_stencil) = match &dst_fb {
             Some(fb) => {
                 let draw_buffer = match fb.draw_buffer_i(0) {
                     constants::NONE => constants::COLOR_ATTACHMENT0,
@@ -5848,6 +5848,43 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             },
             None => handle_potential_webgl_error!(self.base, get_default_formats(), return),
         };
+
+        // Reading and writing the same image is INVALID_OPERATION (GL ES 3.0, 4.3.3), for each
+        // buffer the mask copies; both bound to the default framebuffer counts as the same.
+        let same_image = |src_attachment: u32, dst_attachment: u32| match (&src_fb, &dst_fb) {
+            (None, None) => true,
+            (Some(src), Some(dst)) => src
+                .attached_image(src_attachment)
+                .is_some_and(|image| dst.attached_image(dst_attachment) == Some(image)),
+            _ => false,
+        };
+        let src_color_attachment = src_fb
+            .as_ref()
+            .map_or(constants::BACK, |fb| fb.read_buffer());
+        let dst_color_attachment =
+            dst_fb
+                .as_ref()
+                .map_or(constants::BACK, |fb| match fb.draw_buffer_i(0) {
+                    constants::NONE => constants::COLOR_ATTACHMENT0,
+                    buffer => buffer,
+                });
+        if (bits.intersects(BlitFrameBufferFlags::COLOR) &&
+            same_image(src_color_attachment, dst_color_attachment)) ||
+            (bits.intersects(BlitFrameBufferFlags::DEPTH) &&
+                (same_image(constants::DEPTH_ATTACHMENT, constants::DEPTH_ATTACHMENT) ||
+                    same_image(
+                        constants::DEPTH_STENCIL_ATTACHMENT,
+                        constants::DEPTH_STENCIL_ATTACHMENT,
+                    ))) ||
+            (bits.intersects(BlitFrameBufferFlags::STENCIL) &&
+                (same_image(constants::STENCIL_ATTACHMENT, constants::STENCIL_ATTACHMENT) ||
+                    same_image(
+                        constants::DEPTH_STENCIL_ATTACHMENT,
+                        constants::DEPTH_STENCIL_ATTACHMENT,
+                    )))
+        {
+            return self.base.webgl_error(InvalidOperation);
+        }
 
         // Colour blits need matching component types (normalized, float, signed or unsigned
         // integer); GL itself rejects format mismatches out of multisampled buffers.

@@ -38,6 +38,13 @@ pub(crate) enum CompleteForRendering {
     MissingColorAttachment,
 }
 
+/// An image attached to a framebuffer, by identity (see `attached_image`).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum AttachedImage {
+    Renderbuffer(WebGLRenderbufferId),
+    Texture(WebGLTextureId, i32),
+}
+
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 enum WebGLFramebufferAttachment {
@@ -280,6 +287,24 @@ impl WebGLFramebuffer {
 
     pub(crate) fn size(&self) -> Option<(i32, i32)> {
         self.size.get()
+    }
+
+    /// What image is attached at `attachment`, to tell when a blit reads and writes the same one.
+    /// Layers of 3D and array textures aren't tracked, so those report None.
+    pub(crate) fn attached_image(&self, attachment: u32) -> Option<AttachedImage> {
+        let binding = self.attachment_binding(attachment)?;
+        let binding = binding.borrow();
+        match binding.as_ref()? {
+            WebGLFramebufferAttachment::Renderbuffer(rb) => {
+                Some(AttachedImage::Renderbuffer(rb.id()))
+            },
+            WebGLFramebufferAttachment::Texture { texture, level } => match texture.target() {
+                Some(constants::TEXTURE_2D) | Some(constants::TEXTURE_CUBE_MAP) => {
+                    Some(AttachedImage::Texture(texture.id(), *level))
+                },
+                _ => None,
+            },
+        }
     }
 
     /// The levels at which `texture` is attached to this framebuffer (any attachment point).
