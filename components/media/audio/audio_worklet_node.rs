@@ -162,6 +162,12 @@ impl AudioNodeEngine for AudioWorkletNode {
         AudioNodeType::AudioWorkletNode
     }
 
+    /// Conservative until w3 implements the processor's keep-alive (`process()` returning
+    /// true keeps it actively processing): never removed.
+    fn removable(&self, _now: Tick) -> bool {
+        false
+    }
+
     fn process(&mut self, inputs: Chunk, info: &BlockInfo) -> Chunk {
         debug_assert_eq!(inputs.len(), self.number_of_inputs as usize);
 

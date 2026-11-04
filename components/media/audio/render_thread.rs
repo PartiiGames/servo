@@ -128,6 +128,9 @@ pub enum AudioRenderThreadMsg {
     /// OfflineAudioContext.suspend(): suspend before rendering the quantum that starts at
     /// this frame (a multiple of the render quantum), then call back.
     SuspendAt(u64, #[ignore_malloc_size_of = "Fn"] SuspendCallback),
+    /// The node's DOM object and AudioParams are gone (node lifetime): remove the node once it
+    /// has no inputs and nothing more to produce.
+    NodeUnreferenced(NodeId),
     Close(Sender<StateChangeResult>),
     SinkNeedData,
     GetCurrentTime(Sender<f64>),
@@ -241,6 +244,11 @@ pub struct AudioRenderThread {
     pub muted: bool,
     /// Scheduled offline suspensions, by frame.
     suspend_points: std::collections::BTreeMap<u64, SuspendCallback>,
+    /// PARTII_AUDIO_GRAPH_STATS: log the graph's node count about once a second when it
+    /// changes (for leak tests).
+    graph_stats: bool,
+    graph_stats_last: usize,
+    graph_stats_quanta: u32,
 }
 
 impl AudioRenderThread {
@@ -275,6 +283,9 @@ impl AudioRenderThread {
             current_frame: Tick(0),
             muted: false,
             suspend_points: Default::default(),
+            graph_stats: std::env::var_os("PARTII_AUDIO_GRAPH_STATS").is_some(),
+            graph_stats_last: 0,
+            graph_stats_quanta: 0,
         })
     }
 
@@ -399,6 +410,22 @@ impl AudioRenderThread {
         self.graph.process(&info)
     }
 
+    fn log_graph_stats(&mut self) {
+        self.graph_stats_quanta += 1;
+        let quanta_per_second = (self.sample_rate / FRAMES_PER_BLOCK.0 as f32) as u32;
+        if self.graph_stats_quanta >= quanta_per_second {
+            self.graph_stats_quanta = 0;
+            let nodes = self.graph.node_count();
+            if nodes != self.graph_stats_last {
+                self.graph_stats_last = nodes;
+                eprintln!(
+                    "partii-audio-graph: nodes={nodes} unreferenced={}",
+                    self.graph.unreferenced_count()
+                );
+            }
+        }
+    }
+
     fn set_mute(&mut self, val: bool) {
         self.muted = val;
     }
@@ -429,8 +456,14 @@ impl AudioRenderThread {
                     response.send(context.current_time).unwrap()
                 },
                 AudioRenderThreadMsg::MessageNode(id, msg) => {
-                    let msg = msg.clamped_to(context.current_time);
-                    context.graph.node_mut(id).message(msg, sample_rate)
+                    // A removed node can't get messages from its (gone) DOM object; be safe.
+                    if context.graph.has_node(id) {
+                        let msg = msg.clamped_to(context.current_time);
+                        context.graph.node_mut(id).message(msg, sample_rate)
+                    }
+                },
+                AudioRenderThreadMsg::NodeUnreferenced(id) => {
+                    context.graph.node_unreferenced(id);
                 },
                 AudioRenderThreadMsg::SinkNeedData => {
                     // Do nothing. This will simply unblock the thread so we
@@ -520,6 +553,10 @@ impl AudioRenderThread {
                         frame: self.current_frame,
                         time: self.current_time,
                     });
+                    self.graph.collect_unreferenced(self.current_frame);
+                    if self.graph_stats {
+                        self.log_graph_stats();
+                    }
                 } else {
                     eprintln!("Could not push data to audio sink");
                 }

@@ -10,7 +10,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use num_complex::Complex64;
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::Chunk;
+use crate::block::{Chunk, Tick};
 
 const MAX_COEFFS: usize = 20;
 
@@ -38,6 +38,10 @@ impl IIRFilter {
             inputs: VecDeque::with_capacity(MAX_COEFFS),
             outputs: VecDeque::with_capacity(MAX_COEFFS),
         }
+    }
+
+    fn is_quiet(&self) -> bool {
+        self.inputs.iter().chain(self.outputs.iter()).all(|v| v.abs() < 1e-6)
     }
 
     fn calculate_output(&mut self, input: f32) -> f32 {
@@ -168,6 +172,12 @@ impl IIRFilterNode {
 impl AudioNodeEngine for IIRFilterNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::IIRFilterNode
+    }
+
+    /// Tail: the filter rings after its input stops; removable once its memory has decayed
+    /// below audibility.
+    fn removable(&self, _now: Tick) -> bool {
+        self.filters.iter().all(|f| f.is_quiet())
     }
 
     fn process(&mut self, inputs: Chunk, _info: &BlockInfo) -> Chunk {

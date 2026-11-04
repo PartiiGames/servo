@@ -19,6 +19,21 @@ use crate::render_thread::{
 };
 use crate::sink::AudioSinkError;
 
+/// Sends `NodeUnreferenced` for a node when dropped (see `AudioContext::unreferenced_on_drop`).
+/// Dropping it never blocks and is a no-op once the context is closed.
+pub struct NodeUnreferencedOnDrop {
+    sender: Sender<AudioRenderThreadMsg>,
+    node: NodeId,
+}
+
+impl Drop for NodeUnreferencedOnDrop {
+    fn drop(&mut self) {
+        let _ = self
+            .sender
+            .send(AudioRenderThreadMsg::NodeUnreferenced(self.node));
+    }
+}
+
 /// Describes the state of the audio context on the control thread.
 #[derive(Clone, Copy, Debug, PartialEq, MallocSizeOf)]
 pub enum ProcessingState {
@@ -334,6 +349,23 @@ impl AudioContext {
         let _ = self
             .sender
             .send(AudioRenderThreadMsg::SetSinkEosCallback(callback));
+    }
+
+    /// The DOM object for `node` (and its AudioParams) is gone. Prefer
+    /// [`Self::unreferenced_on_drop`], which sends this without locking the context.
+    pub fn node_unreferenced(&self, node: NodeId) {
+        let _ = self
+            .sender
+            .send(AudioRenderThreadMsg::NodeUnreferenced(node));
+    }
+
+    /// A value that tells the render thread `node` is unreferenced when it is dropped. The DOM
+    /// side keeps it (shared between an AudioNode and its AudioParams) for the node's lifetime.
+    pub fn unreferenced_on_drop(&self, node: NodeId) -> NodeUnreferencedOnDrop {
+        NodeUnreferencedOnDrop {
+            sender: self.sender.clone(),
+            node,
+        }
     }
 
     /// OfflineAudioContext.suspend(): suspend rendering before the render quantum starting at

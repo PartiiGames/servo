@@ -18,7 +18,7 @@ use smallvec::SmallVec;
 use crate::audio_node::{
     AudioNodeEngine, AudioNodeType, BlockInfo, ChannelCountMode, ChannelInterpretation,
 };
-use crate::block::{Block, Chunk};
+use crate::block::{Block, Chunk, Tick};
 use crate::destination_node::DestinationNode;
 use crate::listener::AudioListenerNode;
 use crate::param::ParamType;
@@ -121,6 +121,20 @@ pub struct AudioGraph {
     dest_id: NodeId,
     dests: Vec<NodeId>,
     listener_id: NodeId,
+    /// Nodes whose DOM objects are gone, waiting to be removable (see `collect_unreferenced`).
+    unreferenced: Vec<NodeIndex<DefaultIx>>,
+    /// Bumped on every change of nodes or edges; `plan` is valid for one value.
+    topology: u64,
+    /// The processing order and cycle analysis, recomputed only when the topology changes.
+    plan: Option<Plan>,
+}
+
+/// What `process` needs that depends only on the graph's topology.
+struct Plan {
+    topology: u64,
+    order: Vec<NodeIndex<DefaultIx>>,
+    cycle_breakers: FxHashSet<NodeIndex<DefaultIx>>,
+    cycle_nodes: FxHashSet<NodeIndex<DefaultIx>>,
 }
 
 pub(crate) struct Node {
@@ -192,11 +206,15 @@ impl AudioGraph {
             dest_id,
             dests: vec![dest_id],
             listener_id,
+            unreferenced: Vec::new(),
+            topology: 0,
+            plan: None,
         }
     }
 
     /// Create a node, obtain its id
     pub(crate) fn add_node(&mut self, node: Box<dyn AudioNodeEngine>) -> NodeId {
+        self.topology += 1;
         NodeId(self.graph.add_node(Node::new(node)))
     }
 
@@ -204,6 +222,7 @@ impl AudioGraph {
     ///
     /// The edge goes *from* the output port *to* the input port, connecting two nodes
     pub fn add_edge(&mut self, out: PortId<OutputPort>, inp: PortId<InputPort>) {
+        self.topology += 1;
         let edge = self
             .graph
             .edges(out.node().0)
@@ -230,6 +249,7 @@ impl AudioGraph {
     ///
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect>
     pub fn disconnect_all_from(&mut self, node: NodeId) {
+        self.topology += 1;
         let edges = self.graph.edges(node.0).map(|e| e.id()).collect::<Vec<_>>();
         for edge in edges {
             self.graph.remove_edge(edge);
@@ -240,6 +260,7 @@ impl AudioGraph {
     ///
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-output>
     pub fn disconnect_output(&mut self, out: PortId<OutputPort>) {
+        self.topology += 1;
         let candidates: Vec<_> = self
             .graph
             .edges(out.node().0)
@@ -261,6 +282,7 @@ impl AudioGraph {
     ///
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-destinationnode>
     pub fn disconnect_between(&mut self, from: NodeId, to: NodeId) {
+        self.topology += 1;
         let edge = self
             .graph
             .edges(from.0)
@@ -275,6 +297,7 @@ impl AudioGraph {
     ///
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-destinationnode-output>
     pub fn disconnect_output_between(&mut self, out: PortId<OutputPort>, to: NodeId) {
+        self.topology += 1;
         let edge = self
             .graph
             .edges(out.node().0)
@@ -298,6 +321,7 @@ impl AudioGraph {
     ///
     /// <https://webaudio.github.io/web-audio-api/#dom-audionode-disconnect-destinationparam>
     pub fn disconnect_to(&mut self, node: NodeId, inp: PortId<InputPort>) {
+        self.topology += 1;
         let edge = self
             .graph
             .edges(node.0)
@@ -324,6 +348,7 @@ impl AudioGraph {
         out: PortId<OutputPort>,
         inp: PortId<InputPort>,
     ) {
+        self.topology += 1;
         let edge = self
             .graph
             .edges(out.node().0)
@@ -350,6 +375,7 @@ impl AudioGraph {
 
     /// Add additional terminator nodes
     pub fn add_extra_dest(&mut self, dest: NodeId) {
+        self.topology += 1;
         self.dests.push(dest);
     }
 
@@ -369,7 +395,18 @@ impl AudioGraph {
     /// This implements steps 4.2 and parts of 4.4 from
     /// <https://webaudio.github.io/web-audio-api/#rendering-loop>
     pub fn process(&mut self, info: &BlockInfo) -> Chunk {
-        // Step 4.2. Order the AudioNodes of the BaseAudioContext to be processed.
+        // Step 4.2. Order the AudioNodes of the BaseAudioContext to be processed. The order
+        // only depends on the topology: reuse it until nodes or edges change.
+        if self.plan.as_ref().is_none_or(|plan| plan.topology != self.topology) {
+            self.plan = Some(self.make_plan());
+        }
+        let plan = self.plan.take().expect("planned above");
+        let out = self.process_with_plan(&plan, info);
+        self.plan = Some(plan);
+        out
+    }
+
+    fn make_plan(&self) -> Plan {
         let (cycle_breakers, cycle_nodes, scc_of) = self.detect_cycles();
 
         // Post order: a node comes after every node it reads from, except that the inputs of
@@ -398,8 +435,22 @@ impl AudioGraph {
             }
         }
         let order = self.processing_order(&roots, &cycle_breakers, &scc_of);
+        Plan {
+            topology: self.topology,
+            order,
+            cycle_breakers,
+            cycle_nodes,
+        }
+    }
 
-        for ix in order {
+    fn process_with_plan(&self, plan: &Plan, info: &BlockInfo) -> Chunk {
+        let Plan {
+            order,
+            cycle_breakers,
+            cycle_nodes,
+            ..
+        } = plan;
+        for &ix in order {
             let mut curr = self.graph[ix].node.borrow_mut();
 
             if cycle_nodes.contains(&ix) {
@@ -431,6 +482,17 @@ impl AudioGraph {
                 continue;
             }
 
+            if self.is_inactive(ix, &curr, info.frame) {
+                // Nothing to do this quantum (a finished source, a node with silent inputs and
+                // no tail): skip it. Its consumers find no block and read silence.
+                for edge in self.graph.edges_directed(ix, Direction::Incoming) {
+                    for connection in &edge.weight().connections {
+                        connection.cache.borrow_mut().take();
+                    }
+                }
+                continue;
+            }
+
             let chunk = self.gather_inputs(ix, &mut curr);
 
             // actually run the node engine
@@ -444,7 +506,7 @@ impl AudioGraph {
         }
 
         // The DelayWriters: every node that feeds a cycle breaker has run by now.
-        for ix in &cycle_breakers {
+        for ix in cycle_breakers {
             let mut curr = self.graph[*ix].node.borrow_mut();
             let chunk = self.gather_inputs(*ix, &mut curr);
             curr.as_delay_node()
@@ -537,11 +599,8 @@ impl AudioGraph {
             let edge = edge.weight();
             for connection in &edge.connections {
                 let Some(mut block) = connection.cache.borrow_mut().take() else {
-                    // A DelayReader may have taken an AudioParam input already.
-                    assert!(
-                        matches!(connection.input_idx, PortIndex::Param(_)),
-                        "Cache should have been filled from traversal"
-                    );
+                    // No block: the source was skipped as inactive (silence), or a DelayReader
+                    // took an AudioParam input already.
                     continue;
                 };
 
@@ -604,6 +663,33 @@ impl AudioGraph {
         chunk
     }
 
+    /// A node that need not run this quantum: it says it has nothing more to produce
+    /// (`removable`) and every block waiting at its inputs is silence (or absent). Analysers
+    /// always run (they record silence too), as do nodes without outputs (destinations).
+    fn is_inactive(
+        &self,
+        ix: NodeIndex<DefaultIx>,
+        curr: &RefMut<'_, Box<dyn AudioNodeEngine>>,
+        now: Tick,
+    ) -> bool {
+        if curr.output_count() == 0 ||
+            curr.node_type() == AudioNodeType::AnalyserNode ||
+            !curr.removable(now)
+        {
+            return false;
+        }
+        self.graph.edges_directed(ix, Direction::Incoming).all(|edge| {
+            edge.weight().connections.iter().all(|connection| {
+                matches!(connection.input_idx, PortIndex::Listener(_)) ||
+                    connection
+                        .cache
+                        .borrow()
+                        .as_ref()
+                        .is_none_or(|block| block.is_silence())
+            })
+        })
+    }
+
     /// Hand the AudioParam inputs of `ix` whose sources have already run to its params.
     fn gather_ready_param_inputs(
         &self,
@@ -663,6 +749,70 @@ impl AudioGraph {
     /// Obtain a mutable reference to a node
     pub(crate) fn node_mut(&self, ix: NodeId) -> RefMut<'_, Box<dyn AudioNodeEngine>> {
         self.graph[ix.0].node.borrow_mut()
+    }
+
+    /// Whether `id` is (still) a node of this graph.
+    pub fn has_node(&self, id: NodeId) -> bool {
+        self.graph.contains_node(id.0)
+    }
+
+    /// Unreferenced nodes waiting to become removable.
+    pub fn unreferenced_count(&self) -> usize {
+        self.unreferenced.len()
+    }
+
+    /// The number of nodes in the graph (including the destination and listener).
+    pub fn node_count(&self) -> usize {
+        self.graph.node_count()
+    }
+
+    /// The node's DOM object (and its AudioParams) are gone: it can't be connected, started or
+    /// changed any more. It is removed once it stops mattering (`collect_unreferenced`).
+    pub fn node_unreferenced(&mut self, id: NodeId) {
+        if !self.graph.contains_node(id.0) ||
+            id == self.dest_id ||
+            id == self.listener_id ||
+            self.dests.contains(&id) ||
+            self.unreferenced.contains(&id.0)
+        {
+            return;
+        }
+        self.unreferenced.push(id.0);
+    }
+
+    /// Node lifetime (<https://webaudio.github.io/web-audio-api/#lifetime-AudioNode>): remove
+    /// the unreferenced nodes that can't affect the output any more: no inputs left (audio or
+    /// AudioParam; the listener's feed to a panner doesn't count) and either no outputs or
+    /// nothing more to produce (`AudioNodeEngine::removable`). Removing a node drops its edges,
+    /// which can free the next node downstream in a later quantum. Runs after each render
+    /// quantum, only over the candidates; it does not allocate.
+    pub(crate) fn collect_unreferenced(&mut self, now: Tick) {
+        let mut i = 0;
+        while i < self.unreferenced.len() {
+            let ix = self.unreferenced[i];
+            if self.is_removable(ix, now) {
+                // The engine is dropped here, on the render thread.
+                self.graph.remove_node(ix);
+                self.topology += 1;
+                self.unreferenced.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn is_removable(&self, ix: NodeIndex<DefaultIx>, now: Tick) -> bool {
+        let has_inputs = self.graph.edges_directed(ix, Direction::Incoming).any(|edge| {
+            edge.weight()
+                .connections
+                .iter()
+                .any(|c| !matches!(c.input_idx, PortIndex::Listener(_)))
+        });
+        if has_inputs {
+            return false;
+        }
+        let has_outputs = self.graph.edges(ix).next().is_some();
+        !has_outputs || self.graph[ix].node.borrow().removable(now)
     }
 
     /// Steps 4.2.4 to 4.2.7 of <https://webaudio.github.io/web-audio-api/#rendering-loop>:
@@ -822,6 +972,9 @@ mod tests {
             }
             chunk
         }
+        fn removable(&self, _: Tick) -> bool {
+            self.done
+        }
     }
 
     fn impulse() -> Box<dyn AudioNodeEngine> {
@@ -935,6 +1088,9 @@ mod tests {
                 .push(Block::for_vec(vec![self.value; FRAMES_PER_BLOCK_USIZE]));
             chunk
         }
+        fn removable(&self, _: Tick) -> bool {
+            false
+        }
     }
 
     #[test]
@@ -966,6 +1122,124 @@ mod tests {
         // 0.004 s is 192.00001 frames in f32: the interpolation is off by ~1e-5.
         assert!((out[192] - 1.).abs() < 1e-4, "{}", out[192]);
         assert!((out[384] - 0.5).abs() < 1e-4, "{}", out[384]);
+    }
+
+    /// A source that plays (a constant) until `until`, then is removable.
+    #[derive(AudioNodeCommon)]
+    struct Voice {
+        channel_info: ChannelInfo,
+        until: Tick,
+    }
+
+    impl AudioNodeEngine for Voice {
+        fn node_type(&self) -> AudioNodeType {
+            AudioNodeType::AudioBufferSourceNode
+        }
+        fn input_count(&self) -> u32 {
+            0
+        }
+        fn process(&mut self, _: Chunk, info: &BlockInfo) -> Chunk {
+            let mut chunk = Chunk::default();
+            if info.frame < self.until {
+                chunk.blocks.push(Block::for_vec(vec![0.1; FRAMES_PER_BLOCK_USIZE]));
+            } else {
+                chunk.blocks.push(Block::default());
+            }
+            chunk
+        }
+        fn removable(&self, now: Tick) -> bool {
+            now >= self.until
+        }
+    }
+
+    fn voice(graph: &mut AudioGraph, until: u64) -> (NodeId, NodeId) {
+        let src = graph.add_node(Box::new(Voice {
+            channel_info: ChannelInfo::default(),
+            until: Tick(until),
+        }));
+        let gain = graph.add_node(Box::new(GainNode::new(
+            GainNodeOptions { gain: 0.5 },
+            ChannelInfo::default(),
+        )));
+        let dest = graph.dest_id();
+        graph.add_edge(src.output(0), gain.input(0));
+        graph.add_edge(gain.output(0), dest.input(0));
+        (src, gain)
+    }
+
+    fn render_and_collect(graph: &mut AudioGraph, blocks: u64) {
+        for n in 0..blocks {
+            let frame = Tick(n * FRAMES_PER_BLOCK_USIZE as u64);
+            let info = BlockInfo {
+                sample_rate: 48000.,
+                frame,
+                time: 0.,
+            };
+            graph.process(&info);
+            graph.collect_unreferenced(frame + Tick(FRAMES_PER_BLOCK_USIZE as u64));
+        }
+    }
+
+    #[test]
+    fn unreferenced_voices_are_removed_once_finished() {
+        let mut graph = AudioGraph::new(2);
+        let base = graph.node_count(); // destination + listener
+        let (src, gain) = voice(&mut graph, 256);
+        graph.node_unreferenced(src);
+        graph.node_unreferenced(gain);
+        // Still playing: nothing goes.
+        render_and_collect(&mut graph, 1);
+        assert_eq!(graph.node_count(), base + 2);
+        // Finished: the source goes, then the gain (no inputs left).
+        render_and_collect(&mut graph, 3);
+        assert_eq!(graph.node_count(), base);
+        assert!(!graph.has_node(src) && !graph.has_node(gain));
+    }
+
+    #[test]
+    fn referenced_nodes_and_their_downstream_stay() {
+        let mut graph = AudioGraph::new(2);
+        let base = graph.node_count();
+        let (src, gain) = voice(&mut graph, 128);
+        // The page still holds the source, but dropped the gain: the gain has an input.
+        graph.node_unreferenced(gain);
+        render_and_collect(&mut graph, 4);
+        assert!(graph.has_node(src) && graph.has_node(gain));
+        assert_eq!(graph.node_count(), base + 2);
+    }
+
+    #[test]
+    fn destination_and_listener_are_never_removed() {
+        let mut graph = AudioGraph::new(2);
+        let base = graph.node_count();
+        graph.node_unreferenced(graph.dest_id());
+        graph.node_unreferenced(graph.listener_id());
+        render_and_collect(&mut graph, 2);
+        assert_eq!(graph.node_count(), base);
+    }
+
+    #[test]
+    fn many_voices_keep_the_graph_flat() {
+        let mut graph = AudioGraph::new(2);
+        let base = graph.node_count();
+        let mut frame = 0u64;
+        for _ in 0..2000 {
+            let (src, gain) = voice(&mut graph, frame + 256);
+            graph.node_unreferenced(src);
+            graph.node_unreferenced(gain);
+            for _ in 0..4 {
+                let info = BlockInfo {
+                    sample_rate: 48000.,
+                    frame: Tick(frame),
+                    time: 0.,
+                };
+                graph.process(&info);
+                frame += FRAMES_PER_BLOCK_USIZE as u64;
+                graph.collect_unreferenced(Tick(frame));
+            }
+            assert!(graph.node_count() <= base + 4, "{}", graph.node_count());
+        }
+        assert_eq!(graph.node_count(), base);
     }
 
     #[test]

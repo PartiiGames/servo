@@ -5,7 +5,7 @@
 use servo_media_streams::MediaSocket;
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::Chunk;
+use crate::block::{Chunk, Tick};
 use crate::sink::AudioSink;
 
 #[derive(AudioNodeCommon)]
@@ -31,6 +31,11 @@ impl MediaStreamDestinationNode {
 impl AudioNodeEngine for MediaStreamDestinationNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::MediaStreamDestinationNode
+    }
+
+    /// Driven from outside the graph (or the graph's own endpoint): never removed here.
+    fn removable(&self, _now: Tick) -> bool {
+        false
     }
 
     fn process(&mut self, inputs: Chunk, _: &BlockInfo) -> Chunk {

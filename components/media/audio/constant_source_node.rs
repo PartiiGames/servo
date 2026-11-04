@@ -52,6 +52,10 @@ impl AudioNodeEngine for ConstantSourceNode {
         AudioNodeType::ConstantSourceNode
     }
 
+    fn removable(&self, now: Tick) -> bool {
+        self.scheduled_source_removable(now)
+    }
+
     fn process(&mut self, mut inputs: Chunk, info: &BlockInfo) -> Chunk {
         debug_assert!(inputs.is_empty());
 

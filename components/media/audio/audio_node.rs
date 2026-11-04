@@ -244,6 +244,18 @@ pub(crate) trait AudioNodeEngine: Send + AudioNodeCommon {
     fn as_delay_node(&mut self) -> Option<&mut DelayNode> {
         None
     }
+
+    /// Node lifetime (<https://webaudio.github.io/web-audio-api/#AudioNode-actively-processing>):
+    /// asked about a node that is unreferenced (its DOM object and AudioParams are gone) and
+    /// has no inputs left. True if it will not produce any more output, so the graph can remove
+    /// it: a scheduled source that never started, was stopped or has played out; a node whose
+    /// tail time has elapsed. `now` is the first frame of the next render quantum.
+    ///
+    /// The default (no tail, no state) is true. Nodes whose output depends on something outside
+    /// the graph (media elements and streams, the destination) return false.
+    fn removable(&self, _now: Tick) -> bool {
+        true
+    }
 }
 
 #[derive(MallocSizeOf)]

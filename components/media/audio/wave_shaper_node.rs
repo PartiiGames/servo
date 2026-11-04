@@ -7,7 +7,7 @@
 use malloc_size_of_derive::MallocSizeOf;
 
 use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
-use crate::block::{Chunk, FRAMES_PER_BLOCK_USIZE};
+use crate::block::{Chunk, FRAMES_PER_BLOCK_USIZE, Tick};
 use crate::oversampler::Oversampler;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, MallocSizeOf)]
@@ -131,6 +131,12 @@ fn apply_curve(buf: &mut [f32], curve: &[f32]) {
 impl AudioNodeEngine for WaveShaperNode {
     fn node_type(&self) -> AudioNodeType {
         AudioNodeType::WaveShaperNode
+    }
+
+    /// Tail: the oversampling filters. A curve with c(0) != 0 outputs DC even with no input
+    /// (spec), so such a node is never removed while connected downstream.
+    fn removable(&self, _now: Tick) -> bool {
+        self.tail_blocks_left == 0 && self.curve.as_ref().is_none_or(|c| shape(c, 0.) == 0.)
     }
 
     fn process(&mut self, mut inputs: Chunk, _info: &BlockInfo) -> Chunk {
