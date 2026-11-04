@@ -904,6 +904,36 @@ impl Node {
         self.layout_data.take();
     }
 
+    /// Partii: precise `:has()` invalidation around a DOM mutation of this element (after an
+    /// insertion, or before a removal): layout's stylist finds the anchors; mark them dirty.
+    #[expect(unsafe_code)]
+    pub(crate) fn invalidate_relative_selectors(&self, no_gc: &NoGC, removal: bool) {
+        if !pref!(layout_css_has_selector_enabled) ||
+            pref!(layout_css_has_whole_document_restyle) ||
+            !self.is::<Element>() ||
+            !self.is_connected()
+        {
+            return;
+        }
+        let window = self.owner_window();
+        let invalidated = {
+            let layout = window.layout();
+            if !layout.uses_relative_selectors() {
+                return;
+            }
+            let address = self.to_trusted_node_address();
+            if removal {
+                layout.invalidate_relative_selectors_for_removal(address)
+            } else {
+                layout.invalidate_relative_selectors_for_insertion(address)
+            }
+        };
+        for address in invalidated {
+            let node = unsafe { from_untrusted_node_address(address) };
+            node.dirty(no_gc, NodeDamage::Other);
+        }
+    }
+
     pub(crate) fn dirty(&self, no_gc: &NoGC, damage: NodeDamage) {
         self.rev_version(no_gc);
         if !self.is_connected() {
@@ -2769,6 +2799,8 @@ impl Node {
             // Step 7.2. If child is null, then append node to parent’s children.
             // Step 7.3. Otherwise, insert node into parent’s children before child’s index.
             parent.add_child(cx, kid, child);
+            // Partii: `:has()` anchors the new element may now satisfy.
+            kid.invalidate_relative_selectors(cx.no_gc(), false);
 
             // Step 7.4 If parent is a shadow host whose shadow root’s slot assignment is "named"
             // and node is a slottable, then assign a slot for node.
@@ -3056,6 +3088,9 @@ impl Node {
 
         // Step 6.
         let old_next_sibling = node.GetNextSibling();
+
+        // Partii: `:has()` anchors the element satisfied (before it leaves the tree).
+        node.invalidate_relative_selectors(cx.no_gc(), true);
 
         // Step 7. Remove node from its parent's children.
         // Step 11-14. Run removing steps and enqueue disconnected custom element reactions for the subtree.

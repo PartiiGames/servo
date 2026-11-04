@@ -351,6 +351,9 @@ pub struct Preferences {
     /// whole document on change while any stylesheet uses `:has()` (no relative selector
     /// invalidation yet).
     pub layout_css_has_selector_enabled: bool,
+    /// Partii: `:has()` v1 fallback: restyle the whole document on every change (instead of
+    /// precise relative selector invalidation).
+    pub layout_css_has_whole_document_restyle: bool,
     pub layout_css_progress_function_enabled: bool,
     pub layout_style_sharing_cache_enabled: bool,
     pub layout_threads: i64,
@@ -612,6 +615,7 @@ impl Preferences {
             layout_css_ellipse_corners_enabled: false,
             layout_scroll_anchoring_enabled: false,
             layout_css_has_selector_enabled: false,
+            layout_css_has_whole_document_restyle: false,
             layout_css_progress_function_enabled: false,
             layout_flexbox_balance: false,
             layout_grid_enabled: true,

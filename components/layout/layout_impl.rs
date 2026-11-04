@@ -98,6 +98,7 @@ use crate::query::{
 };
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
 use crate::fragment_tree::Fragment;
+use crate::has_invalidation;
 use crate::{BoxTree, FragmentTree};
 
 // This mutex is necessary due to syncronisation issues between two different types of thread-local storage
@@ -477,6 +478,40 @@ impl Layout for LayoutThread {
     }
 
     #[servo_tracing::instrument(skip_all)]
+    fn uses_relative_selectors(&self) -> bool {
+        has_invalidation::uses_relative_selectors(&self.stylist)
+    }
+
+    fn invalidate_relative_selectors_for_insertion(
+        &self,
+        node: TrustedNodeAddress,
+    ) -> Vec<UntrustedNodeAddress> {
+        let node = unsafe { ServoLayoutNode::new(&node) };
+        let Some(element) = node.as_element() else {
+            return Vec::new();
+        };
+        let element = unsafe { element.dangerous_style_element() };
+        has_invalidation::invalidate_for_insertion(&self.stylist, element)
+            .into_iter()
+            .map(|node| UntrustedNodeAddress::from_id(node.0))
+            .collect()
+    }
+
+    fn invalidate_relative_selectors_for_removal(
+        &self,
+        node: TrustedNodeAddress,
+    ) -> Vec<UntrustedNodeAddress> {
+        let node = unsafe { ServoLayoutNode::new(&node) };
+        let Some(element) = node.as_element() else {
+            return Vec::new();
+        };
+        let element = unsafe { element.dangerous_style_element() };
+        has_invalidation::invalidate_for_removal(&self.stylist, element)
+            .into_iter()
+            .map(|node| UntrustedNodeAddress::from_id(node.0))
+            .collect()
+    }
+
     fn query_element_inner_outer_text(&self, node: layout_api::TrustedNodeAddress) -> String {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
@@ -1312,16 +1347,31 @@ impl LayoutThread {
         // Partii: `:has()` invalidation, conservatively. Stylo's relative selector invalidator is
         // not wired into Servo, so a change below a `:has()` subject would leave it stale. While
         // any stylesheet uses `:has()`, restyle the whole document whenever anything is restyled.
+        // Partii: `:has()`. Precise (v2): Stylo's relative selector invalidator, for attribute,
+        // class, id and state changes here and for DOM mutations from script (Node::insert /
+        // remove); invalidated anchors get restyle hints and dirty bits up to the root, so the
+        // traversal starts at the root but only walks dirty paths. The v1 fallback (pref
+        // layout_css_has_whole_document_restyle) restyles the whole document on every change.
+        let uses_has = pref!(layout_css_has_selector_enabled) &&
+            has_invalidation::uses_relative_selectors(&self.stylist);
         let restyle_whole_document = self.force_full_restyle ||
-            (pref!(layout_css_has_selector_enabled) &&
-                self.stylist
-                    .iter_origins()
-                    .any(|(data, _)| data.relative_invalidation_map_attributes().used));
+            (uses_has && pref!(layout_css_has_whole_document_restyle));
         if restyle_whole_document {
             if let Some(mut data) = dangerous_root_element.mutate_data() {
                 data.hint.insert(RestyleHint::restyle_subtree());
             }
         }
+        let has_invalidated = uses_has &&
+            !restyle_whole_document &&
+            has_invalidation::invalidate_for_snapshots(
+                &self.stylist,
+                &snapshot_map,
+                _snapshot_setter
+                    .elements_with_snapshot
+                    .iter()
+                    .map(|element| unsafe { element.dangerous_style_element() }),
+            );
+        let restyle_whole_document = restyle_whole_document || has_invalidated;
 
         if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node {
             // Need to manually force layout to build a new display list regardless of whether the box tree
@@ -1360,15 +1410,21 @@ impl LayoutThread {
         {
             let _span = profile_traits::trace_span!("Styling").entered();
 
+            let script_dirty_root = unsafe {
+                ServoLayoutNode::new(&restyle.dirty_root.unwrap())
+                    .as_element()
+                    .unwrap()
+                    .dangerous_style_element()
+            };
             let original_dirty_root = if restyle_whole_document {
+                // Partii: starting at the root, script's dirty root must be reachable too.
+                if has_invalidated {
+                    unsafe { script_dirty_root.set_dirty_descendants() };
+                    has_invalidation::mark_ancestors_dirty(script_dirty_root);
+                }
                 dangerous_root_element
             } else {
-                unsafe {
-                    ServoLayoutNode::new(&restyle.dirty_root.unwrap())
-                        .as_element()
-                        .unwrap()
-                        .dangerous_style_element()
-                }
+                script_dirty_root
             };
 
             recalc_style_traversal = RecalcStyle::new(&layout_context);
