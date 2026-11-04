@@ -1304,6 +1304,7 @@ impl WebGL2RenderingContext {
         depth: u32,
         is_3d: bool,
     ) -> Option<TexPixels> {
+        let pixels = pixels.flip_source_y();
         let params = self.unpack_params.get();
         if params == UnpackParams::default() ||
             (!is_3d &&
@@ -1966,7 +1967,9 @@ impl WebGL2RenderingContext {
             target: target.as_gl_constant(),
             level,
             internal_format,
-            size: data.size(),
+            // Not data.size(): image sources arrive as one image of `depth` slices stacked
+            // vertically, height * depth rows tall.
+            size: Size2D::new(width, height),
             depth,
             format,
             data_type,

@@ -5324,6 +5324,25 @@ impl TexPixels {
         self.data
     }
 
+    /// Applies a pending UNPACK_FLIP_Y_WEBGL to the whole image now (an image source: 4 bytes
+    /// per pixel, rows of its width). WebGL 2 flips the source before UNPACK_SKIP_* and the
+    /// upload size pick a window out of it, so the flip can't wait for the WebGL thread, which
+    /// only sees the window.
+    pub(crate) fn flip_source_y(mut self) -> Self {
+        if self.y_axis_treatment != YAxisTreatment::Flipped {
+            return self;
+        }
+        let row = self.size.width as usize * 4;
+        let rows = self.size.height as usize;
+        let mut flipped = Vec::with_capacity(row * rows);
+        for y in (0..rows).rev() {
+            flipped.extend_from_slice(&self.data[y * row..(y + 1) * row]);
+        }
+        self.data = GenericSharedMemory::from_vec(flipped);
+        self.y_axis_treatment = YAxisTreatment::AsIs;
+        self
+    }
+
     /// Replaces the pixel data (same pixel format and treatments) with `f(data)`, of `size`.
     pub(crate) fn map_data(self, size: Size2D<u32>, f: impl FnOnce(&[u8]) -> Vec<u8>) -> Self {
         let data = GenericSharedMemory::from_vec(f(&self.data));
