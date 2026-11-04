@@ -13,8 +13,8 @@ use js::realm::CurrentRealm;
 use js::rust::CustomAutoRooterGuard;
 use js::typedarray::{ArrayBuffer, ArrayBufferU8};
 use script_bindings::cell::DomRefCell;
-use script_bindings::cformat;
 use script_bindings::codegen::GenericBindings::PeriodicWaveBinding::PeriodicWaveMethods;
+use log::warn;
 use servo_base::id::PipelineId;
 use servo_media::audio::context::{
     AudioContext, AudioContextOptions, NodeUnreferencedOnDrop, OfflineAudioContextOptions,
@@ -780,16 +780,19 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
                         let promise = resolver.promise.root(cx);
 
                         if let Some(callback) = &resolver.error_callback {
+                            // > queue a task to invoke errorCallback with an EncodingError
                             let exception = DOMException::new(
                                 cx,
                                 &this.global(),
-                                DOMErrorName::DataCloneError,
+                                DOMErrorName::EncodingError,
                             );
                             let _ =
                                 callback.Call__(cx, &exception, ExceptionHandling::Report);
                         }
-                        let error = cformat!("Audio decode error {:?}", error);
-                        promise.reject_error(cx, Error::Type(error));
+                        // > reject promise with an EncodingError
+                        // <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-decodeaudiodata>
+                        warn!("Audio decode error {:?}", error);
+                        promise.reject_error(cx, Error::Encoding(None));
                     }));
                 })
                 .build();
