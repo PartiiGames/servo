@@ -282,6 +282,21 @@ impl WebGLFramebuffer {
         self.size.get()
     }
 
+    /// The levels at which `texture` is attached to this framebuffer (any attachment point).
+    pub(crate) fn texture_attachment_levels(&self, texture: &WebGLTexture) -> Vec<i32> {
+        self.colors
+            .iter()
+            .chain([&self.depth, &self.stencil, &self.depthstencil])
+            .filter_map(|attachment| match *attachment.borrow() {
+                Some(WebGLFramebufferAttachment::Texture {
+                    texture: ref attached,
+                    level,
+                }) if attached.id() == texture.id() => Some(level),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The internal formats of the colour attachment at `color_attachment` and of the depth and
     /// stencil attachments, renderbuffers and textures alike.
     pub(crate) fn get_attachment_formats(
