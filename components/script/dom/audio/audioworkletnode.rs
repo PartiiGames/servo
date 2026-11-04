@@ -33,7 +33,9 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::structuredclone;
-use crate::dom::event::{EventBubbles, EventCancelable, EventComposed};
+use crate::dom::event::{Event, EventBubbles, EventCancelable};
+use crate::dom::errorevent::ErrorEvent;
+use crate::dom::bindings::reflector::DomGlobal;
 use stylo_atoms::Atom;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
@@ -200,15 +202,25 @@ impl AudioWorkletNode {
         Ok(node)
     }
 
-    /// Fire `processorerror` (the processor's constructor or `process()` threw).
+    /// Fire `processorerror` (the processor's constructor or `process()` threw): an ErrorEvent.
+    /// The exception itself lives in the worklet's realm on the render thread, so `error` is null;
+    /// its message went to the console there.
     pub(crate) fn fire_processor_error(&self, cx: &mut JSContext) {
-        self.upcast::<EventTarget>().fire_event_with_params(
+        rooted!(&in(cx) let error = js::jsval::NullValue());
+        let global = self.global();
+        let event = ErrorEvent::new(
             cx,
+            &global,
             Atom::from("processorerror"),
             EventBubbles::DoesNotBubble,
             EventCancelable::NotCancelable,
-            EventComposed::NotComposed,
+            DOMString::from("AudioWorkletProcessor threw an exception"),
+            DOMString::new(),
+            0,
+            0,
+            error.handle(),
         );
+        event.upcast::<Event>().fire(cx, self.upcast::<EventTarget>());
     }
 }
 

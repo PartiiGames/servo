@@ -76,6 +76,31 @@ fn run_idle_hooks() {
     });
 }
 
+thread_local! {
+    static QUANTUM_END_HOOKS: std::cell::RefCell<Vec<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Register `hook` to run on the current render thread after every rendered quantum (the
+/// AudioWorklet's microtask checkpoint: between render quanta, not between processors).
+pub fn on_render_quantum_end(hook: Box<dyn FnMut()>) {
+    QUANTUM_END_HOOKS.with(|hooks| hooks.borrow_mut().push(hook));
+}
+
+fn run_quantum_end_hooks() {
+    let mut hooks = QUANTUM_END_HOOKS.with(|hooks| std::mem::take(&mut *hooks.borrow_mut()));
+    if hooks.is_empty() {
+        return;
+    }
+    for hook in hooks.iter_mut() {
+        hook();
+    }
+    QUANTUM_END_HOOKS.with(|h| {
+        let mut h = h.borrow_mut();
+        hooks.append(&mut h);
+        *h = hooks;
+    });
+}
+
 fn run_exit_hooks() {
     loop {
         let hook = EXIT_HOOKS.with(|hooks| hooks.borrow_mut().pop());
@@ -481,6 +506,7 @@ impl AudioRenderThread {
                 // render quantum.
                 let started = stats.enabled().then(std::time::Instant::now);
                 let data = self.process();
+                run_quantum_end_hooks();
                 if let Some(started) = started {
                     stats.record(started.elapsed(), self.sink.underrun_stats());
                 }
