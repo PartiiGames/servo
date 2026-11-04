@@ -271,8 +271,12 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
             return Err(Error::Type(c"Cannot copy to shared buffer".to_owned()));
         }
 
-        if channel_number >= self.number_of_channels || start_in_channel >= self.length {
+        if channel_number >= self.number_of_channels {
             return Err(Error::IndexSize(None));
+        }
+        // A bufferOffset at or past the end copies nothing (the spec no longer throws).
+        if start_in_channel >= self.length {
+            return Ok(());
         }
 
         let bytes_to_copy = min(self.length - start_in_channel, destination.len() as u32) as usize;
@@ -292,7 +296,7 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
         } else if let Some(ref shared_channels) = *self.shared_channels.borrow() &&
             let Some(shared_channel) = shared_channels.buffers.get(channel_number)
         {
-            dest.extend_from_slice(&shared_channel.as_slice()[offset..offset + bytes_to_copy]);
+            dest.copy_from_slice(&shared_channel.as_slice()[offset..offset + bytes_to_copy]);
         }
 
         destination.update(&dest);
@@ -312,8 +316,12 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
             return Err(Error::Type(c"Cannot copy from shared buffer".to_owned()));
         }
 
-        if channel_number >= self.number_of_channels || start_in_channel > (source.len() as u32) {
+        if channel_number >= self.number_of_channels {
             return Err(Error::IndexSize(None));
+        }
+        // A bufferOffset at or past the end copies nothing (the spec no longer throws).
+        if start_in_channel >= self.length {
+            return Ok(());
         }
 
         if !self.restore_js_channel_data(cx) {
