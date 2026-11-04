@@ -654,8 +654,12 @@ impl Div<f64> for Tick {
 impl Tick {
     pub const FRAMES_PER_BLOCK: Tick = FRAMES_PER_BLOCK;
     const EPSILON: f64 = 1e-7;
+    /// The first tick at or after `time`. EPSILON absorbs round-off just above a
+    /// tick, but a time that is genuinely positive and tiny (e.g. a ramp ending
+    /// 1e-45 s after 0) still lands after tick 0, so its start value plays at 0.
     pub fn from_time(time: f64, rate: f32) -> Tick {
-        Tick((time * rate as f64 - Tick::EPSILON).ceil() as u64)
+        let ticks = time * rate as f64;
+        Tick((ticks - Tick::EPSILON.min(ticks / 2.)).ceil() as u64)
     }
 
     pub fn advance(&mut self) {
@@ -678,6 +682,14 @@ mod tests {
             repeat: false,
             buffer: data,
         }
+    }
+
+    #[test]
+    fn from_time_rounds_up_tiny_positive_times() {
+        assert_eq!(Tick::from_time(0., 65536.), Tick(0));
+        assert_eq!(Tick::from_time(1.401298464324817e-45, 65536.), Tick(1));
+        assert_eq!(Tick::from_time(0.1, 44100.), Tick(4410));
+        assert_eq!(Tick::from_time(1. / 65536., 65536.), Tick(1));
     }
 
     #[test]
