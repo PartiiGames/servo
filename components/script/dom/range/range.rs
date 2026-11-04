@@ -399,6 +399,7 @@ impl Range {
             .unwrap_or_else(|| start.clone());
         let mut rects = Vec::new();
         let mut included_element: Option<DomRoot<Node>> = None;
+        let mut text_parents: Vec<DomRoot<Node>> = Vec::new();
         for node in root.traverse_preorder(ShadowIncluding::No) {
             if let Some(element) = &included_element {
                 if element.is_ancestor_of(&node) {
@@ -408,7 +409,19 @@ impl Range {
             }
             if node.is::<Text>() {
                 if node == start || node == end || self.contains(no_gc, &node) {
-                    rects.extend(node.border_boxes());
+                    let boxes = node.border_boxes();
+                    if !boxes.is_empty() {
+                        rects.extend(boxes);
+                    } else if let Some(parent) = node.GetParentElement() {
+                        // Servo keeps no fragments per text node (text lives in its inline
+                        // box): use the parent element's boxes, once. Exact for a range over an
+                        // element's contents; for part of a text node it's the whole element.
+                        let parent = DomRoot::upcast::<Node>(parent);
+                        if !text_parents.contains(&parent) {
+                            rects.extend(parent.border_boxes());
+                            text_parents.push(parent);
+                        }
+                    }
                 }
             } else if node.is::<Element>() && self.contains(no_gc, &node) {
                 rects.extend(node.border_boxes());
