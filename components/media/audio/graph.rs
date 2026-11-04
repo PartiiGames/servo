@@ -420,12 +420,20 @@ impl AudioGraph {
         // rendering loop orders all of the context's nodes, not only those that reach the
         // destination. So are AudioWorkletNodes: an actively processing processor runs whether
         // or not its outputs reach the destination ("automatic pull"), and one with no outputs
-        // is a sink.
+        // is a sink. And so is any other node whose output goes nowhere (a source never
+        // connected, a chain left dangling): a scheduled source must still play out, fire
+        // `ended` and become removable (node lifetime). Idle ones are skipped (`is_inactive`).
+        // Media element and stream sources are left out: they pull from outside the graph.
         for ix in self.graph.node_indices() {
-            if matches!(
-                self.graph[ix].node.borrow().node_type(),
-                AudioNodeType::AnalyserNode | AudioNodeType::AudioWorkletNode
-            ) {
+            let node_type = self.graph[ix].node.borrow().node_type();
+            let root = match node_type {
+                AudioNodeType::AnalyserNode | AudioNodeType::AudioWorkletNode => true,
+                AudioNodeType::AudioListenerNode |
+                AudioNodeType::MediaElementSourceNode |
+                AudioNodeType::MediaStreamSourceNode => false,
+                _ => self.graph.edges(ix).next().is_none(),
+            };
+            if root {
                 roots.push(ix);
             }
         }
@@ -1208,6 +1216,56 @@ mod tests {
         render_and_collect(&mut graph, 4);
         assert!(graph.has_node(src) && graph.has_node(gain));
         assert_eq!(graph.node_count(), base + 2);
+    }
+
+    /// A source that counts its process() calls.
+    #[derive(AudioNodeCommon)]
+    struct Counted {
+        channel_info: ChannelInfo,
+        calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl AudioNodeEngine for Counted {
+        fn node_type(&self) -> AudioNodeType {
+            AudioNodeType::ConstantSourceNode
+        }
+        fn input_count(&self) -> u32 {
+            0
+        }
+        fn process(&mut self, _: Chunk, _: &BlockInfo) -> Chunk {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut chunk = Chunk::default();
+            chunk.blocks.push(Block::for_vec(vec![0.1; FRAMES_PER_BLOCK_USIZE]));
+            chunk
+        }
+        fn removable(&self, _: Tick) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn sources_whose_output_goes_nowhere_still_run() {
+        // Never connected (it must still reach its stop time and fire `ended`), and connected
+        // only to a dangling gain.
+        let mut graph = AudioGraph::new(2);
+        let lone: std::sync::Arc<std::sync::atomic::AtomicU32> = Default::default();
+        let dangling: std::sync::Arc<std::sync::atomic::AtomicU32> = Default::default();
+        graph.add_node(Box::new(Counted {
+            channel_info: ChannelInfo::default(),
+            calls: lone.clone(),
+        }));
+        let src = graph.add_node(Box::new(Counted {
+            channel_info: ChannelInfo::default(),
+            calls: dangling.clone(),
+        }));
+        let gain = graph.add_node(Box::new(GainNode::new(
+            GainNodeOptions { gain: 0.5 },
+            ChannelInfo::default(),
+        )));
+        graph.add_edge(src.output(0), gain.input(0));
+        render_and_collect(&mut graph, 3);
+        assert_eq!(lone.load(std::sync::atomic::Ordering::Relaxed), 3);
+        assert_eq!(dangling.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
 
     #[test]
