@@ -157,7 +157,31 @@ mod media_platform {
     }
 }
 
-#[cfg(all(not(feature = "media-gstreamer"), not(target_env = "ohos")))]
+#[cfg(all(
+    not(feature = "media-gstreamer"),
+    feature = "media-native",
+    not(target_env = "ohos")
+))]
+mod media_platform {
+    use servo_media::BackendInit;
+
+    use super::ServoMedia;
+    /// Partii's pure-Rust backend. `PARTII_MEDIA=dummy` selects the dummy backend instead (for
+    /// A/B test runs with the same binary).
+    pub fn init() {
+        if std::env::var("PARTII_MEDIA").is_ok_and(|v| v.eq_ignore_ascii_case("dummy")) {
+            ServoMedia::init::<servo_media_dummy::DummyBackend>();
+        } else {
+            ServoMedia::init_with_backend(servo_media_native::NativeBackend::init);
+        }
+    }
+}
+
+#[cfg(all(
+    not(feature = "media-gstreamer"),
+    not(feature = "media-native"),
+    not(target_env = "ohos")
+))]
 mod media_platform {
     use super::ServoMedia;
     pub fn init() {

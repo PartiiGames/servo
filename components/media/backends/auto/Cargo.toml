@@ -13,11 +13,9 @@ description.workspace = true
 name = "servo_media_auto"
 path = "lib.rs"
 
-[target.'cfg(any(all(target_os = "android", any(target_arch = "arm", target_arch = "aarch64")), target_arch = "x86_64",target_arch = "aarch64"))'.dependencies]
-servo-media-gstreamer = { workspace = true }
-
-[target.'cfg(not(any(all(target_os = "android", any(target_arch = "arm", target_arch = "aarch64")), target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
-servo-media-dummy = { workspace = true }
+# Partii: the pure-Rust native backend everywhere (no GStreamer).
+[dependencies]
+servo-media-native = { workspace = true }
 
 [lints]
 workspace = true
