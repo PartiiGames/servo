@@ -3163,10 +3163,13 @@ impl WebGLImpl {
 /// API to look up the `x.name` and `x.mappedName` members.
 const ANGLE_NAME_PREFIX: &str = "_u";
 
-/// Adds `_u` prefix to variable names
+/// Adds `_u` prefix to variable names. Built-ins (`gl_Position`, `gl_PointSize`, which transform
+/// feedback may record) keep their names.
 fn to_name_in_compiled_shader(s: &str) -> String {
     map_dot_separated(s, |s, mapped| {
-        mapped.push_str(ANGLE_NAME_PREFIX);
+        if !s.starts_with("gl_") {
+            mapped.push_str(ANGLE_NAME_PREFIX);
+        }
         mapped.push_str(s);
     })
 }
