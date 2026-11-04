@@ -237,44 +237,31 @@ impl WebGL2RenderingContext {
         self.base.current_vao_webgl2(cx)
     }
 
+    /// GL ES 3.0 2.12.6 / WebGL 2.0 5.x: every active uniform block needs a buffer at its
+    /// binding point whose bound range holds at least UNIFORM_BLOCK_DATA_SIZE bytes.
     pub(crate) fn validate_uniform_block_for_draw(&self) {
-        let program = match self.base.current_program() {
-            Some(program) => program,
-            None => return,
+        let Some(program) = self.base.current_program() else {
+            return;
         };
-        for uniform_block in program.active_uniform_blocks().iter() {
-            let data_size = uniform_block.size as usize;
-            for block in program.active_uniforms().iter() {
-                let index = match block.bind_index {
-                    Some(index) => index,
-                    None => continue,
-                };
-                let indexed = &self.indexed_uniform_buffer_bindings[index as usize];
-                let buffer = match indexed.buffer.get() {
-                    Some(buffer) => buffer,
-                    None => {
-                        self.base.webgl_error(InvalidOperation);
-                        return;
-                    },
-                };
-                if indexed.size.get() == 0 {
-                    if data_size > buffer.capacity() {
-                        self.base.webgl_error(InvalidOperation);
-                        return;
-                    }
-                } else {
-                    let start = indexed.start.get() as usize;
-                    let mut size = indexed.size.get() as usize;
-                    if start >= size {
-                        self.base.webgl_error(InvalidOperation);
-                        return;
-                    }
-                    size -= start;
-                    if data_size > size {
-                        self.base.webgl_error(InvalidOperation);
-                        return;
-                    }
-                }
+        let blocks = program.active_uniform_blocks();
+        let bindings = program.uniform_block_bindings();
+        for (block, &binding) in blocks.iter().zip(bindings.iter()) {
+            let Some(indexed) = self.indexed_uniform_buffer_bindings.get(binding as usize) else {
+                return self.base.webgl_error(InvalidOperation);
+            };
+            let Some(buffer) = indexed.buffer.get() else {
+                return self.base.webgl_error(InvalidOperation);
+            };
+            // bindBufferBase binds the whole buffer (start 0, size 0); a range is clamped to
+            // the buffer's current size.
+            let mut available = buffer
+                .capacity()
+                .saturating_sub(indexed.start.get().max(0) as usize);
+            if indexed.size.get() > 0 {
+                available = available.min(indexed.size.get() as usize);
+            }
+            if block.size.max(0) as usize > available {
+                return self.base.webgl_error(InvalidOperation);
             }
         }
     }
@@ -317,6 +304,8 @@ impl WebGL2RenderingContext {
                 return
             );
 
+            // The type the shader receives: vertexAttribPointer data (whatever its component
+            // type) arrives as float, vertexAttribIPointer data as int or uint by its signedness.
             let current_vertex_attrib = self.base.current_vertex_attribs()[location as usize];
             let attrib_data_base_type = if !attrib.enabled_as_array {
                 match current_vertex_attrib {
@@ -324,13 +313,23 @@ impl WebGL2RenderingContext {
                     VertexAttrib::Uint(_, _, _, _) => constants::UNSIGNED_INT,
                     VertexAttrib::Float(_, _, _, _) => constants::FLOAT,
                 }
+            } else if !attrib.integer {
+                constants::FLOAT
             } else {
-                attrib.type_
+                match attrib.type_ {
+                    constants::BYTE | constants::SHORT | constants::INT => constants::INT,
+                    _ => constants::UNSIGNED_INT,
+                }
             };
+            // Matrices and other float types read float data.
+            let shader_base_type = groups
+                .iter()
+                .find(|g| g.contains(&prog_attrib.type_))
+                .map_or(constants::FLOAT, |g| g[0]);
 
             let contains = groups
                 .iter()
-                .find(|g| g.contains(&attrib_data_base_type) && g.contains(&prog_attrib.type_));
+                .find(|g| g.contains(&attrib_data_base_type) && g.contains(&shader_base_type));
             if contains.is_none() {
                 self.base.webgl_error(InvalidOperation);
                 return;
@@ -1755,9 +1754,8 @@ impl WebGL2RenderingContext {
                 return Err(InvalidOperation);
             }
         }
-        for uniform in program.active_uniforms().iter() {
-            if let Some(index) = uniform.bind_index &&
-                let Some(binding) = self.indexed_uniform_buffer_bindings.get(index as usize) &&
+        for &index in program.uniform_block_bindings().iter() {
+            if let Some(binding) = self.indexed_uniform_buffer_bindings.get(index as usize) &&
                 is_tf_buffer(binding.buffer.get().as_deref())
             {
                 return Err(InvalidOperation);
