@@ -15,7 +15,9 @@ use malloc_size_of_derive::MallocSizeOf;
 use num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
-use crate::audio_node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo};
+use crate::audio_node::{
+    AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo, ChannelInterpretation,
+};
 use crate::block::{Block, Chunk, FRAMES_PER_BLOCK_USIZE, Tick};
 
 const B: usize = FRAMES_PER_BLOCK_USIZE;
@@ -129,6 +131,7 @@ impl Fft {
 struct Partitions(Vec<Vec<Complex<f32>>>);
 
 /// The input's recent spectra, newest first, as many as there are partitions.
+#[derive(Clone)]
 struct DelayLine {
     spectra: Vec<Vec<Complex<f32>>>,
     newest: usize,
@@ -188,6 +191,8 @@ struct State {
     lines: Vec<DelayLine>,
     /// Quanta of output left after the input went silent.
     tail_blocks: usize,
+    /// Quanta of stereo output left after the input stopped being stereo.
+    stereo_tail_blocks: usize,
     accum: Vec<Vec<Complex<f32>>>,
 }
 
@@ -236,6 +241,7 @@ impl State {
             partitions,
             lines: Vec::new(),
             tail_blocks: 0,
+            stereo_tail_blocks: 0,
             accum: vec![vec![Complex::default(); BINS]; 2],
         })
     }
@@ -274,6 +280,8 @@ impl AudioNodeEngine for ConvolverNode {
             return inputs;
         };
         let silent_in = inputs.blocks[0].is_silence();
+        // Still sounding from earlier input (its tail is not over).
+        let sounding = state.tail_blocks > 0;
         if silent_in {
             if state.tail_blocks == 0 {
                 inputs.blocks[0] = Block::default();
@@ -285,15 +293,35 @@ impl AudioNodeEngine for ConvolverNode {
         }
 
         // The input is mono or stereo (channelCount <= 2, clamped-max or explicit).
-        let in_channels = if silent_in {
-            state.lines.len().clamp(1, 2)
+        let block_channels = if silent_in {
+            0
         } else {
             (inputs.blocks[0].chan_count() as usize).clamp(1, 2)
         };
-        if state.lines.len() != in_channels {
-            state
-                .lines
-                .resize_with(in_channels, || DelayLine::new(state.partitions));
+        // Processing stays stereo while a stereo input's tail is still sounding: a mono
+        // input is up-mixed into it rather than cutting off the second channel's tail. Once
+        // that tail is over the output is mono again.
+        let in_channels = if block_channels == 2 {
+            state.stereo_tail_blocks = state.partitions;
+            2
+        } else if state.lines.len() == 2 && state.stereo_tail_blocks > 0 {
+            state.stereo_tail_blocks -= 1;
+            2
+        } else {
+            1
+        };
+        let speakers = self.channel_info.interpretation == ChannelInterpretation::Speakers;
+        if state.lines.len() < in_channels {
+            // Mono becoming stereo: the mono history up-mixes too (speakers: into both
+            // channels; discrete: into the first only).
+            let partitions = state.partitions;
+            let extra = match state.lines.first() {
+                Some(line) if speakers && sounding => line.clone(),
+                _ => DelayLine::new(partitions),
+            };
+            state.lines.resize(in_channels, extra);
+        } else if state.lines.len() > in_channels {
+            state.lines.truncate(in_channels);
         }
         let block = &mut inputs.blocks[0];
         if !silent_in {
@@ -303,8 +331,12 @@ impl AudioNodeEngine for ConvolverNode {
         for (chan, line) in state.lines.iter_mut().enumerate() {
             let data = if silent_in {
                 &zeros[..]
-            } else {
+            } else if chan < block_channels {
                 block.data_chan(chan as u8)
+            } else if speakers {
+                block.data_chan(0)
+            } else {
+                &zeros[..]
             };
             line.push(&mut state.fft, data);
         }
@@ -450,6 +482,48 @@ mod tests {
         assert_eq!(o.chan_count(), 2);
         assert!((o.data_chan(0)[0] - 0.5).abs() < 1e-6);
         assert!((o.data_chan(1)[0] - 0.25).abs() < 1e-6);
+    }
+
+    /// Channel 1 of `blocks` processed in order, frames concatenated.
+    fn right_channel(node: &mut ConvolverNode, blocks: Vec<Block>) -> Vec<f32> {
+        let mut out = vec![];
+        for input in blocks {
+            let o = run(node, input);
+            if o.is_silence() || o.chan_count() < 2 {
+                out.extend(std::iter::repeat_n(0., B));
+            } else {
+                out.extend_from_slice(o.data_chan(1));
+            }
+        }
+        out
+    }
+
+    fn stereo(l: f32, r: f32) -> Block {
+        let mut b = Block::for_channels_explicit(2);
+        b.data_chan_mut(0)[0] = l;
+        b.data_chan_mut(1)[0] = r;
+        b
+    }
+
+    #[test]
+    fn stereo_tail_survives_mono_input_and_mono_tail_upmixes() {
+        // convolver-upmixing-1-channel-response.html: impulses at 0 and 2 * B - 1.
+        let mut h = vec![0.; 2 * B];
+        h[0] = 0.5;
+        h[2 * B - 1] = 0.5;
+        // Stereo, then mono (not silent): the right channel's tail still plays.
+        let mut n = node(vec![h.clone()], false);
+        let mono_zeros = || Block::for_vec(vec![0.; B]);
+        let out = right_channel(&mut n, vec![stereo(1., 1.), mono_zeros(), mono_zeros()]);
+        assert!((out[2 * B - 1] - 0.5).abs() < 1e-5, "{}", out[2 * B - 1]);
+        // Once that tail is over, mono input gives mono output again.
+        assert_eq!(run(&mut n, Block::for_vec(vec![0.5; B])).chan_count(), 1);
+        // Mono, then stereo: the mono tail is up-mixed into the right channel too.
+        let mut n = node(vec![h], false);
+        let mut first = vec![0.; B];
+        first[0] = 1.;
+        let out = right_channel(&mut n, vec![Block::for_vec(first), stereo(0., 0.), stereo(0., 0.)]);
+        assert!((out[2 * B - 1] - 0.5).abs() < 1e-5, "{}", out[2 * B - 1]);
     }
 
     #[test]
