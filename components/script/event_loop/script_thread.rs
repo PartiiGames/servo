@@ -1337,10 +1337,13 @@ impl ScriptThread {
         //
         // TODO: Should either of these delays be reduced to also reduce update latency?
         let animation_delay = if running_animations && !needs_rendering_update {
-            // 30 milliseconds (33 FPS) is used here as the rendering isn't changing
-            // so it isn't a problem to slow down rAF callback calls. In addition, this allows
-            // renderer-based ticks to arrive first.
-            Duration::from_millis(30)
+            // Partii: one display frame (shell_refresh_rate_hz), not upstream's 30 ms (33 FPS).
+            // A game's rAF often changes nothing in the DOM: it draws into a canvas a worker
+            // owns, or steps its simulation and redraws only some frames. Its loop must still
+            // run at the display's rate. The renderer's tick comes first whenever this
+            // iteration built a display list (the early return above), so this only paces rAF
+            // that produced no frame.
+            Duration::from_nanos(1_000_000_000 / pref!(shell_refresh_rate_hz).clamp(1, 1000) as u64)
         } else {
             // 20 milliseconds (50 FPS) is used here in order to allow any renderer-based
             // animation ticks to arrive first.
