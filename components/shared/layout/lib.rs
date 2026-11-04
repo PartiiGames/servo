@@ -383,6 +383,22 @@ pub trait Layout {
     fn query_client_rect(&self, node: TrustedNodeAddress) -> Rect<i32, CSSPixel>;
     fn query_current_css_zoom(&self, node: TrustedNodeAddress) -> f32;
     fn query_element_inner_outer_text(&self, node: TrustedNodeAddress) -> String;
+
+    /// Partii: whether a stylesheet in use has `:has()` (DOM mutations then need relative
+    /// selector invalidation).
+    fn uses_relative_selectors(&self) -> bool;
+    /// Partii: `:has()` invalidation after `node` (an element) was inserted; returns the elements
+    /// to mark dirty.
+    fn invalidate_relative_selectors_for_insertion(
+        &self,
+        node: TrustedNodeAddress,
+    ) -> Vec<UntrustedNodeAddress>;
+    /// Partii: `:has()` invalidation before `node` (an element) is removed; returns the elements
+    /// to mark dirty.
+    fn invalidate_relative_selectors_for_removal(
+        &self,
+        node: TrustedNodeAddress,
+    ) -> Vec<UntrustedNodeAddress>;
     fn query_offset_parent(&self, node: TrustedNodeAddress) -> OffsetParentResponse;
     /// Query the scroll container for the given node. If node is `None`, the scroll container for
     /// the viewport is returned.
