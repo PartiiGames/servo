@@ -11,3 +11,8 @@ Patches on top of 0.22.0:
   Servo's inline layout implements `text-wrap-style: balance`.
 - Container query length units (cqw, cqh, cqi, cqb, cqmin, cqmax) parse for Servo too (Gecko only
   upstream); Servo's layout supplies container sizes (`query_container_size`).
+- `:has()` invalidation (`invalidation/element/relative_selector.rs`, `AncestorEarlierSibling`):
+  an ancestor whose earlier siblings aren't on the sibling search path ends the walk over those
+  siblings only (`break`), not the whole upward walk (`return`), so `:has(~ div .test)` still
+  finds its anchor when `.test` sits in a later sibling of a child of `div` (WPT
+  has-in-sibling-position / has-in-adjacent-position).
