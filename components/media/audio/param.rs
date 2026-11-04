@@ -22,6 +22,8 @@ pub enum ParamType {
     Up(ParamDir),
     Orientation(ParamDir),
     Offset,
+    /// The n-th `parameterDescriptors` entry of an AudioWorkletNode.
+    Worklet(u16),
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, MallocSizeOf)]
