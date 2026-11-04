@@ -6,6 +6,8 @@ use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
 use std::net::IpAddr;
 use std::rc::Rc;
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use malloc_size_of::malloc_size_of_is_0;
 use malloc_size_of_derive::MallocSizeOf;
@@ -55,10 +57,54 @@ impl DomainComparable for Ref<'_, MutableOrigin> {
     }
 }
 
+/// Partii: custom schemes (an embedder's app scheme, e.g. Tauri's `tauri://localhost`) whose URLs get a
+/// (scheme, host, port) tuple origin instead of the URL standard's opaque one, as WebKit and WebView2 give
+/// them: the app's page then has a stable origin, so localStorage/IndexedDB work, same-origin checks pass
+/// between its own documents, and requests carry `Origin: tauri://localhost`. A URL without a port gets
+/// port 0, which the serialization leaves out. Registered by ProtocolRegistry for handlers that ask for it
+/// (ProtocolHandler::has_tuple_origin); process-wide, as libservo runs in one process.
+static TUPLE_ORIGIN_SCHEMES: RwLock<Vec<String>> = RwLock::new(Vec::new());
+static ANY_TUPLE_ORIGIN_SCHEME: AtomicBool = AtomicBool::new(false);
+
+/// Give `scheme`'s URLs tuple origins (see [`TUPLE_ORIGIN_SCHEMES`]). Never for a special scheme.
+pub fn register_tuple_origin_scheme(scheme: &str) {
+    if matches!(
+        scheme,
+        "http" | "https" | "ws" | "wss" | "ftp" | "file" | "data" | "blob" | "about"
+    ) {
+        return;
+    }
+    let mut schemes = TUPLE_ORIGIN_SCHEMES
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    if !schemes.iter().any(|s| s == scheme) {
+        schemes.push(scheme.to_owned());
+    }
+    ANY_TUPLE_ORIGIN_SCHEME.store(true, Ordering::Release);
+}
+
+fn is_tuple_origin_scheme(scheme: &str) -> bool {
+    ANY_TUPLE_ORIGIN_SCHEME.load(Ordering::Acquire) &&
+        TUPLE_ORIGIN_SCHEMES
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|s| s == scheme)
+}
+
 impl ImmutableOrigin {
     pub fn new(url: &Url) -> ImmutableOrigin {
         if url.scheme() == "file" {
             return Self::new_opaque_for_file();
+        }
+        if let Some(host) = url.host() &&
+            is_tuple_origin_scheme(url.scheme())
+        {
+            return ImmutableOrigin::Tuple(
+                url.scheme().to_owned(),
+                host.to_owned(),
+                url.port().unwrap_or(0),
+            );
         }
 
         match url.origin() {
@@ -206,6 +252,10 @@ impl ImmutableOrigin {
     pub fn ascii_serialization(&self) -> Cow<'_, str> {
         match self {
             ImmutableOrigin::Opaque(_) => Cow::Borrowed("null"),
+            // A registered custom scheme's URL without a port (port 0): `tauri://localhost`, not `...:0`.
+            ImmutableOrigin::Tuple(scheme, host, 0) if is_tuple_origin_scheme(scheme) => {
+                Cow::Owned(format!("{scheme}://{host}"))
+            },
             ImmutableOrigin::Tuple(..) => {
                 Cow::Owned(self.clone().into_url_origin().ascii_serialization())
             },

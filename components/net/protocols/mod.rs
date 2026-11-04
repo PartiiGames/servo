@@ -70,6 +70,14 @@ pub trait ProtocolHandler: Send + Sync {
     fn is_secure(&self) -> bool {
         false
     }
+
+    /// Partii: whether this scheme's URLs get a (scheme, host, port) tuple origin instead of an opaque one
+    /// (servo_url::register_tuple_origin_scheme), as an embedder's app scheme needs (Tauri's
+    /// `tauri://localhost`): localStorage, same-origin checks and a real `Origin` header. Read once, when the
+    /// handler is registered.
+    fn has_tuple_origin(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -112,6 +120,9 @@ impl ProtocolRegistry {
         }
 
         if let Entry::Vacant(entry) = self.handlers.entry(scheme.into()) {
+            if handler.has_tuple_origin() {
+                servo_url::register_tuple_origin_scheme(scheme);
+            }
             entry.insert(Box::new(handler));
             Ok(())
         } else {
