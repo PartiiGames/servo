@@ -9183,10 +9183,13 @@ class GlobalGenRoots():
             (camel_to_upper_snake(d.name), 2 ** idx)
             for (idx, d) in enumerate(global_descriptors)
         )
+        # One bit per global: AudioWorkletGlobalScope plus testbinding's TestWorkletGlobalScope
+        # (servoshell) make 9, which doesn't fit in a u8.
+        repr = "u8" if len(global_descriptors) <= 8 else "u16" if len(global_descriptors) <= 16 else "u32"
         global_flags = CGWrapper(CGIndenter(CGList([
             CGGeneric(f"const {args[0]} = {args[1]};")
             for args in flags
-        ], "\n")), pre="#[derive(Clone, Copy)]\npub struct Globals: u8 {\n", post="\n}")
+        ], "\n")), pre=f"#[derive(Clone, Copy)]\npub struct Globals: {repr} {{\n", post="\n}")
         globals_ = CGWrapper(CGIndenter(global_flags), pre="bitflags::bitflags! {\n", post="\n}")
 
         return CGList([
