@@ -188,6 +188,17 @@ impl VertexArrayObject {
         self.vertex_attribs.borrow_mut()[index as usize].enabled_as_array = value;
     }
 
+    /// Whether `buffer` is the element array buffer or any attribute's buffer, enabled or not.
+    pub(crate) fn binds_buffer(&self, buffer: &WebGLBuffer) -> bool {
+        self.element_array_buffer
+            .get()
+            .is_some_and(|b| buffer == &*b) ||
+            self.vertex_attribs
+                .borrow()
+                .iter()
+                .any(|attrib| attrib.buffer().is_some_and(|b| b.id() == buffer.id()))
+    }
+
     pub(crate) fn unbind_buffer(&self, buffer: &WebGLBuffer) {
         for attrib in &mut **self.vertex_attribs.borrow_mut() {
             if let Some(b) = attrib.buffer() {
