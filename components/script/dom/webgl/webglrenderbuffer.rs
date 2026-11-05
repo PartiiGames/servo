@@ -85,6 +85,8 @@ pub(crate) struct WebGLRenderbuffer {
     ever_bound: Cell<bool>,
     size: Cell<Option<(i32, i32)>>,
     internal_format: Cell<Option<u32>>,
+    /// The sample count the storage was allocated with (0: single-sampled).
+    samples: Cell<i32>,
     is_initialized: Cell<bool>,
     attached_framebuffer: MutNullableDom<WebGLFramebuffer>,
     droppable: DroppableWebGLRenderbuffer,
@@ -96,6 +98,7 @@ impl WebGLRenderbuffer {
             webgl_object: WebGLObject::new_inherited(context),
             ever_bound: Cell::new(false),
             internal_format: Cell::new(None),
+            samples: Cell::new(0),
             size: Cell::new(None),
             is_initialized: Cell::new(false),
             attached_framebuffer: Default::default(),
@@ -143,6 +146,10 @@ impl WebGLRenderbuffer {
 
     pub(crate) fn internal_format(&self) -> u32 {
         self.internal_format.get().unwrap_or(constants::RGBA4)
+    }
+
+    pub(crate) fn samples(&self) -> i32 {
+        self.samples.get()
     }
 
     pub(crate) fn mark_initialized(&self) {
@@ -302,6 +309,7 @@ impl WebGLRenderbuffer {
         }
 
         self.internal_format.set(Some(internal_format));
+        self.samples.set(sample_count);
         self.is_initialized.set(false);
 
         if let Some(fb) = self.attached_framebuffer.get() {

@@ -6349,6 +6349,32 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return self.base.webgl_error(InvalidValue);
         }
 
+        // GL ES 3.0 4.3.3: nothing blits into a multisampled framebuffer, and a blit out of one
+        // (a resolve) needs identical rectangles and identical colour formats. The canvas is
+        // RGBA8 or, with alpha: false, RGB8.
+        if dst_fb.as_ref().is_some_and(|fb| fb.is_multisampled()) {
+            return self.base.webgl_error(InvalidOperation);
+        }
+        if let Some(src) = src_fb.as_ref().filter(|fb| fb.is_multisampled()) {
+            if (src_x0, src_y0, src_x1, src_y1) != (dst_x0, dst_y0, dst_x1, dst_y1) {
+                return self.base.webgl_error(InvalidOperation);
+            }
+            if bits.intersects(BlitFrameBufferFlags::COLOR) &&
+                let Some(src_format) = src.attachment_sized_format(src.read_buffer())
+            {
+                let differs = |dst: Option<u32>| dst.is_some_and(|dst| dst != src_format);
+                let any_differs = match &dst_fb {
+                    None => differs(dst_color),
+                    Some(fb) => dst_color_attachments
+                        .iter()
+                        .any(|&dst| differs(fb.attachment_sized_format(dst))),
+                };
+                if any_differs {
+                    return self.base.webgl_error(InvalidOperation);
+                }
+            }
+        }
+
         self.base.send_command(WebGLCommand::BlitFrameBuffer(
             src_x0, src_y0, src_x1, src_y1, dst_x0, dst_y0, dst_x1, dst_y1, mask, filter,
         ));

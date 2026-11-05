@@ -850,6 +850,47 @@ impl WebGLFramebuffer {
             .map(WebGLFramebufferAttachment::root)
     }
 
+    /// Whether any attachment is a multisampled renderbuffer (SAMPLE_BUFFERS is 1).
+    pub(crate) fn is_multisampled(&self) -> bool {
+        self.colors
+            .iter()
+            .chain([&self.depth, &self.stencil, &self.depthstencil])
+            .any(|binding| {
+                matches!(
+                    binding.borrow().as_ref(),
+                    Some(WebGLFramebufferAttachment::Renderbuffer(rb)) if rb.samples() > 0
+                )
+            })
+    }
+
+    /// The sized internal format of the colour image at `attachment`: a texture's unsized
+    /// format is resolved by its type (RGBA + UNSIGNED_BYTE is RGBA8). None when there is no
+    /// image or the pair isn't one of the common ones.
+    pub(crate) fn attachment_sized_format(&self, attachment: u32) -> Option<u32> {
+        let binding = self.attachment_binding(attachment)?;
+        let binding = binding.borrow();
+        let (format, data_type) = match binding.as_ref()? {
+            WebGLFramebufferAttachment::Renderbuffer(rb) => return Some(rb.internal_format()),
+            WebGLFramebufferAttachment::Texture { texture, level, .. } => {
+                let info = texture.image_info_at_face(0, *level as u32)?;
+                (
+                    info.internal_format().as_gl_constant(),
+                    info.data_type().map(|data_type| data_type.as_gl_constant()),
+                )
+            },
+        };
+        match (format, data_type) {
+            (constants::RGBA, Some(constants::UNSIGNED_BYTE)) => Some(constants::RGBA8),
+            (constants::RGB, Some(constants::UNSIGNED_BYTE)) => Some(constants::RGB8),
+            (constants::RGBA, Some(constants::UNSIGNED_SHORT_4_4_4_4)) => Some(constants::RGBA4),
+            (constants::RGBA, Some(constants::UNSIGNED_SHORT_5_5_5_1)) => Some(constants::RGB5_A1),
+            (constants::RGB, Some(constants::UNSIGNED_SHORT_5_6_5)) => Some(constants::RGB565),
+            (constants::RGBA | constants::RGB | constants::ALPHA | constants::LUMINANCE, _) |
+            (constants::LUMINANCE_ALPHA, _) => None,
+            (format, _) => Some(format),
+        }
+    }
+
     /// The sized or unsized internal format of what is attached at `attachment`, if anything.
     pub(crate) fn attachment_internal_format(&self, attachment: u32) -> Option<u32> {
         let binding = self.attachment_binding(attachment)?;
