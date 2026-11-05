@@ -5788,16 +5788,20 @@ class CGUnionConversionStruct(CGThing):
             # "object" is not distinguishable from other types
             assert not object or not (interfaceObject or arrayObject or callbackObject or mozMapObject)
             templateBody = CGList([], "\n")
+            # WebIDL union conversion checks interface types (platform objects, buffer sources and typed
+            # arrays) before callbacks and sequences: a Float32Array is iterable, so trying the sequence
+            # first reads it element by element through the iterator protocol (and an iterable platform
+            # object would become a sequence instead of itself).
+            if interfaceObject:
+                assert not object
+                templateBody.append(interfaceObject)
             if arrayObject or callbackObject:
                 # An object can be both an sequence object and a callback or
                 # dictionary, but we shouldn't have both in the union's members
                 # because they are not distinguishable.
                 assert not (arrayObject and callbackObject)
                 templateBody.append(arrayObject if arrayObject else callbackObject)
-            if interfaceObject:
-                assert not object
-                templateBody.append(interfaceObject)
-            elif object:
+            if not interfaceObject and object:
                 templateBody.append(object)
             if mozMapObject:
                 templateBody.append(mozMapObject)
