@@ -796,6 +796,9 @@ impl WebGLThread {
         }
         let data = self.make_current_if_needed_mut(context_id);
         if let Some(data) = data {
+            // Partii (perf stream, diagnostic): PARTII_WEBGL_STATS=cmd logs each command of 0.3 ms or more.
+            let timed = webgl_cmd_stats_enabled()
+                .then(|| (command_kind(&command), std::time::Instant::now()));
             WebGLImpl::apply(
                 &data.device,
                 &data.ctx,
@@ -805,6 +808,17 @@ impl WebGLThread {
                 command,
                 backtrace,
             );
+            if let Some((kind, start)) = timed {
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                if ms >= 0.3 {
+                    eprintln!(
+                        "PARTII_WEBGL_CMD t={:.1} {} {:.2}",
+                        webgl_stats_epoch().elapsed().as_secs_f64() * 1000.0,
+                        kind,
+                        ms
+                    );
+                }
+            }
         }
     }
 
@@ -5641,5 +5655,58 @@ mod frame_prof {
                 self.last_end = Some(now);
             }
         }
+    }
+}
+
+/// Partii (perf stream): `PARTII_WEBGL_STATS=cmd` also times each WebGL command (see handle_webgl_command).
+fn webgl_cmd_stats_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_STATS").is_ok_and(|v| v == "cmd"))
+}
+
+/// Partii (perf stream): the time origin of PARTII_WEBGL_CMD lines (the first command timed).
+fn webgl_stats_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
+}
+
+/// Partii (perf stream): a short name for a WebGL command, without formatting its data.
+fn command_kind(command: &WebGLCommand) -> &'static str {
+    match command {
+        WebGLCommand::TexImage2D { .. } => "TexImage2D",
+        WebGLCommand::TexSubImage2D { .. } => "TexSubImage2D",
+        WebGLCommand::TexImage3D { .. } => "TexImage3D",
+        WebGLCommand::TexSubImage3D { .. } => "TexSubImage3D",
+        WebGLCommand::CompressedTexImage2D { .. } => "CompressedTexImage2D",
+        WebGLCommand::DrawArrays { .. } => "DrawArrays",
+        WebGLCommand::DrawElements { .. } => "DrawElements",
+        WebGLCommand::DrawArraysInstanced { .. } => "DrawArraysInstanced",
+        WebGLCommand::DrawElementsInstanced { .. } => "DrawElementsInstanced",
+        WebGLCommand::CopyTexImage2D { .. } => "CopyTexImage2D",
+        WebGLCommand::CompileShader(..) => "CompileShader",
+        WebGLCommand::LinkProgram(..) => "LinkProgram",
+        WebGLCommand::GenObjectNames(..) => "GenObjectNames",
+        WebGLCommand::CreateProgram(..) => "CreateProgram",
+        WebGLCommand::CreateShader(..) => "CreateShader",
+        WebGLCommand::BufferData(..) => "BufferData",
+        WebGLCommand::BufferSubData(..) => "BufferSubData",
+        WebGLCommand::Clear(..) => "Clear",
+        WebGLCommand::GenerateMipmap(..) => "GenerateMipmap",
+        WebGLCommand::ReadPixels(..) => "ReadPixels",
+        WebGLCommand::ReadPixelsPP(..) => "ReadPixelsPP",
+        WebGLCommand::CreateFramebuffer(..) => "CreateFramebuffer",
+        WebGLCommand::CreateTexture(..) => "CreateTexture",
+        WebGLCommand::CreateRenderbuffer(..) => "CreateRenderbuffer",
+        WebGLCommand::RenderbufferStorage(..) => "RenderbufferStorage",
+        WebGLCommand::RenderbufferStorageMultisample(..) => "RenderbufferStorageMultisample",
+        WebGLCommand::TexStorage2D(..) => "TexStorage2D",
+        WebGLCommand::GetProgramValidateStatus(..) => "GetProgramValidateStatus",
+        WebGLCommand::UseProgram(..) => "UseProgram",
+        WebGLCommand::BlitFrameBuffer(..) => "BlitFrameBuffer",
+        WebGLCommand::FramebufferTexture2D(..) => "FramebufferTexture2D",
+        WebGLCommand::Finish(..) => "Finish",
+        WebGLCommand::GetShaderInfoLog(..) => "GetShaderInfoLog",
+        WebGLCommand::GetProgramInfoLog(..) => "GetProgramInfoLog",
+        _ => "other",
     }
 }
