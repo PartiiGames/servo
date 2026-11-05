@@ -1537,6 +1537,13 @@ impl WebGLImpl {
                                 gl.create_renderbuffer().map(|n| n.0.get())
                             },
                             WebGLObjectNameKind::Texture => gl.create_texture().map(|n| n.0.get()),
+                            WebGLObjectNameKind::Program => gl.create_program().map(|n| n.0.get()),
+                            WebGLObjectNameKind::VertexShader => {
+                                gl.create_shader(gl::VERTEX_SHADER).map(|n| n.0.get())
+                            },
+                            WebGLObjectNameKind::FragmentShader => {
+                                gl.create_shader(gl::FRAGMENT_SHADER).map(|n| n.0.get())
+                            },
                         }
                     };
                     match name {

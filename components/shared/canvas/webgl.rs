@@ -294,6 +294,11 @@ pub enum WebGLObjectNameKind {
     Framebuffer,
     Renderbuffer,
     Texture,
+    /// glCreateProgram / glCreateShader make real (empty) objects, not just names, so these
+    /// batches stay small.
+    Program,
+    VertexShader,
+    FragmentShader,
 }
 
 /// WebGL Commands for a specific WebGLContext

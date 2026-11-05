@@ -437,7 +437,12 @@ impl WebGLRenderingContext {
     /// for when half the current one is used, so a create waits only when a whole batch went in between.
     /// None when the WebGL thread has none to give (as the Create* commands answer None).
     pub(crate) fn take_object_name(&self, kind: WebGLObjectNameKind) -> Option<NonZeroU32> {
-        let batch = object_name_batch();
+        let batch = match kind {
+            WebGLObjectNameKind::Program |
+            WebGLObjectNameKind::VertexShader |
+            WebGLObjectNameKind::FragmentShader => object_name_batch().min(16),
+            _ => object_name_batch(),
+        };
         let mut pools = self.object_names.borrow_mut();
         let pool = &mut pools.0[kind as usize];
         if pool.names.is_empty() {
@@ -5745,7 +5750,7 @@ pub(crate) struct ObjectNamePool {
 
 /// One pool per WebGLObjectNameKind.
 #[derive(Default)]
-pub(crate) struct ObjectNamePools([ObjectNamePool; 4]);
+pub(crate) struct ObjectNamePools([ObjectNamePool; 7]);
 
 // Names and a channel: no GC things.
 #[expect(unsafe_code)]
