@@ -1378,9 +1378,7 @@ impl WebGLImpl {
                 gl.polygon_offset(factor, units)
             },
             WebGLCommand::ReadPixels(rect, format, pixel_type, ref sender) => {
-                let len = bytes_per_type(pixel_type) *
-                    read_components(format) *
-                    rect.size.area() as usize;
+                let len = read_pixel_bytes(format, pixel_type) * rect.size.area() as usize;
                 let mut pixels = vec![0; len];
                 unsafe {
                     // We don't want any alignment padding on pixel rows.
@@ -3620,6 +3618,18 @@ fn prepare_pixels(
 
 /// Components per pixel of a readPixels format. glow's components_per_format panics on the
 /// *_INTEGER formats, which WebGL 2 reads integer framebuffers with.
+/// The bytes one pixel takes in a readPixels result: a packed type (RGB10_A2's
+/// UNSIGNED_INT_2_10_10_10_REV, 565, 4444, ...) holds the whole pixel in one element.
+fn read_pixel_bytes(format: u32, pixel_type: u32) -> usize {
+    match pixel_type {
+        gl::UNSIGNED_SHORT_4_4_4_4 | gl::UNSIGNED_SHORT_5_5_5_1 | gl::UNSIGNED_SHORT_5_6_5 => 2,
+        gl::UNSIGNED_INT_2_10_10_10_REV |
+        gl::UNSIGNED_INT_10F_11F_11F_REV |
+        gl::UNSIGNED_INT_5_9_9_9_REV => 4,
+        _ => bytes_per_type(pixel_type) * read_components(format),
+    }
+}
+
 fn read_components(format: u32) -> usize {
     match format {
         gl::RED_INTEGER | gl::GREEN_INTEGER | gl::BLUE_INTEGER => 1,
