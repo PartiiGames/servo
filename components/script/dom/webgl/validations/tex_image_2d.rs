@@ -90,6 +90,9 @@ pub(crate) struct CommonTexImage2DValidator<'a> {
     width: i32,
     height: i32,
     border: i32,
+    /// texSubImage2D / copyTexSubImage2D: width and height are a sub-rectangle, so the
+    /// square-cube-face and WebGL 1 power-of-two image rules do not apply to them.
+    sub_image: bool,
 }
 
 pub(crate) struct CommonTexImage2DValidatorResult {
@@ -157,7 +160,7 @@ impl WebGLValidator for CommonTexImage2DValidator<'_> {
 
         // GL_INVALID_VALUE is generated if target is one of the six cube map 2D
         // image targets and the width and height parameters are not equal.
-        if target.is_cubic() && self.width != self.height {
+        if !self.sub_image && target.is_cubic() && self.width != self.height {
             self.context.webgl_error(InvalidValue);
             return Err(TexImageValidationError::InvalidCubicTextureDimensions);
         }
@@ -188,7 +191,8 @@ impl WebGLValidator for CommonTexImage2DValidator<'_> {
 
         // WebGL 1: GL_INVALID_VALUE is generated if level is greater than zero and the
         // texture is not power of two. WebGL 2 (GL ES 3.0) has mipmapped NPOT textures.
-        if self.context.webgl_version() == WebGLVersion::WebGL1 &&
+        if !self.sub_image &&
+            self.context.webgl_version() == WebGLVersion::WebGL1 &&
             level > 0 &&
             (!width.is_power_of_two() || !height.is_power_of_two())
         {
@@ -241,7 +245,14 @@ impl<'a> CommonTexImage2DValidator<'a> {
             width,
             height,
             border,
+            sub_image: false,
         }
+    }
+
+    /// Validates a sub-rectangle upload or copy instead of a whole image.
+    pub(crate) fn sub_image(mut self) -> Self {
+        self.sub_image = true;
+        self
     }
 }
 
@@ -278,6 +289,12 @@ impl<'a> TexImage2DValidator<'a> {
             format,
             data_type,
         }
+    }
+
+    /// Validates a sub-rectangle upload instead of a whole image.
+    pub(crate) fn sub_image(mut self) -> Self {
+        self.common_validator = self.common_validator.sub_image();
+        self
     }
 }
 

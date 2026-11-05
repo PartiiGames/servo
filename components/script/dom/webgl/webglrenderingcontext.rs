@@ -3447,7 +3447,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             width,
             height,
             0,
-        );
+        )
+        .sub_image();
         let CommonTexImage2DValidatorResult {
             texture,
             target,
@@ -5312,7 +5313,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
     ) -> ErrorResult {
         let validator = TexImage2DValidator::new(
             self, target, level, format, width, height, 0, format, data_type,
-        );
+        )
+        .sub_image();
         let TexImage2DValidatorResult {
             texture,
             target,
@@ -5412,7 +5414,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             0,
             format,
             data_type,
-        );
+        )
+        .sub_image();
         let TexImage2DValidatorResult {
             texture,
             target,
