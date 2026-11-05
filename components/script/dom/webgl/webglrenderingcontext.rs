@@ -4816,10 +4816,10 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             Err(()) => return Ok(()),
         };
 
-        // If data is null, a buffer of sufficient size
-        // initialized to 0 is passed.
+        // If data is null, the texture is initialized to 0. Partii (perf): no zero-filled buffer is
+        // sent; an empty one tells the WebGL thread to upload zeros itself (webgl_thread.rs TexImage2D).
         let buff = match *pixels {
-            None => GenericSharedMemory::from_byte(0, expected_byte_length as usize),
+            None => GenericSharedMemory::from_bytes(&[]),
             Some(ref data) => {
                 GenericSharedMemory::from_bytes(array_buffer_view_bytes(&data, no_gc))
             },
@@ -4831,7 +4831,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         //      is required by the specified width, height, format,
         //      type, and pixel storage parameters, generates an
         //      INVALID_OPERATION error."
-        if buff.len() < expected_byte_length as usize {
+        if pixels.is_some() && buff.len() < expected_byte_length as usize {
             return {
                 self.webgl_error(InvalidOperation);
                 Ok(())
