@@ -2961,7 +2961,28 @@ impl WebGLImpl {
                     attach(attachment)
                 }
             },
-            WebGLCommand::ReadBuffer(buffer) => unsafe { gl.read_buffer(buffer) },
+            WebGLCommand::ReadBuffer(buffer) => {
+                // WebGL's default framebuffer is surfman's framebuffer object, whose colour
+                // image is COLOR_ATTACHMENT0: GL rejects BACK there, which left the read buffer
+                // at NONE after readBuffer(NONE) then readBuffer(BACK).
+                let buffer = if buffer == gl::BACK {
+                    let surface_fbo = device
+                        .context_surface_info(ctx)
+                        .ok()
+                        .flatten()
+                        .and_then(|info| info.framebuffer_object);
+                    let bound =
+                        unsafe { gl.get_parameter_framebuffer(gl::READ_FRAMEBUFFER_BINDING) };
+                    if surface_fbo.is_some() && bound == surface_fbo {
+                        gl::COLOR_ATTACHMENT0
+                    } else {
+                        buffer
+                    }
+                } else {
+                    buffer
+                };
+                unsafe { gl.read_buffer(buffer) }
+            },
             WebGLCommand::DrawBuffers(ref buffers) => unsafe { gl.draw_buffers(buffers) },
         }
 
