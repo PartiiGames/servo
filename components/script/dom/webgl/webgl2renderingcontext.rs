@@ -75,7 +75,7 @@ use crate::dom::webgl::webglrenderingcontext::{
     uniform_typed,
 };
 use crate::dom::webgl::webglsampler::{WebGLSampler, WebGLSamplerValue};
-use crate::dom::webgl::webglshader::WebGLShader;
+use crate::dom::webgl::webglshader::{FragOutputKind, WebGLShader};
 use crate::dom::webgl::webglshaderprecisionformat::WebGLShaderPrecisionFormat;
 use crate::dom::webgl::webglsync::WebGLSync;
 use crate::dom::webgl::webgltexture::{TexCompression, TexCompressionValidation, WebGLTexture};
@@ -129,6 +129,9 @@ pub(crate) struct WebGL2RenderingContext {
     #[no_trace]
     unpack_params: Cell<UnpackParams>,
     enable_rasterizer_discard: Cell<bool>,
+    /// COLOR_WRITEMASK, for the draw check on draw buffers without a fragment output.
+    #[ignore_malloc_size_of = "plain bools"]
+    color_write_mask: Cell<[bool; 4]>,
     default_fb_readbuffer: Cell<u32>,
     default_fb_drawbuffer: Cell<u32>,
 }
@@ -190,6 +193,7 @@ impl WebGL2RenderingContext {
             texture_pack_skip_rows: Cell::new(0),
             unpack_params: Cell::new(UnpackParams::default()),
             enable_rasterizer_discard: Cell::new(false),
+            color_write_mask: Cell::new([true; 4]),
             default_fb_readbuffer: Cell::new(constants::BACK),
             default_fb_drawbuffer: Cell::new(constants::BACK),
         })
@@ -335,8 +339,45 @@ impl WebGL2RenderingContext {
         Ok(())
     }
 
+    /// WebGL 2.0 5.13 (fragment shader output types) and 5.14 (draw buffers): each draw
+    /// buffer with an image needs a fragment shader output of its component type (float for
+    /// float and fixed-point buffers, int, uint), else INVALID_OPERATION. A missing output is
+    /// fine while the colour write mask is all off, and nothing applies with
+    /// RASTERIZER_DISCARD. The canvas only gets the type check. Programs whose outputs
+    /// couldn't be read from the translated shader are not checked.
+    fn validate_fragment_outputs_for_draw(&self) -> WebGLResult<()> {
+        if self.enable_rasterizer_discard.get() {
+            return Ok(());
+        }
+        let Some(program) = self.base.current_program() else {
+            return Ok(());
+        };
+        let outputs = program.fragment_outputs();
+        let Some(outputs) = outputs.as_ref() else {
+            return Ok(());
+        };
+        let user_framebuffer = self.base.get_draw_framebuffer_slot().get().is_some();
+        let writes_color = self.color_write_mask.get().contains(&true);
+        for index in 0..self.base.limits().max_draw_buffers as usize {
+            let Some(class) = self.draw_buffer_class(index) else {
+                continue;
+            };
+            let buffer_kind = match class {
+                2 => FragOutputKind::Int,
+                3 => FragOutputKind::Uint,
+                _ => FragOutputKind::Float,
+            };
+            match outputs.get(index).copied().flatten() {
+                Some(kind) if kind != buffer_kind => return Err(InvalidOperation),
+                None if user_framebuffer && writes_color => return Err(InvalidOperation),
+                _ => {},
+            }
+        }
+        Ok(())
+    }
+
     /// The draw-time state checks of WebGL 2 (uniform buffers, attribute types, sampler types
-    /// and feedback loops); a failing one rejects the draw. Draws whose
+    /// and feedback loops, fragment outputs); a failing one rejects the draw. Draws whose
     /// mode or counts are invalid skip them, so that the base draw reports its own error.
     fn validate_draw_state(
         &self,
@@ -361,7 +402,8 @@ impl WebGL2RenderingContext {
         }
         self.validate_uniform_block_for_draw()?;
         self.validate_vertex_attribs_for_draw(cx)?;
-        self.validate_sampler_types_for_draw()
+        self.validate_sampler_types_for_draw()?;
+        self.validate_fragment_outputs_for_draw()
     }
 
     pub(crate) fn base_context(&self) -> DomRoot<WebGLRenderingContext> {
@@ -821,7 +863,9 @@ impl WebGL2RenderingContext {
     /// writes to, or None when it writes nothing. The canvas is normalized.
     fn draw_buffer_class(&self, index: usize) -> Option<u8> {
         match self.base.get_draw_framebuffer_slot().get() {
-            None => (index == 0).then_some(0),
+            None => {
+                (index == 0 && self.default_fb_drawbuffer.get() != constants::NONE).then_some(0)
+            },
             Some(fb) => match fb.draw_buffer_i(index) {
                 constants::NONE => None,
                 attachment => fb
@@ -3597,6 +3641,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ColorMask(&self, r: bool, g: bool, b: bool, a: bool) {
+        self.color_write_mask.set([r, g, b, a]);
         self.base.ColorMask(r, g, b, a)
     }
 

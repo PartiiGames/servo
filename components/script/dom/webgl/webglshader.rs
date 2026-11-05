@@ -29,6 +29,7 @@ use {
     crate::dom::webglrenderingcontext::capture_webgl_backtrace,
 };
 
+use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
@@ -81,7 +82,125 @@ pub(crate) struct WebGLShader {
     info_log: DomRefCell<DOMString>,
     attached_counter: Cell<u32>,
     compilation_status: Cell<ShaderCompilationStatus>,
+    /// A compiled fragment shader's outputs by location (None where nothing is declared), for
+    /// the WebGL 2 draw check against the draw buffers. None when they couldn't be read.
+    fragment_outputs: DomRefCell<Option<Box<[Option<FragOutputKind>]>>>,
     droppable: DroppableWebGLShader,
+}
+
+/// What a fragment shader output holds, which WebGL 2 requires the colour buffer it writes
+/// to match: float (float or fixed-point buffers), signed or unsigned integer.
+#[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf, PartialEq)]
+pub(crate) enum FragOutputKind {
+    Float,
+    Int,
+    Uint,
+}
+
+/// Whether a shader source starts with `#version 300 es` (after whitespace and comments).
+fn is_essl3(source: &str) -> bool {
+    let mut rest = source;
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = after.split_once('\n').map_or("", |(_, after)| after);
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.split_once("*/").map_or("", |(_, after)| after);
+        } else {
+            break;
+        }
+    }
+    let Some(directive) = rest.strip_prefix('#') else {
+        return false;
+    };
+    let mut words = directive.split_whitespace();
+    words.next() == Some("version") && words.next() == Some("300")
+}
+
+/// The outputs of a fragment shader by location, read from the translator's object code, where
+/// each global declaration is one line (`layout(location = 1) out vec4 _uc[3];`). ESSL 1.00
+/// shaders write gl_FragColor or gl_FragData[0], a float at location 0. None when a declaration
+/// isn't understood: the draw check is then skipped rather than risk rejecting good draws.
+fn parse_fragment_outputs(object_code: &str, essl3: bool) -> Option<Box<[Option<FragOutputKind>]>> {
+    if !essl3 {
+        return Some(Box::new([Some(FragOutputKind::Float)]));
+    }
+    let mut declared = vec![];
+    let mut depth = 0i32;
+    for line in object_code.lines() {
+        let global = depth == 0;
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        let line = line.trim();
+        if !global || line.starts_with('#') {
+            continue;
+        }
+        let mut location = None;
+        let mut secondary = false;
+        let rest = match line.strip_prefix("layout") {
+            Some(layout) => {
+                let (args, rest) = layout.trim_start().strip_prefix('(')?.split_once(')')?;
+                for arg in args.split(',') {
+                    let (key, value) = match arg.split_once('=') {
+                        Some((key, value)) => (key.trim(), Some(value.trim())),
+                        None => (arg.trim(), None),
+                    };
+                    match key {
+                        "location" => location = Some(value?.parse::<u32>().ok()?),
+                        // EXT_blend_func_extended's second colour, which no draw buffer takes.
+                        "index" => secondary = value? != "0",
+                        _ => {},
+                    }
+                }
+                rest.trim_start()
+            },
+            None => line,
+        };
+        let Some(declaration) = rest.strip_prefix("out ") else {
+            continue;
+        };
+        let mut words = declaration
+            .strip_suffix(';')?
+            .split_whitespace()
+            .filter(|word| !matches!(*word, "highp" | "mediump" | "lowp"));
+        let kind = match words.next()? {
+            "float" | "vec2" | "vec3" | "vec4" => FragOutputKind::Float,
+            "int" | "ivec2" | "ivec3" | "ivec4" => FragOutputKind::Int,
+            "uint" | "uvec2" | "uvec3" | "uvec4" => FragOutputKind::Uint,
+            _ => return None,
+        };
+        let declarator: String = words.collect();
+        if declarator.contains(',') {
+            return None;
+        }
+        let count = match declarator.split_once('[') {
+            Some((_, size)) => size.strip_suffix(']')?.parse::<u32>().ok()?,
+            None => 1,
+        };
+        if !secondary {
+            declared.push((location, count, kind));
+        }
+    }
+    // A single output without a location is at location 0 (ESSL 3.00 4.3.8.2).
+    if let [(location, _, _)] = declared.as_mut_slice() {
+        location.get_or_insert(0);
+    }
+    let mut outputs = vec![];
+    for (location, count, kind) in declared {
+        let location = location?;
+        for slot in location..location.checked_add(count)? {
+            let slot = slot as usize;
+            if slot >= 32 {
+                return None;
+            }
+            if outputs.len() <= slot {
+                outputs.resize(slot + 1, None);
+            }
+            if outputs[slot].replace(kind).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(outputs.into())
 }
 
 static GLSLANG_INITIALIZATION: Once = Once::new();
@@ -96,6 +215,7 @@ impl WebGLShader {
             info_log: Default::default(),
             attached_counter: Cell::new(0),
             compilation_status: Cell::new(ShaderCompilationStatus::NotCompiled),
+            fragment_outputs: Default::default(),
             droppable: DroppableWebGLShader {
                 context: WeakRef::new(context),
                 id,
@@ -251,6 +371,12 @@ impl WebGLShader {
             Ok(()) => {
                 let translated_source = validator.object_code();
                 debug!("Shader translated: {}", translated_source);
+                *self.fragment_outputs.borrow_mut() = if self.gl_type == constants::FRAGMENT_SHADER
+                {
+                    parse_fragment_outputs(&translated_source, is_essl3(&source.str()))
+                } else {
+                    None
+                };
                 // NOTE: At this point we should be pretty sure that the compilation in the paint thread
                 // will succeed.
                 // It could be interesting to retrieve the info log from the paint thread though
@@ -260,6 +386,7 @@ impl WebGLShader {
                     .set(ShaderCompilationStatus::Succeeded);
             },
             Err(error) => {
+                *self.fragment_outputs.borrow_mut() = None;
                 self.compilation_status.set(ShaderCompilationStatus::Failed);
                 debug!("Shader {} compilation failed: {}", self.id(), error);
             },
@@ -315,5 +442,11 @@ impl WebGLShader {
 
     pub(crate) fn successfully_compiled(&self) -> bool {
         self.compilation_status.get() == ShaderCompilationStatus::Succeeded
+    }
+
+    /// The last successful compile's fragment outputs by location (see
+    /// `parse_fragment_outputs`); None for vertex shaders or when they couldn't be read.
+    pub(crate) fn fragment_outputs(&self) -> Option<Box<[Option<FragOutputKind>]>> {
+        self.fragment_outputs.borrow().clone()
     }
 }

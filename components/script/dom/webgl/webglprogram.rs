@@ -27,7 +27,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use crate::dom::webgl::webglshader::WebGLShader;
+use crate::dom::webgl::webglshader::{FragOutputKind, WebGLShader};
 use crate::dom::webgl::webgluniformlocation::WebGLUniformLocation;
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
@@ -202,6 +202,9 @@ pub(crate) struct WebGLProgram {
     /// Texture units set on sampler uniforms (uniform location -> unit), for the WebGL 2
     /// draw-time sampler type check. Unset samplers use unit 0.
     sampler_units: DomRefCell<HashMap<i32, i32>>,
+    /// The fragment shader's outputs by location at the last link (see
+    /// `WebGLShader::fragment_outputs`), for the WebGL 2 draw buffer check.
+    fragment_outputs: DomRefCell<Option<Box<[Option<FragOutputKind>]>>>,
     droppable: RefCell<DroppableWebGLProgram>,
 }
 
@@ -223,6 +226,7 @@ impl WebGLProgram {
             transform_feedback_varying_bytes: DomRefCell::new(vec![].into()),
             pending_link: RefCell::new(None),
             sampler_units: Default::default(),
+            fragment_outputs: Default::default(),
             droppable: RefCell::new(DroppableWebGLProgram::new(id, context)),
         }
     }
@@ -322,9 +326,12 @@ impl WebGLProgram {
         *self.active_uniforms.borrow_mut() = Box::new([]);
         *self.active_uniform_blocks.borrow_mut() = Box::new([]);
         *self.uniform_block_bindings.borrow_mut() = Box::new([]);
+        *self.fragment_outputs.borrow_mut() = None;
 
         match self.fragment_shader.get() {
-            Some(ref shader) if shader.successfully_compiled() => {},
+            Some(ref shader) if shader.successfully_compiled() => {
+                *self.fragment_outputs.borrow_mut() = shader.fragment_outputs();
+            },
             _ => return Ok(()), // callers use gl.LINK_STATUS to check link errors
         }
 
@@ -452,6 +459,11 @@ impl WebGLProgram {
     pub(crate) fn uniform_block_bindings(&self) -> Ref<'_, [u32]> {
         self.resolve_link();
         Ref::map(self.uniform_block_bindings.borrow(), |bindings| &**bindings)
+    }
+
+    /// The fragment outputs by location as of the last link; None if they are unknown.
+    pub(crate) fn fragment_outputs(&self) -> Ref<'_, Option<Box<[Option<FragOutputKind>]>>> {
+        self.fragment_outputs.borrow()
     }
 
     /// glValidateProgram
