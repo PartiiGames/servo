@@ -2944,12 +2944,11 @@ impl GlobalScope {
     #[cfg(feature = "webgpu")]
     pub(crate) fn remove_gpu_device(&self, device: WebGPUDevice) {
         self.gpu_device_lost_promises.borrow_mut().remove(&device);
-        let device = self
-            .gpu_devices
-            .borrow_mut()
-            .remove(&device)
-            .expect("GPUDevice should still be in devices hashmap");
-        assert!(device.root().is_none())
+        // The entry can be gone already (or never have been here: a device made in a worker
+        // whose messages reach the owner's global). Nothing waits on it then.
+        if let Some(device) = self.gpu_devices.borrow_mut().remove(&device) {
+            debug_assert!(device.root().is_none());
+        }
     }
 
     #[cfg(feature = "webgpu")]
@@ -2964,13 +2963,13 @@ impl GlobalScope {
             DeviceLostReason::Unknown => GPUDeviceLostReason::Unknown,
             DeviceLostReason::Destroyed => GPUDeviceLostReason::Destroyed,
         };
-        if let Some(device) = self
-            .gpu_devices
-            .borrow_mut()
-            .get_mut(&device)
-            .expect("GPUDevice should still be in devices hashmap")
-            .root()
-        {
+        // Since devices are really freed, `FreeDevice` (which removes the entry) can arrive
+        // before a late `DeviceLost`. No entry means nothing can wait on `device.lost` any
+        // more (its promise went with the entry), so there is nothing to do.
+        let Some(weak_device) = self.gpu_devices.borrow().get(&device).cloned() else {
+            return;
+        };
+        if let Some(device) = weak_device.root() {
             device.lose(reason, msg);
             return;
         }
