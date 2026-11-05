@@ -205,6 +205,11 @@ pub(crate) struct WebGLRenderingContext {
     /// Renderbuffer, Texture} without a round trip each (take_object_name).
     #[ignore_malloc_size_of = "Channels and a few names"]
     object_names: DomRefCell<ObjectNamePools>,
+    /// Partii (perf): the draw-state generation (DrawStateGen), shared with every object of this
+    /// context.
+    #[ignore_malloc_size_of = "A shared counter"]
+    #[no_trace]
+    draw_state_gen: DrawStateGen,
     extension_manager: WebGLExtensions,
     capabilities: Capabilities,
     default_vao: DomOnceCell<WebGLVertexArrayObjectOES>,
@@ -284,6 +289,7 @@ impl WebGLRenderingContext {
                     ctx_data.glsl_version,
                 ),
                 object_names: Default::default(),
+                draw_state_gen: Default::default(),
                 capabilities: Default::default(),
                 default_vao: Default::default(),
                 current_vao: Default::default(),
@@ -426,12 +432,59 @@ impl WebGLRenderingContext {
 
     #[inline]
     pub(crate) fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
+        self.draw_state_gen.note(&command);
         let result = self
             .droppable
             .webgl_sender
             .send(command, capture_webgl_backtrace());
         if matches!(fallibility, Operation::Infallible) {
             result.expect("Operation failed");
+        }
+    }
+
+    pub(crate) fn draw_state_gen(&self) -> &DrawStateGen {
+        &self.draw_state_gen
+    }
+
+    /// Partii (perf): whether the current program's draw-time state checks (the ones that read no
+    /// draw argument) passed with the bound vertex array and nothing that could change their outcome
+    /// sent since (DrawStateGen).
+    #[inline]
+    pub(crate) fn draw_state_cached(&self, cx: &mut JSContext) -> bool {
+        if !draw_cache_enabled() {
+            return false;
+        }
+        let Some(program) = self.current_program.get() else {
+            return false;
+        };
+        let generation = self.draw_state_gen.get();
+        match self.webgl_version() {
+            WebGLVersion::WebGL1 => self.current_vao(cx).draw_validated(generation, program.id()),
+            WebGLVersion::WebGL2 => self
+                .current_vao_webgl2(cx)
+                .draw_validated(generation, program.id()),
+        }
+    }
+
+    /// Partii (perf): records that every draw-time state check passed for `program` with the bound
+    /// vertex array (see draw_state_cached). Not while the draw framebuffer belongs to an XR
+    /// session, whose completeness depends on the frame.
+    fn mark_draw_state_valid(&self, cx: &mut JSContext, program: &WebGLProgram) {
+        if !draw_cache_enabled() ||
+            self.bound_draw_framebuffer
+                .get()
+                .is_some_and(|fb| fb.is_in_xr_session())
+        {
+            return;
+        }
+        let generation = self.draw_state_gen.get();
+        match self.webgl_version() {
+            WebGLVersion::WebGL1 => self
+                .current_vao(cx)
+                .set_draw_validated(generation, program.id()),
+            WebGLVersion::WebGL2 => self
+                .current_vao_webgl2(cx)
+                .set_draw_validated(generation, program.id()),
         }
     }
 
@@ -1147,6 +1200,31 @@ impl WebGLRenderingContext {
         receiver.recv().unwrap()
     }
 
+    /// The bound vertex array's draw check (WebGL 1.0 6.2, 6.6), for `required_len` vertices (0:
+    /// none counted) and `primcount` instances from `base_instance`.
+    fn validate_vao_for_draw_base_instance(
+        &self,
+        cx: &mut JSContext,
+        required_len: u32,
+        primcount: i32,
+        base_instance: u32,
+        program: &WebGLProgram,
+    ) -> WebGLResult<()> {
+        match self.webgl_version() {
+            WebGLVersion::WebGL1 => self.current_vao(cx).validate_for_draw(
+                required_len,
+                primcount as u32,
+                &program.active_attribs(),
+            ),
+            WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).validate_for_draw_base_instance(
+                required_len,
+                primcount as u32,
+                base_instance,
+                &program.active_attribs(),
+            ),
+        }
+    }
+
     // https://www.khronos.org/registry/webgl/extensions/ANGLE_instanced_arrays/
     pub(crate) fn draw_arrays_instanced(
         &self,
@@ -1169,6 +1247,31 @@ impl WebGLRenderingContext {
         count: i32,
         primcount: i32,
         base_instance: u32,
+    ) -> WebGLResult<()> {
+        let cached = self.draw_state_cached(cx);
+        self.draw_arrays_instanced_base_instance_checked(
+            cx,
+            mode,
+            first,
+            count,
+            primcount,
+            base_instance,
+            cached,
+        )
+    }
+
+    /// `draw_arrays_instanced_base_instance`, told whether the draw-state checks are `cached`
+    /// (draw_state_cached, which WebGL 2 draws read once for all their checks).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_arrays_instanced_base_instance_checked(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        first: i32,
+        count: i32,
+        primcount: i32,
+        base_instance: u32,
+        cached: bool,
     ) -> WebGLResult<()> {
         match mode {
             constants::POINTS |
@@ -1197,21 +1300,21 @@ impl WebGLRenderingContext {
             0
         };
 
-        match self.webgl_version() {
-            WebGLVersion::WebGL1 => self.current_vao(cx).validate_for_draw(
+        // With no vertices to count, the attribute check reads no draw argument (it is then part of
+        // the cached state checks).
+        if !cached || required_len > 0 {
+            self.validate_vao_for_draw_base_instance(
+                cx,
                 required_len,
-                primcount as u32,
-                &current_program.active_attribs(),
-            )?,
-            WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).validate_for_draw_base_instance(
-                required_len,
-                primcount as u32,
+                primcount,
                 base_instance,
-                &current_program.active_attribs(),
-            )?,
-        };
-
-        self.validate_framebuffer()?;
+                &current_program,
+            )?;
+        }
+        if !cached {
+            self.validate_framebuffer()?;
+            self.mark_draw_state_valid(cx, &current_program);
+        }
 
         if count == 0 || primcount == 0 {
             return Ok(());
@@ -1268,6 +1371,35 @@ impl WebGLRenderingContext {
         base_vertex: i32,
         base_instance: u32,
     ) -> WebGLResult<()> {
+        let cached = self.draw_state_cached(cx);
+        self.draw_elements_instanced_base_vertex_base_instance_checked(
+            cx,
+            mode,
+            count,
+            type_,
+            offset,
+            primcount,
+            base_vertex,
+            base_instance,
+            cached,
+        )
+    }
+
+    /// `draw_elements_instanced_base_vertex_base_instance`, told whether the draw-state checks are
+    /// `cached` (draw_state_cached, which WebGL 2 draws read once for all their checks).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_elements_instanced_base_vertex_base_instance_checked(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        count: i32,
+        type_: u32,
+        offset: i64,
+        primcount: i32,
+        base_vertex: i32,
+        base_instance: u32,
+        cached: bool,
+    ) -> WebGLResult<()> {
         match mode {
             constants::POINTS |
             constants::LINE_STRIP |
@@ -1313,21 +1445,13 @@ impl WebGLRenderingContext {
         }
 
         // TODO(nox): Pass the correct number of vertices required.
-        match self.webgl_version() {
-            WebGLVersion::WebGL1 => self.current_vao(cx).validate_for_draw(
-                0,
-                primcount as u32,
-                &current_program.active_attribs(),
-            )?,
-            WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).validate_for_draw_base_instance(
-                0,
-                primcount as u32,
-                base_instance,
-                &current_program.active_attribs(),
-            )?,
-        };
-
-        self.validate_framebuffer()?;
+        // With no vertex count, the attribute check reads no draw argument: it is one of the
+        // cached state checks.
+        if !cached {
+            self.validate_vao_for_draw_base_instance(cx, 0, primcount, base_instance, &current_program)?;
+            self.validate_framebuffer()?;
+            self.mark_draw_state_valid(cx, &current_program);
+        }
 
         if count == 0 || primcount == 0 {
             return Ok(());
@@ -5808,6 +5932,130 @@ pub(crate) fn clip_copy_to_read_framebuffer(
         (x1 - x0 as i64) as i32,
         (y1 - y0 as i64) as i32,
     ))
+}
+
+/// Partii (perf): PARTII_WEBGL_DRAW_CACHE=0 validates every draw's state in full, as before the draw
+/// validation cache (for A/B measurements).
+fn draw_cache_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| !matches!(std::env::var("PARTII_WEBGL_DRAW_CACHE").as_deref(), Ok("0")))
+}
+
+/// Partii (perf): a context's draw-state generation. Every command sent to the WebGL thread, by the
+/// context or by one of its objects, moves it on, except those that cannot change the outcome of a
+/// draw's state checks (framebuffer completeness, uniform buffers, attribute types and buffers,
+/// sampler types and feedback loops, fragment outputs, transform feedback buffers). Each of those
+/// checks mirrors GL state, and GL state only changes by a command, so a program whose checks passed
+/// with the bound vertex array at the current generation passes them again: draws skip them until
+/// the next generation. The
+/// checks that read a draw's own arguments (mode, counts, offsets, index type, buffer ranges) run
+/// on every draw. Starts at 1; a program never validated holds 0.
+#[derive(Clone)]
+pub(crate) struct DrawStateGen(Rc<Cell<u64>>);
+
+impl Default for DrawStateGen {
+    fn default() -> Self {
+        DrawStateGen(Rc::new(Cell::new(1)))
+    }
+}
+
+impl DrawStateGen {
+    #[inline]
+    pub(crate) fn get(&self) -> u64 {
+        self.0.get()
+    }
+
+    /// Moves the generation on unless `command` leaves every draw-time state check as it was:
+    /// uniforms other than uniform1i(v) (which set sampler units), useProgram and bindVertexArray
+    /// (the cache is per vertex array and program), draws, clears, fixed-function state no check reads, and queries.
+    #[inline]
+    pub(crate) fn note(&self, command: &WebGLCommand) {
+        use WebGLCommand as C;
+        let keeps = matches!(
+            command,
+            C::Uniform1f(..) |
+                C::Uniform1fv(..) |
+                C::Uniform1ui(..) |
+                C::Uniform1uiv(..) |
+                C::Uniform2f(..) |
+                C::Uniform2fv(..) |
+                C::Uniform2i(..) |
+                C::Uniform2ui(..) |
+                C::Uniform2iv(..) |
+                C::Uniform2uiv(..) |
+                C::Uniform3f(..) |
+                C::Uniform3fv(..) |
+                C::Uniform3i(..) |
+                C::Uniform3ui(..) |
+                C::Uniform3iv(..) |
+                C::Uniform3uiv(..) |
+                C::Uniform4f(..) |
+                C::Uniform4fv(..) |
+                C::Uniform4i(..) |
+                C::Uniform4ui(..) |
+                C::Uniform4iv(..) |
+                C::Uniform4uiv(..) |
+                C::UniformMatrix2fv(..) |
+                C::UniformMatrix3fv(..) |
+                C::UniformMatrix4fv(..) |
+                C::UniformMatrix3x2fv(..) |
+                C::UniformMatrix4x2fv(..) |
+                C::UniformMatrix2x3fv(..) |
+                C::UniformMatrix4x3fv(..) |
+                C::UniformMatrix2x4fv(..) |
+                C::UniformMatrix3x4fv(..) |
+                C::UseProgram(..) |
+                C::BindVertexArray(..) |
+                C::DrawArrays { .. } |
+                C::DrawArraysInstanced { .. } |
+                C::DrawElements { .. } |
+                C::DrawElementsInstanced { .. } |
+                C::DrawArraysInstancedBaseInstance { .. } |
+                C::DrawElementsInstancedBaseVertexBaseInstance { .. } |
+                C::Clear(..) |
+                C::ClearColor(..) |
+                C::ClearDepth(..) |
+                C::ClearStencil(..) |
+                C::SetViewport(..) |
+                C::Scissor(..) |
+                C::BlendColor(..) |
+                C::BlendEquation(..) |
+                C::BlendEquationSeparate(..) |
+                C::BlendFunc(..) |
+                C::BlendFuncSeparate(..) |
+                C::DepthFunc(..) |
+                C::DepthMask(..) |
+                C::DepthRange(..) |
+                C::CullFace(..) |
+                C::FrontFace(..) |
+                C::PolygonOffset(..) |
+                C::LineWidth(..) |
+                C::StencilFunc(..) |
+                C::StencilFuncSeparate(..) |
+                C::StencilMask(..) |
+                C::StencilMaskSeparate(..) |
+                C::StencilOp(..) |
+                C::StencilOpSeparate(..) |
+                C::Hint(..) |
+                C::SampleCoverage(..) |
+                C::ActiveTexture(..) |
+                C::PixelStorei(..) |
+                C::Flush |
+                C::Finish(..) |
+                C::GetParameterBool(..) |
+                C::GetParameterBool4(..) |
+                C::GetParameterInt(..) |
+                C::GetParameterUInt(..) |
+                C::GetParameterInt2(..) |
+                C::GetParameterInt4(..) |
+                C::GetParameterFloat(..) |
+                C::GetParameterFloat2(..) |
+                C::GetParameterFloat4(..)
+        );
+        if !keeps {
+            self.0.set(self.0.get() + 1);
+        }
+    }
 }
 
 /// Partii (perf): names reserved per object kind (WebGLRenderingContext::take_object_name): 128, or
