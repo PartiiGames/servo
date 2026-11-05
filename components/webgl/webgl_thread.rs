@@ -483,9 +483,14 @@ impl WebGLThread {
                 continue;
             }
             let class = frame_prof::class_of(&msg);
+            let kind = match &msg {
+                WebGLMsg::WebGLCommand(_, command, _) => command_kind(command),
+                _ => "msg",
+            };
             let start = std::time::Instant::now();
             let exit = self.handle_msg(msg, &webgl_chan);
             prof.record(class, start);
+            frame_prof::trace_msg(class, kind, start);
             if exit {
                 break;
             }
@@ -5226,6 +5231,26 @@ mod frame_prof {
     pub(super) fn enabled() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *ON.get_or_init(|| std::env::var_os("PARTII_FRAME_PROF").is_some())
+    }
+
+    pub(super) fn trace() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace"))
+    }
+
+    /// `PARTII_FRAME_PROF=trace`: each WebGL message of 4 ms or more, on the wall clock the script trace uses.
+    pub(super) fn trace_msg(class: usize, kind: &str, start: Instant) {
+        if !trace() {
+            return;
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        if ms >= 4.0 {
+            let d = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let wall = (d.as_micros() % 10_000_000_000) as f64 / 1000.0 - ms;
+            eprintln!("partii-trace webgl {}:{kind} at={wall:.1} ms={ms:.1}", NAMES[class]);
+        }
     }
 
     pub(super) fn finish() -> bool {
