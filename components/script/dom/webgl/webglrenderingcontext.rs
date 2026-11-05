@@ -512,7 +512,7 @@ impl WebGLRenderingContext {
     /// sent since (DrawStateGen). Texture and sampler bindings don't move the generation: each
     /// texture unit holds the binding sequence number of its last change (Textures), and a record
     /// made before a change to a unit the program samples asks for the sampler check alone
-    /// (WebGL 2; WebGL 1 has no draw-time sampler check).
+    /// (WebGL 2) or for every check (WebGL 1, whose feedback-loop check reads the bindings).
     #[inline]
     pub(crate) fn draw_state_cached(&self, cx: &mut JSContext) -> DrawStateCache {
         if !draw_cache_enabled() {
@@ -523,10 +523,22 @@ impl WebGLRenderingContext {
         };
         let generation = self.draw_state_gen.get();
         if self.webgl_version() == WebGLVersion::WebGL1 {
-            return match self.current_vao(cx).draw_validated(generation, program.id()) {
-                Some(_) => DrawStateCache::Hit,
-                None => DrawStateCache::Miss,
+            let vao = self.current_vao(cx);
+            let Some(validated_at) = vao.draw_validated(generation, program.id()) else {
+                return DrawStateCache::Miss;
             };
+            let sequence = self.textures.binding_sequence();
+            if validated_at != sequence {
+                if program
+                    .draw_sampler_units()
+                    .iter()
+                    .any(|&unit| self.textures.unit_changed_since(unit, validated_at))
+                {
+                    return DrawStateCache::Miss;
+                }
+                vao.set_draw_validated(generation, program.id(), sequence);
+            }
+            return DrawStateCache::Hit;
         }
         let vao = self.current_vao_webgl2(cx);
         let Some(validated_at) = vao.draw_validated(generation, program.id()) else {
@@ -691,15 +703,38 @@ impl WebGLRenderingContext {
 
     /// WebGL 1.0 6.26: a draw that samples a texture level the draw framebuffer renders into (at
     /// any attachment, whatever drawBuffers says) is a feedback loop. WebGL 2 checks this with
-    /// the sampler types (validate_sampler_types_for_draw). A draw-state check: texture
-    /// bindings, sampler units, filters and attachments change by commands off the allowlist.
+    /// the sampler types (validate_sampler_types_for_draw). A draw-state check: sampler units,
+    /// filters and attachments change by commands off the allowlist; texture bindings through
+    /// Textures::note_unit_changed, for the units recorded here (draw_sampler_units).
     fn validate_feedback_loops_webgl1(&self) -> WebGLResult<()> {
         if self.webgl_version() != WebGLVersion::WebGL1 {
             return Ok(());
         }
-        let (Some(framebuffer), Some(program)) =
-            (self.bound_draw_framebuffer.get(), self.current_program())
-        else {
+        let Some(program) = self.current_program() else {
+            return Ok(());
+        };
+        // Partii (perf): the units the samplers read, for the draw-state cache's per-unit test
+        // (draw_state_cached): a bindTexture moves no generation, only its unit's sequence.
+        {
+            let uniforms = program.active_uniforms();
+            let mut units = program.draw_sampler_units_mut();
+            units.clear();
+            for uniform in uniforms.iter() {
+                if !matches!(
+                    uniform.type_,
+                    constants::SAMPLER_2D | constants::SAMPLER_CUBE
+                ) {
+                    continue;
+                }
+                let Some(location) = uniform.location else {
+                    continue;
+                };
+                for element in 0..uniform.size.unwrap_or(1).max(1) {
+                    units.push(program.sampler_unit(location + element));
+                }
+            }
+        }
+        let Some(framebuffer) = self.bound_draw_framebuffer.get() else {
             return Ok(());
         };
         for uniform in program.active_uniforms().iter() {
