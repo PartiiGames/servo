@@ -239,18 +239,18 @@ impl WebGL2RenderingContext {
 
     /// GL ES 3.0 2.12.6 / WebGL 2.0 5.x: every active uniform block needs a buffer at its
     /// binding point whose bound range holds at least UNIFORM_BLOCK_DATA_SIZE bytes.
-    pub(crate) fn validate_uniform_block_for_draw(&self) {
+    fn validate_uniform_block_for_draw(&self) -> WebGLResult<()> {
         let Some(program) = self.base.current_program() else {
-            return;
+            return Ok(());
         };
         let blocks = program.active_uniform_blocks();
         let bindings = program.uniform_block_bindings();
         for (block, &binding) in blocks.iter().zip(bindings.iter()) {
             let Some(indexed) = self.indexed_uniform_buffer_bindings.get(binding as usize) else {
-                return self.base.webgl_error(InvalidOperation);
+                return Err(InvalidOperation);
             };
             let Some(buffer) = indexed.buffer.get() else {
-                return self.base.webgl_error(InvalidOperation);
+                return Err(InvalidOperation);
             };
             // bindBufferBase binds the whole buffer (start 0, size 0); a range is clamped to
             // the buffer's current size.
@@ -261,15 +261,17 @@ impl WebGL2RenderingContext {
                 available = available.min(indexed.size.get() as usize);
             }
             if block.size.max(0) as usize > available {
-                return self.base.webgl_error(InvalidOperation);
+                return Err(InvalidOperation);
             }
         }
+        Ok(())
     }
 
-    fn validate_vertex_attribs_for_draw(&self, cx: &mut JSContext) {
-        let program = match self.base.current_program() {
-            Some(program) => program,
-            None => return,
+    /// GL ES 3.0 2.8 / WebGL 2.0 5.x: each active attribute must be fed the base type the
+    /// shader reads (float, int or uint), else the draw is INVALID_OPERATION.
+    fn validate_vertex_attribs_for_draw(&self, cx: &mut JSContext) -> WebGLResult<()> {
+        let Some(program) = self.base.current_program() else {
+            return Ok(());
         };
         let groups = [
             [
@@ -298,11 +300,7 @@ impl WebGL2RenderingContext {
             let Some(location) = prog_attrib.location else {
                 continue;
             };
-            let attrib = handle_potential_webgl_error!(
-                self.base,
-                vao.get_vertex_attrib(location).ok_or(InvalidOperation),
-                return
-            );
+            let attrib = vao.get_vertex_attrib(location).ok_or(InvalidOperation)?;
 
             // The type the shader receives: vertexAttribPointer data (whatever its component
             // type) arrives as float, vertexAttribIPointer data as int or uint by its signedness.
@@ -331,10 +329,39 @@ impl WebGL2RenderingContext {
                 .iter()
                 .find(|g| g.contains(&attrib_data_base_type) && g.contains(&shader_base_type));
             if contains.is_none() {
-                self.base.webgl_error(InvalidOperation);
-                return;
+                return Err(InvalidOperation);
             }
         }
+        Ok(())
+    }
+
+    /// The draw-time state checks of WebGL 2 (uniform buffers, attribute types, sampler types
+    /// and feedback loops); a failing one rejects the draw. Draws whose
+    /// mode or counts are invalid skip them, so that the base draw reports its own error.
+    fn validate_draw_state(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        first_or_offset: i64,
+        count: i32,
+        primcount: i32,
+    ) -> WebGLResult<()> {
+        let valid_mode = matches!(
+            mode,
+            constants::POINTS |
+                constants::LINE_STRIP |
+                constants::LINE_LOOP |
+                constants::LINES |
+                constants::TRIANGLE_STRIP |
+                constants::TRIANGLE_FAN |
+                constants::TRIANGLES
+        );
+        if !valid_mode || first_or_offset < 0 || count < 0 || primcount < 0 {
+            return Ok(());
+        }
+        self.validate_uniform_block_for_draw()?;
+        self.validate_vertex_attribs_for_draw(cx)?;
+        self.validate_sampler_types_for_draw()
     }
 
     pub(crate) fn base_context(&self) -> DomRoot<WebGLRenderingContext> {
@@ -1895,9 +1922,9 @@ impl WebGL2RenderingContext {
     /// texture in that mode is no longer a float texture. Otherwise the draw fails with
     /// INVALID_OPERATION. Units without a complete texture are left alone. Also catches
     /// texture/framebuffer feedback loops.
-    fn validate_sampler_types_for_draw(&self) -> bool {
+    fn validate_sampler_types_for_draw(&self) -> WebGLResult<()> {
         let Some(program) = self.base.current_program() else {
-            return true;
+            return Ok(());
         };
         for uniform in program.active_uniforms().iter() {
             let Some((target, sampler_kind)) = sampler_target_and_kind(uniform.type_) else {
@@ -1919,8 +1946,7 @@ impl WebGL2RenderingContext {
                     None => texture.compare_mode(),
                 };
                 if texture_kind(format, compare_mode) != sampler_kind {
-                    self.base.webgl_error(InvalidOperation);
-                    return false;
+                    return Err(InvalidOperation);
                 }
                 // WebGL 2.0, 5.19: sampling a texture level that the draw framebuffer renders
                 // into is a feedback loop.
@@ -1931,13 +1957,12 @@ impl WebGL2RenderingContext {
                         .into_iter()
                         .any(|level| level >= 0 && (first..=last).contains(&(level as u32)))
                     {
-                        self.base.webgl_error(InvalidOperation);
-                        return false;
+                        return Err(InvalidOperation);
                     }
                 }
             }
         }
-        true
+        Ok(())
     }
 
     /// True if UNPACK_FLIP_Y_WEBGL or UNPACK_PREMULTIPLY_ALPHA_WEBGL is set. 3D uploads from a
@@ -3722,11 +3747,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn DrawArrays(&self, cx: &mut JSContext, mode: u32, first: i32, count: i32) {
-        self.validate_uniform_block_for_draw();
-        self.validate_vertex_attribs_for_draw(cx);
-        if !self.validate_sampler_types_for_draw() {
-            return;
-        }
+        handle_potential_webgl_error!(
+            self.base,
+            self.validate_draw_state(cx, mode, first as i64, count, 1),
+            return
+        );
         self.draw_with_transform_feedback(cx, mode, count, 1, false, |cx| {
             self.base.draw_arrays_instanced(cx, mode, first, count, 1)
         })
@@ -3734,11 +3759,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn DrawElements(&self, cx: &mut JSContext, mode: u32, count: i32, type_: u32, offset: i64) {
-        self.validate_uniform_block_for_draw();
-        self.validate_vertex_attribs_for_draw(cx);
-        if !self.validate_sampler_types_for_draw() {
-            return;
-        }
+        handle_potential_webgl_error!(
+            self.base,
+            self.validate_draw_state(cx, mode, offset, count, 1),
+            return
+        );
         self.draw_with_transform_feedback(cx, mode, count, 1, true, |cx| {
             self.base
                 .draw_elements_instanced(cx, mode, count, type_, offset, 1)
@@ -6370,11 +6395,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         count: i32,
         primcount: i32,
     ) {
-        self.validate_uniform_block_for_draw();
-        self.validate_vertex_attribs_for_draw(cx);
-        if !self.validate_sampler_types_for_draw() {
-            return;
-        }
+        handle_potential_webgl_error!(
+            self.base,
+            self.validate_draw_state(cx, mode, first as i64, count, primcount),
+            return
+        );
         self.draw_with_transform_feedback(cx, mode, count, primcount, false, |cx| {
             self.base
                 .draw_arrays_instanced(cx, mode, first, count, primcount)
@@ -6391,11 +6416,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         offset: i64,
         primcount: i32,
     ) {
-        self.validate_uniform_block_for_draw();
-        self.validate_vertex_attribs_for_draw(cx);
-        if !self.validate_sampler_types_for_draw() {
-            return;
-        }
+        handle_potential_webgl_error!(
+            self.base,
+            self.validate_draw_state(cx, mode, offset, count, primcount),
+            return
+        );
         self.draw_with_transform_feedback(cx, mode, count, primcount, true, |cx| {
             self.base
                 .draw_elements_instanced(cx, mode, count, type_, offset, primcount)
@@ -6417,11 +6442,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             self.base.webgl_error(InvalidValue);
             return;
         }
-        self.validate_uniform_block_for_draw();
-        self.validate_vertex_attribs_for_draw(cx);
-        if !self.validate_sampler_types_for_draw() {
-            return;
-        }
+        handle_potential_webgl_error!(
+            self.base,
+            self.validate_draw_state(cx, mode, offset, count, 1),
+            return
+        );
         self.draw_with_transform_feedback(cx, mode, count, 1, true, |cx| {
             self.base
                 .draw_elements_instanced(cx, mode, count, type_, offset, 1)
