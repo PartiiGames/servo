@@ -780,6 +780,8 @@ impl WebGL2RenderingContext {
                     (Some(Renderbuffer(ref a)), Some(Renderbuffer(ref b))) if a.id() == b.id() => {
                     },
                     (Some(Texture(ref a)), Some(Texture(ref b))) if a.id() == b.id() => {},
+                    // Nothing at either point: OBJECT_TYPE is NONE and OBJECT_NAME null.
+                    (None, None) => {},
                     _ => return Err(InvalidOperation),
                 }
             },
