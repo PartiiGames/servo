@@ -1541,6 +1541,17 @@ impl WebGLImpl {
                 gl.blit_framebuffer(
                     src_x0, src_y0, src_x1, src_y1, dst_x0, dst_y0, dst_x1, dst_y1, mask, filter,
                 );
+                // With alpha: false the canvas is RGBA whose alpha is kept at 1 by the colour
+                // mask, which a blit ignores: put the alpha back.
+                if mask & gl::COLOR_BUFFER_BIT != 0 && state.fake_no_alpha() {
+                    gl.disable(gl::SCISSOR_TEST);
+                    gl.color_mask(false, false, false, true);
+                    gl.clear_color(0., 0., 0., 1.);
+                    gl.clear(gl::COLOR_BUFFER_BIT);
+                    state.restore_clear_invariant(gl);
+                    state.restore_scissor_invariant(gl);
+                    state.restore_alpha_invariant(gl);
+                }
             },
             WebGLCommand::Uniform1f(uniform_id, v) => unsafe {
                 gl.uniform_1_f32(native_uniform_location(uniform_id).as_ref(), v)
