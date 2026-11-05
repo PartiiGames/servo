@@ -1806,16 +1806,28 @@ impl WebGLImpl {
                 pixel_format,
                 ref data,
             } => {
-                let pixels = prepare_pixels(
-                    internal_format,
-                    data_type,
-                    size,
-                    unpacking_alignment,
-                    alpha_treatment,
-                    y_axis_treatment,
-                    pixel_format,
-                    Cow::Borrowed(data),
-                );
+                // Partii (perf): texImage2D with null pixels arrives with no data (the DOM sends none
+                // instead of a zero-filled copy). Zeros need no premultiply or flip, so upload a fresh
+                // zeroed buffer (calloc: untouched pages) instead of copying and converting one.
+                // Phaser's boot makes ~80 full-canvas render targets this way (hexii's start frame).
+                let pixels = if data.is_empty() && size.width > 0 && size.height > 0 {
+                    let cpp = data_type.element_size() * format.components() /
+                        data_type.components_per_element();
+                    let a = unpacking_alignment.max(1);
+                    let stride = (size.width * cpp + a - 1) & !(a - 1);
+                    Cow::Owned(vec![0u8; (stride * (size.height - 1) + size.width * cpp) as usize])
+                } else {
+                    prepare_pixels(
+                        internal_format,
+                        data_type,
+                        size,
+                        unpacking_alignment,
+                        alpha_treatment,
+                        y_axis_treatment,
+                        pixel_format,
+                        Cow::Borrowed(data),
+                    )
+                };
 
                 let (internal_format, format) = luminance_formats(
                     state,
