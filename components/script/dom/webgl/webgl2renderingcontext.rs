@@ -1311,22 +1311,25 @@ impl WebGL2RenderingContext {
         } else {
             (0, 0)
         };
-        if (params.row_length > 0 && params.skip_pixels + width > params.row_length) ||
-            (image_height > 0 && params.skip_rows + height > image_height)
-        {
-            self.base.webgl_error(InvalidOperation);
-            return None;
-        }
+        // A zero UNPACK_ROW_LENGTH / UNPACK_IMAGE_HEIGHT means the upload's own width / height,
+        // so any skip at all then overruns (5.35). 2D uploads have no row-skip constraint.
         let row_pixels = if params.row_length > 0 {
             params.row_length
         } else {
             width
-        } as u64;
+        };
         let rows_per_image = if image_height > 0 {
             image_height
         } else {
             height
-        } as u64;
+        };
+        if params.skip_pixels as u64 + width as u64 > row_pixels as u64 ||
+            (is_3d && params.skip_rows as u64 + height as u64 > rows_per_image as u64)
+        {
+            self.base.webgl_error(InvalidOperation);
+            return None;
+        }
+        let (row_pixels, rows_per_image) = (row_pixels as u64, rows_per_image as u64);
         let (cpp, alignment) = (cpp as u64, alignment as u64);
         let row_stride = (row_pixels * cpp).div_ceil(alignment) * alignment;
         let image_stride = row_stride * rows_per_image;
