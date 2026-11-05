@@ -22,6 +22,7 @@ extern crate stylo_atoms;
 
 #[macro_use]
 mod tasks;
+pub(crate) mod partii_frame_prof;
 
 #[macro_use]
 extern crate script_bindings;
