@@ -12,7 +12,7 @@ use servo_canvas_traits::webgl::{WebGLCommand, WebGLContextId, WebGLMsgSender};
 
 use crate::dom::bindings::codegen::Bindings::WebGLObjectBinding::WebGLObjectMethods;
 use crate::dom::bindings::str::USVString;
-use crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext;
+use crate::dom::webgl::webglrenderingcontext::{DrawStateGen, WebGLRenderingContext};
 use crate::dom::webglrenderingcontext::{Operation, capture_webgl_backtrace};
 
 #[dom_struct]
@@ -22,6 +22,10 @@ pub(crate) struct WebGLObject {
     webgl_sender: WebGLMsgSender,
     context: WeakRef<WebGLRenderingContext>,
     label: DomRefCell<USVString>,
+    /// Partii (perf): the context's draw-state generation, moved on by this object's commands too.
+    #[ignore_malloc_size_of = "A shared counter"]
+    #[no_trace]
+    draw_state_gen: DrawStateGen,
 }
 
 impl WebGLObject {
@@ -31,6 +35,7 @@ impl WebGLObject {
             webgl_sender: context.sender().clone(),
             context: WeakRef::new(context),
             label: DomRefCell::new(USVString::default()),
+            draw_state_gen: context.draw_state_gen().clone(),
         }
     }
 
@@ -48,6 +53,7 @@ impl WebGLObject {
 
     #[inline]
     pub(crate) fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
+        self.draw_state_gen.note(&command);
         let result = self.webgl_sender.send(command, capture_webgl_backtrace());
         if matches!(fallibility, Operation::Infallible) {
             result.expect("Operation failed");

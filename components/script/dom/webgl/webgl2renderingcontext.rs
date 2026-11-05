@@ -1940,7 +1940,8 @@ impl WebGL2RenderingContext {
     }
 
     /// Issues a draw after the transform feedback checks, counting the recorded vertices
-    /// when the draw goes through.
+    /// when the draw goes through. `cached`: the draw-state checks passed already (draw_state_cached).
+    #[allow(clippy::too_many_arguments)]
     fn draw_with_transform_feedback(
         &self,
         cx: &mut JSContext,
@@ -1948,9 +1949,13 @@ impl WebGL2RenderingContext {
         count: i32,
         primcount: i32,
         indexed: bool,
+        cached: bool,
         draw: impl FnOnce(&mut JSContext) -> WebGLResult<()>,
     ) -> WebGLResult<()> {
-        self.validate_transform_feedback_buffers_for_draw(cx)?;
+        // Reads no draw argument: one of the cached draw-state checks.
+        if !cached {
+            self.validate_transform_feedback_buffers_for_draw(cx)?;
+        }
         let recorded =
             self.validate_transform_feedback_for_draw(mode, count, primcount, indexed)?;
         draw(cx)?;
@@ -1983,15 +1988,21 @@ impl WebGL2RenderingContext {
         primcount: i32,
         base_instance: u32,
     ) -> WebGLResult<()> {
-        self.validate_draw_state(cx, mode, first as i64, count, primcount)?;
-        self.draw_with_transform_feedback(cx, mode, count, primcount, false, |cx| {
-            self.base.draw_arrays_instanced_base_instance(
+        // Partii (perf): the state checks passed already for this program and vertex array, with
+        // nothing sent since that could change their outcome (draw_state_cached, DrawStateGen).
+        let cached = self.base.draw_state_cached(cx);
+        if !cached {
+            self.validate_draw_state(cx, mode, first as i64, count, primcount)?;
+        }
+        self.draw_with_transform_feedback(cx, mode, count, primcount, false, cached, |cx| {
+            self.base.draw_arrays_instanced_base_instance_checked(
                 cx,
                 mode,
                 first,
                 count,
                 primcount,
                 base_instance,
+                cached,
             )
         })
     }
@@ -2025,9 +2036,13 @@ impl WebGL2RenderingContext {
         base_vertex: i32,
         base_instance: u32,
     ) -> WebGLResult<()> {
-        self.validate_draw_state(cx, mode, offset, count, primcount)?;
-        self.draw_with_transform_feedback(cx, mode, count, primcount, true, |cx| {
-            self.base.draw_elements_instanced_base_vertex_base_instance(
+        // Partii (perf): as in draw_arrays_checked_base_instance.
+        let cached = self.base.draw_state_cached(cx);
+        if !cached {
+            self.validate_draw_state(cx, mode, offset, count, primcount)?;
+        }
+        self.draw_with_transform_feedback(cx, mode, count, primcount, true, cached, |cx| {
+            self.base.draw_elements_instanced_base_vertex_base_instance_checked(
                 cx,
                 mode,
                 count,
@@ -2036,6 +2051,7 @@ impl WebGL2RenderingContext {
                 primcount,
                 base_vertex,
                 base_instance,
+                cached,
             )
         })
     }
