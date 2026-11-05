@@ -448,6 +448,10 @@ impl WebGLRenderingContext {
         self.texture_unpacking_alignment.get()
     }
 
+    pub(crate) fn bound_renderbuffer(&self) -> Option<DomRoot<WebGLRenderbuffer>> {
+        self.bound_renderbuffer.get()
+    }
+
     pub(crate) fn bound_draw_framebuffer(&self) -> Option<DomRoot<WebGLFramebuffer>> {
         self.bound_draw_framebuffer.get()
     }

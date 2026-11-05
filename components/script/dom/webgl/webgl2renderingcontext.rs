@@ -531,6 +531,17 @@ impl WebGL2RenderingContext {
             constants::RGBA | constants::RGBA_INTEGER => 4,
             _ => return Err(InvalidEnum),
         };
+        // A packed type holds a whole pixel in one element.
+        let packed = matches!(
+            pixel_type,
+            constants::UNSIGNED_SHORT_4_4_4_4 |
+                constants::UNSIGNED_SHORT_5_5_5_1 |
+                constants::UNSIGNED_SHORT_5_6_5 |
+                constants::UNSIGNED_INT_2_10_10_10_REV |
+                constants::UNSIGNED_INT_10F_11F_11F_REV |
+                constants::UNSIGNED_INT_5_9_9_9_REV
+        );
+        let channels = if packed { 1 } else { channels };
         Ok(ReadPixelsAllowedFormats {
             array_types,
             channels,
@@ -1796,6 +1807,8 @@ impl WebGL2RenderingContext {
             Some(constants::R16F | constants::RG16F | constants::RGBA16F | constants::RGB16F) => {
                 (constants::RGBA, constants::HALF_FLOAT)
             },
+            // GL ES 3.0 4.3.2: an RGB10_A2 buffer also reads as RGBA/UNSIGNED_INT_2_10_10_10_REV.
+            Some(constants::RGB10_A2) => (constants::RGBA, constants::UNSIGNED_INT_2_10_10_10_REV),
             _ => primary,
         };
         (primary, implementation)
@@ -3134,8 +3147,17 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         cx: &mut JSContext,
         target: u32,
         pname: u32,
-        retval: MutableHandleValue,
+        mut retval: MutableHandleValue,
     ) {
+        // RENDERBUFFER_SAMPLES is WebGL 2 only: the sample count renderbufferStorageMultisample
+        // asked for (0 for single-sampled storage).
+        if target == constants::RENDERBUFFER && pname == constants::RENDERBUFFER_SAMPLES {
+            let Some(renderbuffer) = self.base.bound_renderbuffer() else {
+                self.base.webgl_error(InvalidOperation);
+                return retval.set(NullValue());
+            };
+            return retval.set(Int32Value(renderbuffer.samples()));
+        }
         self.base
             .GetRenderbufferParameter(cx, target, pname, retval)
     }
@@ -6544,6 +6566,25 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 return self.base.webgl_error(InvalidOperation);
             }
         }
+        // WebGL 2.0 5.38: a colour blit from a read buffer with no image into draw buffers
+        // that have one is INVALID_OPERATION.
+        // (A read buffer of NONE is not a missing image: that blit copies no colour.)
+        if bits.intersects(BlitFrameBufferFlags::COLOR) &&
+            src_color.is_none() &&
+            src_fb
+                .as_ref()
+                .is_some_and(|fb| fb.read_buffer() != constants::NONE)
+        {
+            let any_dst_image = match &dst_fb {
+                None => true,
+                Some(fb) => dst_color_attachments
+                    .iter()
+                    .any(|&dst| fb.attachment_internal_format(dst).is_some()),
+            };
+            if any_dst_image {
+                return self.base.webgl_error(InvalidOperation);
+            }
+        }
         if bits.intersects(BlitFrameBufferFlags::DEPTH) && src_depth != dst_depth {
             return self.base.webgl_error(InvalidOperation);
         }
@@ -7888,6 +7929,71 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         mut retval: MutableHandleValue,
     ) {
         if target != constants::RENDERBUFFER {
+            self.base.webgl_error(InvalidEnum);
+            return retval.set(NullValue());
+        }
+        // An internalformat that isn't one of ES 3.0's sized or base formats is INVALID_ENUM.
+        if !matches!(
+            internal_format,
+            constants::R8 |
+                constants::R8_SNORM |
+                constants::RG8 |
+                constants::RG8_SNORM |
+                constants::RGB8 |
+                constants::RGB8_SNORM |
+                constants::RGB565 |
+                constants::RGBA4 |
+                constants::RGB5_A1 |
+                constants::RGBA8 |
+                constants::RGBA8_SNORM |
+                constants::RGB10_A2 |
+                constants::RGB10_A2UI |
+                constants::SRGB8 |
+                constants::SRGB8_ALPHA8 |
+                constants::R16F |
+                constants::RG16F |
+                constants::RGB16F |
+                constants::RGBA16F |
+                constants::R32F |
+                constants::RG32F |
+                constants::RGB32F |
+                constants::RGBA32F |
+                constants::R11F_G11F_B10F |
+                constants::RGB9_E5 |
+                constants::R8I |
+                constants::R8UI |
+                constants::R16I |
+                constants::R16UI |
+                constants::R32I |
+                constants::R32UI |
+                constants::RG8I |
+                constants::RG8UI |
+                constants::RG16I |
+                constants::RG16UI |
+                constants::RG32I |
+                constants::RG32UI |
+                constants::RGB8I |
+                constants::RGB8UI |
+                constants::RGB16I |
+                constants::RGB16UI |
+                constants::RGB32I |
+                constants::RGB32UI |
+                constants::RGBA8I |
+                constants::RGBA8UI |
+                constants::RGBA16I |
+                constants::RGBA16UI |
+                constants::RGBA32I |
+                constants::RGBA32UI |
+                constants::RGB |
+                constants::RGBA |
+                constants::DEPTH_STENCIL |
+                constants::DEPTH_COMPONENT16 |
+                constants::DEPTH_COMPONENT24 |
+                constants::DEPTH_COMPONENT32F |
+                constants::DEPTH24_STENCIL8 |
+                constants::DEPTH32F_STENCIL8 |
+                constants::STENCIL_INDEX8
+        ) {
             self.base.webgl_error(InvalidEnum);
             return retval.set(NullValue());
         }
