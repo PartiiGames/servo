@@ -24,6 +24,7 @@ use {
     crate::dom::webgl::extensions::extfragdepth::EXTFragDepth,
     crate::dom::webgl::extensions::extshadertexturelod::EXTShaderTextureLod,
     crate::dom::webgl::extensions::oesstandardderivatives::OESStandardDerivatives,
+    crate::dom::webgl::extensions::webglmultidraw::WEBGLMultiDraw,
     crate::dom::webgl::webglobject::WebGLObject,
     crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext},
     crate::dom::webglrenderingcontext::capture_webgl_backtrace,
@@ -293,6 +294,8 @@ impl WebGLShader {
             OES_standard_derivatives: ext.is_enabled::<OESStandardDerivatives>() as c_int,
             EXT_shader_texture_lod: ext.is_enabled::<EXTShaderTextureLod>() as c_int,
             EXT_frag_depth: ext.is_enabled::<EXTFragDepth>() as c_int,
+            // gl_DrawID; the translator turns it into the uniform angle_DrawID (emulateGLDrawID).
+            ANGLE_multi_draw: ext.is_enabled::<WEBGLMultiDraw>() as c_int,
 
             FragmentPrecisionHigh: 1,
             ..Default::default()
@@ -347,6 +350,8 @@ impl WebGLShader {
 
         options.set_limitExpressionComplexity(1);
         options.set_limitCallStackDepth(1);
+        // gl_DrawID as a uniform the draw calls set (WEBGL_multi_draw).
+        options.set_emulateGLDrawID(1);
 
         if cfg!(target_os = "macos") {
             options.set_removeInvariantAndCentroidForESSL3(1);

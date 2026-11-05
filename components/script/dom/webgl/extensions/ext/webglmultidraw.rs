@@ -6,7 +6,7 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use servo_canvas_traits::webgl::WebGLError::{InvalidOperation, InvalidValue};
-use servo_canvas_traits::webgl::WebGLResult;
+use servo_canvas_traits::webgl::{WebGLCommand, WebGLResult};
 
 use super::{WebGLExtension, WebGLExtensionSpec, WebGLExtensions};
 use crate::dom::bindings::buffer_source::typed_array_to_vec;
@@ -65,7 +65,7 @@ impl WebGLExtension for WEBGLMultiDraw {
     }
 }
 
-fn to_vec(list: Int32ArrayOrLongSequence) -> Vec<i32> {
+pub(crate) fn to_vec(list: Int32ArrayOrLongSequence) -> Vec<i32> {
     match list {
         Int32ArrayOrLongSequence::Int32Array(v) => typed_array_to_vec(&*v),
         Int32ArrayOrLongSequence::LongSequence(v) => v,
@@ -74,11 +74,45 @@ fn to_vec(list: Int32ArrayOrLongSequence) -> Vec<i32> {
 
 /// The `drawcount` entries of `list` from `offset`: INVALID_VALUE for a negative drawcount,
 /// INVALID_OPERATION when the list is too short (WEBGL_multi_draw).
-fn entries(list: &[i32], offset: u64, drawcount: i32) -> WebGLResult<&[i32]> {
+/// The `drawcount` entries of `list` from `offset`: INVALID_VALUE for a negative drawcount,
+/// INVALID_OPERATION when the list is too short.
+pub(crate) fn entries<T>(list: &[T], offset: u64, drawcount: i32) -> WebGLResult<&[T]> {
     let count = usize::try_from(drawcount).map_err(|_| InvalidValue)?;
     let start = usize::try_from(offset).map_err(|_| InvalidOperation)?;
     let end = start.checked_add(count).ok_or(InvalidOperation)?;
     list.get(start..end).ok_or(InvalidOperation)
+}
+
+/// Draws entries `0..drawcount` in order, stopping at the first error. A vertex shader's gl_DrawID
+/// is the uniform `angle_DrawID` (the translator's emulateGLDrawID): it is set to each entry's
+/// index and back to 0 afterwards, so plain draws see 0.
+pub(crate) fn draw_entries(
+    ctx: &WebGLRenderingContext,
+    cx: &mut JSContext,
+    drawcount: usize,
+    mut draw: impl FnMut(&mut JSContext, usize) -> WebGLResult<()>,
+) -> WebGLResult<()> {
+    let draw_id = ctx
+        .current_program()
+        .and_then(|program| program.emulated_builtins().draw_id);
+    let mut result = Ok(());
+    for index in 0..drawcount {
+        if let Some(location) = draw_id &&
+            index > 0
+        {
+            ctx.send_command(WebGLCommand::Uniform1i(location, index as i32));
+        }
+        result = draw(cx, index);
+        if result.is_err() {
+            break;
+        }
+    }
+    if let Some(location) = draw_id &&
+        drawcount > 1
+    {
+        ctx.send_command(WebGLCommand::Uniform1i(location, 0));
+    }
+    result
 }
 
 impl WEBGLMultiDraw {
@@ -137,10 +171,9 @@ impl WEBGLMultiDrawMethods<crate::DomTypeHolder> for WEBGLMultiDraw {
         self.draw(cx, |cx| {
             let firsts = entries(&firsts, firsts_offset, drawcount)?;
             let counts = entries(&counts, counts_offset, drawcount)?;
-            for (&first, &count) in firsts.iter().zip(counts) {
-                self.draw_arrays(cx, mode, first, count, 1)?;
-            }
-            Ok(())
+            draw_entries(&self.ctx, cx, firsts.len(), |cx, i| {
+                self.draw_arrays(cx, mode, firsts[i], counts[i], 1)
+            })
         })
     }
 
@@ -160,10 +193,9 @@ impl WEBGLMultiDrawMethods<crate::DomTypeHolder> for WEBGLMultiDraw {
         self.draw(cx, |cx| {
             let counts = entries(&counts, counts_offset, drawcount)?;
             let offsets = entries(&offsets, offsets_offset, drawcount)?;
-            for (&count, &offset) in counts.iter().zip(offsets) {
-                self.draw_elements(cx, mode, count, type_, offset, 1)?;
-            }
-            Ok(())
+            draw_entries(&self.ctx, cx, counts.len(), |cx, i| {
+                self.draw_elements(cx, mode, counts[i], type_, offsets[i], 1)
+            })
         })
     }
 
@@ -189,10 +221,9 @@ impl WEBGLMultiDrawMethods<crate::DomTypeHolder> for WEBGLMultiDraw {
             let firsts = entries(&firsts, firsts_offset, drawcount)?;
             let counts = entries(&counts, counts_offset, drawcount)?;
             let instances = entries(&instances, instance_counts_offset, drawcount)?;
-            for ((&first, &count), &instances) in firsts.iter().zip(counts).zip(instances) {
-                self.draw_arrays(cx, mode, first, count, instances)?;
-            }
-            Ok(())
+            draw_entries(&self.ctx, cx, firsts.len(), |cx, i| {
+                self.draw_arrays(cx, mode, firsts[i], counts[i], instances[i])
+            })
         })
     }
 
@@ -219,10 +250,9 @@ impl WEBGLMultiDrawMethods<crate::DomTypeHolder> for WEBGLMultiDraw {
             let counts = entries(&counts, counts_offset, drawcount)?;
             let offsets = entries(&offsets, offsets_offset, drawcount)?;
             let instances = entries(&instances, instance_counts_offset, drawcount)?;
-            for ((&count, &offset), &instances) in counts.iter().zip(offsets).zip(instances) {
-                self.draw_elements(cx, mode, count, type_, offset, instances)?;
-            }
-            Ok(())
+            draw_entries(&self.ctx, cx, counts.len(), |cx, i| {
+                self.draw_elements(cx, mode, counts[i], type_, offsets[i], instances[i])
+            })
         })
     }
 }

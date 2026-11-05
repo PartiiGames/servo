@@ -39,6 +39,7 @@ use servo_canvas_traits::webgl;
 use servo_canvas_traits::webgl::WebXRCommand;
 use servo_canvas_traits::webgl::{
     ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, AlphaTreatment, CompressedTexData,
+    EmulatedBuiltinUniforms,
     GLContextAttributes, GLLimits, GlType, InternalFormatIntVec, ProgramLinkInfo, TexDataType,
     TexFormat, WebGLBufferId, WebGLChan, WebGLCommand, WebGLCommandBacktrace, WebGLContextId,
     WebGLCreateContextResult, WebGLFramebufferBindingRequest, WebGLFramebufferId, WebGLMsg,
@@ -2952,6 +2953,8 @@ impl WebGLImpl {
                 transform_feedback_length: Default::default(),
                 transform_feedback_mode: Default::default(),
                 transform_feedback_varying_bytes: vec![].into(),
+                emulated_builtins: Default::default(),
+                hidden_uniform_indices: vec![].into(),
             };
         }
         let num_active_attribs =
@@ -2978,15 +2981,28 @@ impl WebGLImpl {
 
         let num_active_uniforms =
             unsafe { gl.get_program_parameter_i32(program.glow(), gl::ACTIVE_UNIFORMS) };
+        let mut emulated_builtins = EmulatedBuiltinUniforms::default();
+        let mut hidden_uniform_indices = vec![];
         let active_uniforms = (0..num_active_uniforms as u32)
-            .map(|i| {
+            .filter_map(|i| {
                 let active_uniform = unsafe { gl.get_active_uniform(program.glow(), i) }.unwrap();
+                // Uniforms the translator added for gl_DrawID and friends: user names all carry
+                // the `_u` prefix, so these never collide. Content must not see them.
+                if active_uniform.name.starts_with("angle_") {
+                    let location = unsafe {
+                        gl.get_uniform_location(program.glow(), &active_uniform.name)
+                    }
+                    .map(|location| location.0 as i32);
+                    emulated_builtins.record(&active_uniform.name, location);
+                    hidden_uniform_indices.push(i);
+                    return None;
+                }
                 let is_array = active_uniform.name.ends_with("[0]");
                 let active_uniform_name = active_uniform
                     .name
                     .strip_suffix("[0]")
                     .unwrap_or_else(|| &active_uniform.name);
-                ActiveUniformInfo {
+                Some(ActiveUniformInfo {
                     base_name: from_name_in_compiled_shader(active_uniform_name).into(),
                     size: if is_array {
                         Some(active_uniform.size)
@@ -2999,7 +3015,7 @@ impl WebGLImpl {
                         gl.get_uniform_location(program.glow(), &active_uniform.name)
                     }
                     .map(|location| location.0 as i32),
-                }
+                })
             })
             .collect::<Vec<_>>()
             .into();
@@ -3048,6 +3064,8 @@ impl WebGLImpl {
             active_uniform_blocks,
             transform_feedback_length,
             transform_feedback_mode,
+            emulated_builtins,
+            hidden_uniform_indices: hidden_uniform_indices.into(),
             transform_feedback_varying_bytes,
         }
     }

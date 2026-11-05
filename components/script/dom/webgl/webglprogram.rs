@@ -14,7 +14,8 @@ use script_bindings::weakref::WeakRef;
 use servo_base::generic_channel::{GenericReceiver, TryReceiveError};
 use servo_base::text::Utf8CodeUnits;
 use servo_canvas_traits::webgl::{
-    ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, ProgramLinkInfo, WebGLCommand,
+    ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, EmulatedBuiltinUniforms,
+    ProgramLinkInfo, WebGLCommand,
     WebGLError, WebGLProgramId, WebGLResult, webgl_channel,
 };
 
@@ -205,6 +206,11 @@ pub(crate) struct WebGLProgram {
     /// The fragment shader's outputs by location at the last link (see
     /// `WebGLShader::fragment_outputs`), for the WebGL 2 draw buffer check.
     fragment_outputs: DomRefCell<Option<Box<[Option<FragOutputKind>]>>>,
+    /// Locations of the translator's gl_DrawID / gl_BaseVertex / gl_BaseInstance uniforms.
+    #[no_trace]
+    emulated_builtins: Cell<EmulatedBuiltinUniforms>,
+    /// Driver indices of uniforms hidden from content (sorted), see `ProgramLinkInfo`.
+    hidden_uniform_indices: DomRefCell<Box<[u32]>>,
     droppable: RefCell<DroppableWebGLProgram>,
 }
 
@@ -227,6 +233,8 @@ impl WebGLProgram {
             pending_link: RefCell::new(None),
             sampler_units: Default::default(),
             fragment_outputs: Default::default(),
+            emulated_builtins: Default::default(),
+            hidden_uniform_indices: DomRefCell::new(vec![].into()),
             droppable: RefCell::new(DroppableWebGLProgram::new(id, context)),
         }
     }
@@ -435,9 +443,42 @@ impl WebGLProgram {
             link_info.transform_feedback_varying_bytes;
         *self.active_attribs.borrow_mut() = link_info.active_attribs;
         *self.active_uniforms.borrow_mut() = link_info.active_uniforms;
+        self.emulated_builtins.set(link_info.emulated_builtins);
+        *self.hidden_uniform_indices.borrow_mut() = link_info.hidden_uniform_indices;
         *self.uniform_block_bindings.borrow_mut() =
             vec![0; link_info.active_uniform_blocks.len()].into();
         *self.active_uniform_blocks.borrow_mut() = link_info.active_uniform_blocks;
+    }
+
+    /// Locations of the uniforms emulating gl_DrawID, gl_BaseVertex and gl_BaseInstance.
+    pub(crate) fn emulated_builtins(&self) -> EmulatedBuiltinUniforms {
+        self.resolve_link();
+        self.emulated_builtins.get()
+    }
+
+    /// A WebGL uniform index as the driver numbers it (the driver also counts hidden uniforms).
+    fn uniform_index_to_gl(&self, index: u32) -> u32 {
+        let mut index = index;
+        for &hidden in &**self.hidden_uniform_indices.borrow() {
+            if hidden <= index {
+                index += 1;
+            }
+        }
+        index
+    }
+
+    /// A driver uniform index as WebGL numbers it.
+    fn uniform_index_from_gl(&self, index: u32) -> u32 {
+        if index == constants2::INVALID_INDEX {
+            return index;
+        }
+        let below = self
+            .hidden_uniform_indices
+            .borrow()
+            .iter()
+            .filter(|&&hidden| hidden < index)
+            .count() as u32;
+        index - below
     }
 
     pub(crate) fn active_attribs(&self) -> Ref<'_, [ActiveAttribInfo]> {
@@ -732,7 +773,12 @@ impl WebGLProgram {
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast()
             .send_command(WebGLCommand::GetUniformIndices(self.id(), names, sender));
-        Ok(receiver.recv().unwrap())
+        Ok(receiver
+            .recv()
+            .unwrap()
+            .into_iter()
+            .map(|index| self.uniform_index_from_gl(index))
+            .collect())
     }
 
     pub(crate) fn get_active_uniforms(
@@ -760,6 +806,10 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidValue);
         }
 
+        let indices = indices
+            .into_iter()
+            .map(|index| self.uniform_index_to_gl(index))
+            .collect();
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast().send_command(WebGLCommand::GetActiveUniforms(
             self.id(),
@@ -802,7 +852,14 @@ impl WebGLProgram {
                 pname,
                 sender,
             ));
-        Ok(receiver.recv().unwrap())
+        let values = receiver.recv().unwrap();
+        if pname != constants2::UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES {
+            return Ok(values);
+        }
+        Ok(values
+            .into_iter()
+            .map(|index| self.uniform_index_from_gl(index as u32) as i32)
+            .collect())
     }
 
     pub(crate) fn get_active_uniform_block_name(&self, block_index: u32) -> WebGLResult<String> {

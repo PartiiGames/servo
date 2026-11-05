@@ -902,6 +902,35 @@ pub struct ProgramLinkInfo {
     pub transform_feedback_mode: i32,
     /// Bytes each transform feedback varying writes per vertex.
     pub transform_feedback_varying_bytes: Box<[u32]>,
+    /// Locations of the uniforms the shader translator adds for gl_DrawID, gl_BaseVertex and
+    /// gl_BaseInstance. They are left out of `active_uniforms`.
+    pub emulated_builtins: EmulatedBuiltinUniforms,
+    /// The driver's indices (sorted) of the uniforms left out of `active_uniforms`, to map
+    /// WebGL uniform indices to the driver's and back.
+    pub hidden_uniform_indices: Box<[u32]>,
+}
+
+/// Locations of the uniforms ANGLE adds to emulate draw built-ins (`angle_DrawID`,
+/// `angle_BaseVertex`, `angle_BaseInstance`), if the program uses them.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub struct EmulatedBuiltinUniforms {
+    pub draw_id: Option<i32>,
+    pub base_vertex: Option<i32>,
+    pub base_instance: Option<i32>,
+}
+
+impl EmulatedBuiltinUniforms {
+    /// Records `name` if it is one of the emulated built-ins; returns whether it was.
+    pub fn record(&mut self, name: &str, location: Option<i32>) -> bool {
+        let slot = match name {
+            "angle_DrawID" => &mut self.draw_id,
+            "angle_BaseVertex" => &mut self.base_vertex,
+            "angle_BaseInstance" => &mut self.base_instance,
+            _ => return false,
+        };
+        *slot = location;
+        true
+    }
 }
 
 /// Description of a single active attribute.
