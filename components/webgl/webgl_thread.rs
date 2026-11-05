@@ -4137,6 +4137,10 @@ bitflags! {
 struct FramebufferRebindingInfo {
     flags: FramebufferRebindingFlags,
     viewport: [GLint; 4],
+    /// Content framebuffers bound for reading and drawing (not the context surface's), which
+    /// a swap that preserves the drawing buffer can rebind while copying it.
+    read_framebuffer: Option<gl::NativeFramebuffer>,
+    draw_framebuffer: Option<gl::NativeFramebuffer>,
 }
 
 impl FramebufferRebindingInfo {
@@ -4162,11 +4166,26 @@ impl FramebufferRebindingInfo {
             let mut viewport = [0; 4];
             gl.get_parameter_i32_slice(gl::VIEWPORT, &mut viewport);
 
-            FramebufferRebindingInfo { flags, viewport }
+            FramebufferRebindingInfo {
+                flags,
+                viewport,
+                read_framebuffer: read_framebuffer
+                    .filter(|_| context_surface_framebuffer != read_framebuffer),
+                draw_framebuffer: draw_framebuffer
+                    .filter(|_| context_surface_framebuffer != draw_framebuffer),
+            }
         }
     }
 
     fn apply(self, device: &Device, context: &Context, gl: &Gl) {
+        unsafe {
+            if let Some(framebuffer) = self.read_framebuffer {
+                gl.bind_framebuffer(gl::READ_FRAMEBUFFER, Some(framebuffer));
+            }
+            if let Some(framebuffer) = self.draw_framebuffer {
+                gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(framebuffer));
+            }
+        }
         if self.flags.is_empty() {
             return;
         }
