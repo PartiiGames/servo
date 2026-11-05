@@ -404,6 +404,15 @@ impl WebGL2RenderingContext {
         if !valid_mode || first_or_offset < 0 || count < 0 || primcount < 0 {
             return Ok(());
         }
+        // Partii (perf): passed already, with nothing sent since that could change the outcome
+        // (WebGLRenderingContext::draw_state_cached, DrawStateGen).
+        if self
+            .base
+            .current_program()
+            .is_some_and(|program| self.base.draw_state_cached(&program))
+        {
+            return Ok(());
+        }
         // An incomplete framebuffer is reported before anything about the draw's state (so
         // INVALID_FRAMEBUFFER_OPERATION wins over a feedback loop's INVALID_OPERATION).
         self.base.validate_framebuffer()?;
@@ -1950,7 +1959,14 @@ impl WebGL2RenderingContext {
         indexed: bool,
         draw: impl FnOnce(&mut JSContext) -> WebGLResult<()>,
     ) -> WebGLResult<()> {
-        self.validate_transform_feedback_buffers_for_draw(cx)?;
+        // Reads no draw argument: one of the cached state checks (validate_draw_state).
+        if !self
+            .base
+            .current_program()
+            .is_some_and(|program| self.base.draw_state_cached(&program))
+        {
+            self.validate_transform_feedback_buffers_for_draw(cx)?;
+        }
         let recorded =
             self.validate_transform_feedback_for_draw(mode, count, primcount, indexed)?;
         draw(cx)?;

@@ -181,6 +181,9 @@ pub(crate) struct WebGLProgram {
     link_called: Cell<bool>,
     linked: Cell<bool>,
     link_generation: Cell<u64>,
+    /// Partii (perf): the draw-state generation at which this program's draw-time state checks last
+    /// all passed (WebGLRenderingContext::draw_state_cached); 0 for never.
+    draw_validated_at: Cell<u64>,
     fragment_shader: MutNullableDom<WebGLShader>,
     vertex_shader: MutNullableDom<WebGLShader>,
     #[no_trace]
@@ -221,6 +224,7 @@ impl WebGLProgram {
             link_called: Default::default(),
             linked: Default::default(),
             link_generation: Default::default(),
+            draw_validated_at: Default::default(),
             fragment_shader: Default::default(),
             vertex_shader: Default::default(),
             active_attribs: DomRefCell::new(vec![].into()),
@@ -943,6 +947,14 @@ impl WebGLProgram {
                 (None, None) => vec![],
             },
         )
+    }
+
+    pub(crate) fn draw_validated_at(&self) -> u64 {
+        self.draw_validated_at.get()
+    }
+
+    pub(crate) fn set_draw_validated_at(&self, generation: u64) {
+        self.draw_validated_at.set(generation);
     }
 
     pub(crate) fn link_generation(&self) -> u64 {
