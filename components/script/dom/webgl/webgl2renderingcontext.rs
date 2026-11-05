@@ -6545,10 +6545,25 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             _ => return self.base.webgl_error(InvalidEnum),
         };
         match fb_slot.get() {
-            Some(fb) => handle_potential_webgl_error!(
-                self.base,
-                fb.texture2d(attachment, textarget, texture, level)
-            ),
+            // DEPTH_STENCIL_ATTACHMENT is DEPTH_ATTACHMENT + STENCIL_ATTACHMENT in WebGL 2, as for
+            // renderbuffers (a separate slot made the depth and stencil queries miss the texture).
+            Some(fb) => match attachment {
+                constants::DEPTH_STENCIL_ATTACHMENT => {
+                    handle_potential_webgl_error!(
+                        self.base,
+                        fb.texture2d(constants::DEPTH_ATTACHMENT, textarget, texture, level),
+                        return
+                    );
+                    handle_potential_webgl_error!(
+                        self.base,
+                        fb.texture2d(constants::STENCIL_ATTACHMENT, textarget, texture, level)
+                    );
+                },
+                _ => handle_potential_webgl_error!(
+                    self.base,
+                    fb.texture2d(attachment, textarget, texture, level)
+                ),
+            },
             None => self.base.webgl_error(InvalidOperation),
         }
     }
@@ -7692,10 +7707,23 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         };
 
         match fb_slot.get() {
-            Some(fb) => handle_potential_webgl_error!(
-                self.base,
-                fb.texture_layer(attachment, texture, level, layer)
-            ),
+            Some(fb) => match attachment {
+                constants::DEPTH_STENCIL_ATTACHMENT => {
+                    handle_potential_webgl_error!(
+                        self.base,
+                        fb.texture_layer(constants::DEPTH_ATTACHMENT, texture, level, layer),
+                        return
+                    );
+                    handle_potential_webgl_error!(
+                        self.base,
+                        fb.texture_layer(constants::STENCIL_ATTACHMENT, texture, level, layer)
+                    );
+                },
+                _ => handle_potential_webgl_error!(
+                    self.base,
+                    fb.texture_layer(attachment, texture, level, layer)
+                ),
+            },
             None => self.base.webgl_error(InvalidOperation),
         }
     }
