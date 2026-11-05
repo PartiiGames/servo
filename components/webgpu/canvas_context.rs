@@ -197,6 +197,7 @@ impl StagingBuffer {
                     false
                 } else {
                     self.global.buffer_drop(self.buffer_id);
+                    self.state = StagingBufferState::Unassigned;
                     true
                 }
             },
@@ -214,6 +215,11 @@ impl StagingBuffer {
                 Some(self.buffer_id),
             );
             if let Some(error) = error {
+                // wgpu-core keeps a failed creation in the id's slot (as an invalid buffer).
+                // Empty the slot now: as `Unassigned` this buffer is never dropped, and once
+                // its id is freed and reused, the next creation would find the slot taken
+                // and panic the WGPU thread ("Cannot insert ..., found existing resource").
+                self.global.buffer_drop(self.buffer_id);
                 return Err(error);
             };
             self.state = StagingBufferState::Available(Buffer {
@@ -512,14 +518,13 @@ impl ContextData {
         script_sender: &GenericSender<WebGPUMsg>,
         paint_api: &CrossProcessPaintApi,
     ) {
-        // This frees the id in the `ScriptThread`.
+        // This frees the id in the `ScriptThread`. Drop the buffer first: once script has
+        // the id back it may reuse it at once, and wgpu-core's slot must be empty by then.
         for staging_buffer in self.inactive_staging_buffers {
-            if let Err(error) = script_sender.send(WebGPUMsg::FreeBuffer(staging_buffer.buffer_id))
-            {
-                warn!(
-                    "Unable to send FreeBuffer({:?}) ({error})",
-                    staging_buffer.buffer_id
-                );
+            let buffer_id = staging_buffer.buffer_id;
+            drop(staging_buffer);
+            if let Err(error) = script_sender.send(WebGPUMsg::FreeBuffer(buffer_id)) {
+                warn!("Unable to send FreeBuffer({buffer_id:?}) ({error})");
             };
         }
         if let Some(image_key) = self.image_key.take() {
