@@ -1627,7 +1627,17 @@ impl ScriptThread {
                     }
 
                     let prof_trace = crate::partii_frame_prof::trace()
-                        .then(|| (crate::partii_frame_prof::wall_ms(), Instant::now(), format!("{category:?}")));
+                        .then(|| {
+                            let name = match &msg {
+                                MixedMessage::FromScript(MainThreadScriptMsg::Common(CommonScriptMsg::Task(_, task, ..))) => {
+                                    let n = task.name();
+                                    let n = n.split('<').next().unwrap_or(n);
+                                    format!(":{}", n.rsplit("::").next().unwrap_or(n))
+                                },
+                                _ => String::new(),
+                            };
+                            (crate::partii_frame_prof::wall_ms(), Instant::now(), format!("{category:?}{name}"))
+                        });
                     let exiting = self.profile_event(category, pipeline_id, || {
                         match msg {
                             MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread) => {
