@@ -1334,6 +1334,11 @@ impl WebGLRenderingContext {
         }
 
         let current_program = self.current_program.get().ok_or(InvalidOperation)?;
+        // A failed relink invalidates the program in use (WebGL 1.0 5.14.9). Checked on every
+        // draw, cached or not (the LinkProgram also moves the draw-state generation on).
+        if !current_program.is_linked() {
+            return Err(InvalidOperation);
+        }
 
         let required_len = if count > 0 {
             first
@@ -1474,6 +1479,11 @@ impl WebGLRenderingContext {
         }
 
         let current_program = self.current_program.get().ok_or(InvalidOperation)?;
+        // A failed relink invalidates the program in use (WebGL 1.0 5.14.9). Checked on every
+        // draw, cached or not (the LinkProgram also moves the draw-state generation on).
+        if !current_program.is_linked() {
+            return Err(InvalidOperation);
+        }
         let array_buffer = match self.webgl_version() {
             WebGLVersion::WebGL1 => self.current_vao(cx).element_array_buffer().get(),
             WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).element_array_buffer().get(),
