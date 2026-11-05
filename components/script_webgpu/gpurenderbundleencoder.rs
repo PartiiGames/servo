@@ -59,6 +59,13 @@ pub struct GPURenderBundleEncoder<D: DomTypes> {
     reflector_: Reflector,
     device: Dom<D::GPUDevice>,
     label: DomRefCell<USVString>,
+    /// The bind groups, pipelines and buffers recorded so far. wgpu-core's bundle encoder
+    /// keeps only their ids and looks them up in `finish()`, so they must stay alive until
+    /// then: if one were collected first, its drop would empty the id's slot and `finish()`
+    /// would panic the WGPU thread ("Cannot get non-existent resource").
+    used_bind_groups: DomRefCell<Vec<Dom<D::GPUBindGroup>>>,
+    used_pipelines: DomRefCell<Vec<Dom<D::GPURenderPipeline>>>,
+    used_buffers: DomRefCell<Vec<Dom<D::GPUBuffer>>>,
     droppable: DroppableGPURenderBundleEncoder,
 }
 
@@ -98,6 +105,9 @@ where
                 render_bundle_encoder,
             },
             label: DomRefCell::new(label),
+            used_bind_groups: DomRefCell::new(Vec::new()),
+            used_pipelines: DomRefCell::new(Vec::new()),
+            used_buffers: DomRefCell::new(Vec::new()),
         }
     }
 
@@ -242,6 +252,9 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpuprogrammablepassencoder-setbindgroup>
     fn SetBindGroup(&self, index: u32, bind_group: &GPUBindGroup<D>, dynamic_offsets: Vec<u32>) {
+        self.used_bind_groups
+            .borrow_mut()
+            .push(Dom::from_ref(bind_group));
         if let Err(error) =
             self.droppable
                 .channel
@@ -267,6 +280,9 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpurenderencoderbase-setpipeline>
     fn SetPipeline(&self, pipeline: &GPURenderPipeline<D>) {
+        self.used_pipelines
+            .borrow_mut()
+            .push(Dom::from_ref(pipeline));
         if let Err(error) =
             self.droppable
                 .channel
@@ -294,6 +310,7 @@ where
         offset: u64,
         size: u64,
     ) {
+        self.used_buffers.borrow_mut().push(Dom::from_ref(buffer));
         if let Err(error) =
             self.droppable
                 .channel
@@ -320,6 +337,9 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpurenderencoderbase-setvertexbuffer>
     fn SetVertexBuffer(&self, slot: u32, buffer: Option<&GPUBuffer<D>>, offset: u64, size: u64) {
+        if let Some(buffer) = buffer {
+            self.used_buffers.borrow_mut().push(Dom::from_ref(buffer));
+        }
         if let Err(error) =
             self.droppable
                 .channel
@@ -406,6 +426,9 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpurenderencoderbase-drawindirect>
     fn DrawIndirect(&self, indirect_buffer: &GPUBuffer<D>, indirect_offset: u64) {
+        self.used_buffers
+            .borrow_mut()
+            .push(Dom::from_ref(indirect_buffer));
         if let Some(message) =
             indirect_args_error(indirect_offset, 16, indirect_buffer.Size())
         {
@@ -436,6 +459,9 @@ where
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpurenderencoderbase-drawindexedindirect>
     fn DrawIndexedIndirect(&self, indirect_buffer: &GPUBuffer<D>, indirect_offset: u64) {
+        self.used_buffers
+            .borrow_mut()
+            .push(Dom::from_ref(indirect_buffer));
         if let Some(message) =
             indirect_args_error(indirect_offset, 20, indirect_buffer.Size())
         {
@@ -557,6 +583,11 @@ where
                 self.id()
             );
         }
+
+        // The bundle holds its resources now (or is invalid): the encoder no longer needs to.
+        self.used_bind_groups.borrow_mut().clear();
+        self.used_pipelines.borrow_mut().clear();
+        self.used_buffers.borrow_mut().clear();
 
         let render_bundle = WebGPURenderBundle(render_bundle_id);
         GPURenderBundle::new(
