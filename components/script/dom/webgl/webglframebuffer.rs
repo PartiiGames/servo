@@ -474,9 +474,19 @@ impl WebGLFramebuffer {
                 use WebGLFramebufferAttachment::{Renderbuffer, Texture};
                 match (&*z, &*s) {
                     (Some(Renderbuffer(a)), Some(Renderbuffer(b))) => a.id() == b.id(),
-                    (Some(Texture { texture: a, .. }), Some(Texture { texture: b, .. })) => {
-                        a.id() == b.id()
-                    },
+                    // The same image: texture, level and layer / cube face.
+                    (
+                        Some(Texture {
+                            texture: a,
+                            level: level_a,
+                            face_or_layer: layer_a,
+                        }),
+                        Some(Texture {
+                            texture: b,
+                            level: level_b,
+                            face_or_layer: layer_b,
+                        }),
+                    ) => a.id() == b.id() && level_a == level_b && layer_a == layer_b,
                     _ => !has_z || !has_s,
                 }
             },
