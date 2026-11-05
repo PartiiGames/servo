@@ -322,10 +322,9 @@ where
                         .vertex
                         .buffers
                         .iter()
-                        // FIXME: webidl has `sequence<GPUVertexBufferLayout?> buffers`
-                        // but we get no option here so it must be eaten by codegen
+                        // `sequence<GPUVertexBufferLayout?>`: a hole is an unused slot.
                         .map(|buffer| {
-                            Some(VertexBufferLayout {
+                            buffer.as_ref().map(|buffer| VertexBufferLayout {
                                 array_stride: buffer.arrayStride,
                                 step_mode: match buffer.stepMode {
                                     GPUVertexStepMode::Vertex => VertexStepMode::Vertex,
@@ -357,7 +356,11 @@ where
                             stage
                                 .targets
                                 .iter()
+                                // `sequence<GPUColorTargetState?>`: a hole is an unused target.
                                 .map(|state| {
+                                    let Some(state) = state else {
+                                        return Ok(None);
+                                    };
                                     self.validate_texture_format_required_features(&state.format)
                                         .map(|format| {
                                             Some(ColorTargetState {

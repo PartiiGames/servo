@@ -249,7 +249,11 @@ where
         let color_attachments = descriptor
             .colorAttachments
             .iter()
+            // `sequence<GPURenderPassColorAttachment?>`: a hole is an unused attachment.
             .map(|color| -> Fallible<_> {
+                let Some(color) = color else {
+                    return Ok(None);
+                };
                 Ok(Some(RenderPassColorAttachment {
                     resolve_target: color
                         .resolveTarget
