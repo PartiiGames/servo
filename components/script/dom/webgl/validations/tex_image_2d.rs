@@ -186,9 +186,12 @@ impl WebGLValidator for CommonTexImage2DValidator<'_> {
             return Err(TexImageValidationError::TextureTooBig);
         }
 
-        // GL_INVALID_VALUE is generated if level is greater than zero and the
-        // texture is not power of two.
-        if level > 0 && (!width.is_power_of_two() || !height.is_power_of_two()) {
+        // WebGL 1: GL_INVALID_VALUE is generated if level is greater than zero and the
+        // texture is not power of two. WebGL 2 (GL ES 3.0) has mipmapped NPOT textures.
+        if self.context.webgl_version() == WebGLVersion::WebGL1 &&
+            level > 0 &&
+            (!width.is_power_of_two() || !height.is_power_of_two())
+        {
             self.context.webgl_error(InvalidValue);
             return Err(TexImageValidationError::NonPotTexture);
         }
