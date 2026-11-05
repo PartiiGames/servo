@@ -548,6 +548,14 @@ impl WebGLThread {
         // Creating a new GLContext may make the current bound context_id dirty.
         // Clear it to ensure that  make_current() is called in subsequent commands.
         self.bound_context_id = None;
+        // Partii (perf stream, diagnostic): PARTII_WEBGL_STATS=1 logs how long each step of context creation takes.
+        let mut stats = webgl_stats_enabled().then(|| (std::time::Instant::now(), Vec::<(&'static str, f64)>::new()));
+        let mark = |stats: &mut Option<(std::time::Instant, Vec<(&'static str, f64)>)>, step: &'static str| {
+            if let Some((t, steps)) = stats.as_mut() {
+                steps.push((step, t.elapsed().as_secs_f64() * 1000.0));
+                *t = std::time::Instant::now();
+            }
+        };
 
         // This can happen if the Webview was dropped while one of its ScriptThreads
         // is still issuing asynchronous commands to the WebGL thread.
@@ -579,6 +587,7 @@ impl WebGLThread {
         };
 
         let device = self.get_or_create_device_for_painter(painter_id)?;
+        mark(&mut stats, "device");
         let context_descriptor = device
             .create_context_descriptor(context_attributes)
             .map_err(|err| format!("Failed to create context descriptor: {:?}", err))?;
@@ -595,6 +604,7 @@ impl WebGLThread {
         let mut ctx = device
             .create_context(&context_descriptor, None)
             .map_err(|err| format!("Failed to create the GL context: {:?}", err))?;
+        mark(&mut stats, "create_context");
         let surface = device
             .create_surface(&ctx, surface_access, surface_type)
             .map_err(|err| format!("Failed to create the initial surface: {:?}", err))?;
@@ -605,6 +615,7 @@ impl WebGLThread {
         device
             .make_context_current(&ctx)
             .map_err(|err| format!("Failed to make new context current: {:?}", err))?;
+        mark(&mut stats, "surface+bind+current");
 
         let context_id = WebGLContextId(
             self.external_image_id_manager
@@ -615,6 +626,7 @@ impl WebGLThread {
         self.webrender_swap_chains
             .create_attached_swap_chain(context_id, &*device, &mut ctx, surface_access)
             .map_err(|err| format!("Failed to create swap chain: {:?}", err))?;
+        mark(&mut stats, "swap_chain");
 
         let Some(swap_chain) = self.webrender_swap_chains.get(context_id) else {
             return Err("Failed to get the swap chain".into());
@@ -637,7 +649,9 @@ impl WebGLThread {
             })
         };
 
+        mark(&mut stats, "gl_loader");
         let limits = GLLimits::detect(&gl, webgl_version);
+        mark(&mut stats, "limits");
 
         let size = clamp_viewport(&gl, requested_size);
         debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
@@ -718,6 +732,11 @@ impl WebGLThread {
 
         state.restore_invariant(&gl);
         debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
+        mark(&mut stats, "resize+clear+state");
+        if let Some((_, steps)) = &stats {
+            let line: Vec<String> = steps.iter().map(|(k, v)| format!("{k}={v:.2}")).collect();
+            eprintln!("partii-webgl-stats: create {webgl_version:?} {}x{} {}", size.width, size.height, line.join(" "));
+        }
 
         self.contexts.insert(
             context_id,
@@ -4000,4 +4019,10 @@ unsafe fn copy_tex_image_2d(
             )
         },
     }
+}
+
+/// Partii (perf stream): `PARTII_WEBGL_STATS` set logs WebGL context creation timing to stderr.
+fn webgl_stats_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PARTII_WEBGL_STATS").is_some())
 }
