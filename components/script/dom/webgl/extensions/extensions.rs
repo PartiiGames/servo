@@ -490,6 +490,12 @@ impl WebGLExtensions {
         }
     }
 
+    /// WebGL 1: EXT_color_buffer_half_float and WEBGL_color_buffer_float add
+    /// FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT to getFramebufferAttachmentParameter.
+    pub(crate) fn is_attachment_component_type_query_enabled(&self) -> bool {
+        self.is_enabled::<EXTColorBufferHalfFloat>() || self.is_enabled::<WEBGLColorBufferFloat>()
+    }
+
     pub(crate) fn is_parallel_shader_compile_enabled(&self) -> bool {
         self.is_enabled::<KHRParallelShaderCompile>()
     }

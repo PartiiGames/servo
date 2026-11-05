@@ -3652,6 +3652,12 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             constants::STENCIL_ATTACHMENT => true,
             _ => false,
         };
+        // FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT (EXT_color_buffer_half_float,
+        // WEBGL_color_buffer_float).
+        const COMPONENT_TYPE: u32 = 0x8211;
+        let component_type_query = pname == COMPONENT_TYPE &&
+            self.extension_manager
+                .is_attachment_component_type_query_enabled();
         let pname_matches = match pname {
             // constants::FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE |
             // constants::FRAMEBUFFER_ATTACHMENT_BLUE_SIZE |
@@ -3666,7 +3672,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             constants::FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE |
             constants::FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE |
             constants::FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL => true,
-            _ => false,
+            _ => component_type_query,
         };
 
         let bound_attachment_matches = match self
@@ -3676,21 +3682,36 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             .attachment(attachment)
         {
             Some(attachment_root) => match attachment_root {
-                WebGLFramebufferAttachmentRoot::Renderbuffer(_) => matches!(
-                    pname,
-                    constants::FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE |
-                        constants::FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
-                ),
-                WebGLFramebufferAttachmentRoot::Texture(_) => matches!(
-                    pname,
-                    constants::FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE |
-                        constants::FRAMEBUFFER_ATTACHMENT_OBJECT_NAME |
-                        constants::FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL |
-                        constants::FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE
-                ),
+                WebGLFramebufferAttachmentRoot::Renderbuffer(_) => {
+                    component_type_query ||
+                        matches!(
+                            pname,
+                            constants::FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE |
+                                constants::FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+                        )
+                },
+                WebGLFramebufferAttachmentRoot::Texture(_) => {
+                    component_type_query ||
+                        matches!(
+                            pname,
+                            constants::FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE |
+                                constants::FRAMEBUFFER_ATTACHMENT_OBJECT_NAME |
+                                constants::FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL |
+                                constants::FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE
+                        )
+                },
             },
             _ => matches!(pname, constants::FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE),
         };
+
+        // A depth-stencil image has two component types (ES 3.0 6.1.13).
+        if target_matches &&
+            component_type_query &&
+            attachment == constants::DEPTH_STENCIL_ATTACHMENT
+        {
+            self.webgl_error(InvalidOperation);
+            return retval.set(NullValue());
+        }
 
         if !target_matches || !attachment_matches || !pname_matches || !bound_attachment_matches {
             self.webgl_error(InvalidEnum);
