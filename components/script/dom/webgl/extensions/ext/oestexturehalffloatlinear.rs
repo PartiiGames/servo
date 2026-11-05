@@ -5,6 +5,7 @@
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use servo_canvas_traits::webgl::WebGLVersion;
 
 use super::{WebGLExtension, WebGLExtensionSpec, WebGLExtensions};
 use crate::dom::bindings::codegen::Bindings::OESTextureHalfFloatBinding::OESTextureHalfFloatConstants;
@@ -32,7 +33,8 @@ impl WebGLExtension for OESTextureHalfFloatLinear {
     }
 
     fn spec() -> WebGLExtensionSpec {
-        WebGLExtensionSpec::All
+        // Promoted to core in WebGL 2 (half-float textures are always filterable there).
+        WebGLExtensionSpec::Specific(WebGLVersion::WebGL1)
     }
 
     fn is_supported(ext: &WebGLExtensions) -> bool {
