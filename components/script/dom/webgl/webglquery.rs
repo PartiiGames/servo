@@ -110,6 +110,9 @@ impl WebGLQuery {
             _ => return Err(InvalidEnum),
         }
         self.gl_target.set(Some(target));
+        // A new query: the last one's result (and its availability) no longer applies. Without
+        // this a reused query object kept reporting its first result as available forever.
+        self.query_result_available.set(None);
 
         context.send_command(WebGLCommand::BeginQuery(target, self.droppable.gl_id));
         Ok(())
