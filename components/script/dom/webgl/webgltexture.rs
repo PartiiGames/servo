@@ -117,7 +117,6 @@ pub(crate) struct WebGLTexture {
     image_info_array: DomRefCell<[Option<ImageInfo>; MAX_LEVEL_COUNT * MAX_FACE_COUNT]>,
     /// Face count can only be 1 or 6
     face_count: Cell<u8>,
-    base_mipmap_level: u32,
     // Store information for min and mag filters
     min_filter: Cell<u32>,
     mag_filter: Cell<u32>,
@@ -147,7 +146,6 @@ impl WebGLTexture {
             base_level: Cell::new(0),
             max_level: Cell::new(1000),
             face_count: Cell::new(0),
-            base_mipmap_level: 0,
             min_filter: Cell::new(constants::NEAREST_MIPMAP_LINEAR),
             mag_filter: Cell::new(constants::LINEAR),
             image_info_array: DomRefCell::new([None; MAX_LEVEL_COUNT * MAX_FACE_COUNT]),
@@ -324,12 +322,15 @@ impl WebGLTexture {
         self.upcast()
             .send_command(WebGLCommand::GenerateMipmap(target));
 
-        if self.base_mipmap_level + base_image_info.get_max_mimap_levels() == 0 {
+        let base = self.effective_base_level();
+        if base + base_image_info.get_max_mimap_levels() == 0 {
             return Err(WebGLError::InvalidOperation);
         }
 
-        let last_level = self.base_mipmap_level + base_image_info.get_max_mimap_levels() - 1;
-        self.populate_mip_chain(self.base_mipmap_level, last_level)
+        // GL ES 3.0 3.8.11: levels level_base + 1 to q, so no further than TEXTURE_MAX_LEVEL.
+        let last_level =
+            (base + base_image_info.get_max_mimap_levels() - 1).min(self.max_level.get().max(base));
+        self.populate_mip_chain(base, last_level)
     }
 
     pub(crate) fn delete(&self, operation_fallibility: Operation) {
@@ -643,10 +644,11 @@ impl WebGLTexture {
         let ref_format = image_info.internal_format;
 
         for face in 0..self.face_count.get() {
-            let current_image_info = match self.image_info_at_face(face, self.base_mipmap_level) {
-                Some(info) => info,
-                None => return false,
-            };
+            let current_image_info =
+                match self.image_info_at_face(face, self.effective_base_level()) {
+                    Some(info) => info,
+                    None => return false,
+                };
 
             // Compares height with width to enforce square dimensions
             if current_image_info.internal_format != ref_format ||
@@ -681,9 +683,17 @@ impl WebGLTexture {
         self.image_info_at_face(face_index, level)
     }
 
+    /// The image at `level` of `face`; None when undefined or out of range (TEXTURE_BASE_LEVEL
+    /// and TEXTURE_MAX_LEVEL may name any level).
     pub(crate) fn image_info_at_face(&self, face: u8, level: u32) -> Option<ImageInfo> {
-        let pos = (level * self.face_count.get() as u32) + face as u32;
-        self.image_info_array.borrow()[pos as usize]
+        let pos = level
+            .checked_mul(self.face_count.get() as u32)?
+            .checked_add(face as u32)?;
+        self.image_info_array
+            .borrow()
+            .get(pos as usize)
+            .copied()
+            .flatten()
     }
 
     fn set_image_infos_at_level(&self, level: u32, image_info: ImageInfo) {
@@ -709,10 +719,22 @@ impl WebGLTexture {
         self.reflector().update_memory_size(self, size);
     }
 
-    fn base_image_info(&self) -> Option<ImageInfo> {
-        assert!((self.base_mipmap_level as usize) < MAX_LEVEL_COUNT);
+    /// TEXTURE_BASE_LEVEL (always 0 in WebGL 1), clamped to an immutable texture's last level
+    /// (GL ES 3.0 3.8.10).
+    fn effective_base_level(&self) -> u32 {
+        let base = self.base_level.get();
+        match self.immutable_levels.get() {
+            Some(levels) => base.min(levels.saturating_sub(1)),
+            None => base,
+        }
+    }
 
-        self.image_info_at_face(0, self.base_mipmap_level)
+    fn base_image_info(&self) -> Option<ImageInfo> {
+        let base = self.effective_base_level();
+        if base as usize >= MAX_LEVEL_COUNT {
+            return None;
+        }
+        self.image_info_at_face(0, base)
     }
 
     pub(crate) fn attach_to_framebuffer(&self, fb: &WebGLFramebuffer) {
