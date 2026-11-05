@@ -170,6 +170,17 @@ impl<Listener: FetchResponseListener> NetworkListener<Listener> {
                     return;
                 }
 
+                // Partii (perf, measurement builds): PARTII_FRAME_PROF=trace names slow fetch listeners.
+                let prof = crate::partii_frame_prof::trace().then(|| {
+                    let what = match &message {
+                        FetchResponseMsg::ProcessResponse(..) => "response",
+                        FetchResponseMsg::ProcessResponseChunk(_, data) => if data.len() > 65536 { "chunk-big" } else { "chunk" },
+                        FetchResponseMsg::ProcessResponseEOF(..) => "eof",
+                        _ => "other",
+                    };
+                    (crate::partii_frame_prof::wall_ms(), std::time::Instant::now(), what)
+                });
+                let _prof_guard = ProfGuard(prof, std::any::type_name::<Listener>());
                 match message {
                     FetchResponseMsg::ProcessRequestBody(request_id) => {
                         fetch_listener.process_request_body(request_id)
@@ -195,5 +206,17 @@ impl<Listener: FetchResponseListener> NetworkListener<Listener> {
 
     pub(crate) fn into_callback(mut self) -> BoxedFetchCallback {
         Box::new(move |response_msg| self.notify(response_msg))
+    }
+}
+
+/// Partii (perf, measurement builds): logs a fetch listener call of 8 ms or more on drop.
+struct ProfGuard(Option<(f64, std::time::Instant, &'static str)>, &'static str);
+
+impl Drop for ProfGuard {
+    fn drop(&mut self) {
+        if let Some((wall, start, what)) = self.0 {
+            let name = self.1.rsplit("::").next().unwrap_or(self.1);
+            crate::partii_frame_prof::trace_span(&format!("fetch:{name}:{what}"), wall, start.elapsed());
+        }
     }
 }
