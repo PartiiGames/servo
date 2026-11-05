@@ -162,8 +162,33 @@ struct DroppableWebGLRenderingContext {
 
 impl Drop for DroppableWebGLRenderingContext {
     fn drop(&mut self) {
+        LIVE_CONTEXTS.with(|live| live.set(live.get().saturating_sub(1)));
         let _ = self.webgl_sender.send_remove();
     }
+}
+
+/// Live WebGL contexts made by this script thread, and the count at which the next context
+/// creation collects garbage first. A context is a whole GL context in the WebGL thread (on
+/// llvmpipe, megabytes each) but reports only its drawing buffer to the GC, so a page that makes
+/// many small throwaway canvases (the WebGPU CTS copy_contents_from_gl_context_canvas: thousands)
+/// never triggers a GC and holds them all: ~25 GB in a minute. Browsers bound this by losing the
+/// oldest context; until context loss exists here, a GC past the threshold frees the unreachable
+/// ones (foreground finalizers send RemoveContext at once). The threshold doubles over the
+/// contexts still live after it, so a page that really keeps many pays one GC per doubling.
+const MIN_CONTEXTS_BEFORE_GC: usize = 16;
+thread_local! {
+    static LIVE_CONTEXTS: Cell<usize> = const { Cell::new(0) };
+    static NEXT_GC_AT: Cell<usize> = const { Cell::new(MIN_CONTEXTS_BEFORE_GC) };
+}
+
+#[expect(unsafe_code)]
+fn collect_dead_contexts_if_many(cx: &mut JSContext) {
+    if LIVE_CONTEXTS.with(Cell::get) < NEXT_GC_AT.with(Cell::get) {
+        return;
+    }
+    unsafe { js::rust::wrappers2::JS_GC(cx, js::jsapi::GCReason::API) };
+    let live = LIVE_CONTEXTS.with(Cell::get);
+    NEXT_GC_AT.with(|next| next.set((live * 2).max(MIN_CONTEXTS_BEFORE_GC)));
 }
 
 #[dom_struct]
@@ -292,7 +317,10 @@ impl WebGLRenderingContext {
                 textures: Textures::new(max_combined_texture_image_units),
                 api_type: ctx_data.api_type,
                 droppable: DroppableWebGLRenderingContext {
-                    webgl_sender: ctx_data.sender,
+                    webgl_sender: {
+                        LIVE_CONTEXTS.with(|live| live.set(live.get() + 1));
+                        ctx_data.sender
+                    },
                 },
             }
         })
@@ -307,6 +335,7 @@ impl WebGLRenderingContext {
         size: Size2D<u32>,
         attrs: GLContextAttributes,
     ) -> Option<DomRoot<WebGLRenderingContext>> {
+        collect_dead_contexts_if_many(cx);
         match WebGLRenderingContext::new_inherited(
             global,
             HTMLCanvasElementOrOffscreenCanvas::from(canvas),
