@@ -2969,6 +2969,11 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn BlendColor(&self, r: f32, g: f32, b: f32, a: f32) {
+        // WebGL 1 clamps the blend colour to [0, 1] unless a float colour buffer extension is
+        // enabled (WEBGL_color_buffer_float, EXT_color_buffer_half_float); desktop GL doesn't.
+        let clamp = self.webgl_version() == WebGLVersion::WebGL1 &&
+            !self.extension_manager.is_blend_color_unclamped();
+        let [r, g, b, a] = [r, g, b, a].map(|v| if clamp { v.clamp(0., 1.) } else { v });
         self.send_command(WebGLCommand::BlendColor(r, g, b, a));
     }
 
