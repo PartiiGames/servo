@@ -107,6 +107,30 @@ fn has_invalid_blend_constants(arg1: u32, arg2: u32) -> bool {
     }
 }
 
+/// Whether `factor` is a blend factor of core WebGL (the SRC1_* ones need
+/// WEBGL_blend_func_extended, which isn't exposed). SRC_ALPHA_SATURATE is a source factor only,
+/// except in WebGL 2 (ES 3.0).
+fn is_blend_factor(factor: u32, is_dest: bool, webgl2: bool) -> bool {
+    match factor {
+        constants::ZERO |
+        constants::ONE |
+        constants::SRC_COLOR |
+        constants::ONE_MINUS_SRC_COLOR |
+        constants::DST_COLOR |
+        constants::ONE_MINUS_DST_COLOR |
+        constants::SRC_ALPHA |
+        constants::ONE_MINUS_SRC_ALPHA |
+        constants::DST_ALPHA |
+        constants::ONE_MINUS_DST_ALPHA |
+        constants::CONSTANT_COLOR |
+        constants::ONE_MINUS_CONSTANT_COLOR |
+        constants::CONSTANT_ALPHA |
+        constants::ONE_MINUS_CONSTANT_ALPHA => true,
+        constants::SRC_ALPHA_SATURATE => !is_dest || webgl2,
+        _ => false,
+    }
+}
+
 pub(crate) fn uniform_get<T, F>(triple: (&WebGLRenderingContext, WebGLProgramId, i32), f: F) -> T
 where
     F: FnOnce(WebGLProgramId, i32, generic_channel::GenericSender<T>) -> WebGLCommand,
@@ -2971,6 +2995,12 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         //     A call to blendFunc will generate an INVALID_OPERATION error if one of the two
         //     factors is set to CONSTANT_COLOR or ONE_MINUS_CONSTANT_COLOR and the other to
         //     CONSTANT_ALPHA or ONE_MINUS_CONSTANT_ALPHA.
+        let webgl2 = self.webgl_version() == WebGLVersion::WebGL2;
+        if !is_blend_factor(src_factor, false, webgl2) ||
+            !is_blend_factor(dest_factor, true, webgl2)
+        {
+            return self.webgl_error(InvalidEnum);
+        }
         if has_invalid_blend_constants(src_factor, dest_factor) {
             return self.webgl_error(InvalidOperation);
         }
@@ -2988,6 +3018,14 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         //     A call to blendFuncSeparate will generate an INVALID_OPERATION error if srcRGB is
         //     set to CONSTANT_COLOR or ONE_MINUS_CONSTANT_COLOR and dstRGB is set to
         //     CONSTANT_ALPHA or ONE_MINUS_CONSTANT_ALPHA or vice versa.
+        let webgl2 = self.webgl_version() == WebGLVersion::WebGL2;
+        if !is_blend_factor(src_rgb, false, webgl2) ||
+            !is_blend_factor(dest_rgb, true, webgl2) ||
+            !is_blend_factor(src_alpha, false, webgl2) ||
+            !is_blend_factor(dest_alpha, true, webgl2)
+        {
+            return self.webgl_error(InvalidEnum);
+        }
         if has_invalid_blend_constants(src_rgb, dest_rgb) {
             return self.webgl_error(InvalidOperation);
         }
