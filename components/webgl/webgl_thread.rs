@@ -1583,6 +1583,9 @@ impl WebGLImpl {
                                 gl.create_renderbuffer().map(|n| n.0.get())
                             },
                             WebGLObjectNameKind::Texture => gl.create_texture().map(|n| n.0.get()),
+                            WebGLObjectNameKind::VertexArray => {
+                                gl.create_vertex_array().map(|n| n.0.get())
+                            },
                         }
                     };
                     match name {

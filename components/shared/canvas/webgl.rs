@@ -294,6 +294,7 @@ pub enum WebGLObjectNameKind {
     Framebuffer,
     Renderbuffer,
     Texture,
+    VertexArray,
 }
 
 /// WebGL Commands for a specific WebGLContext

@@ -31,7 +31,8 @@ use servo_canvas_traits::webgl::{
     AlphaTreatment, CompressedTexData, GLContextAttributes, GLLimits, GlType, Parameter,
     SizedDataType, TexDataType, TexFormat, TexParameter, WebGLCommand, WebGLCommandBacktrace,
     WebGLContextId, WebGLError, WebGLFramebufferBindingRequest, WebGLMsg, WebGLMsgSender,
-    WebGLObjectNameKind, WebGLProgramId, WebGLResult, WebGLVersion, YAxisTreatment,
+    WebGLObjectNameKind, WebGLProgramId, WebGLResult, WebGLVersion, WebGLVertexArrayId,
+    YAxisTreatment,
     webgl_channel,
 };
 use servo_config::pref;
@@ -1614,24 +1615,35 @@ impl WebGLRenderingContext {
         &self,
         cx: &mut JSContext,
     ) -> Option<DomRoot<WebGLVertexArrayObjectOES>> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        self.send_command(WebGLCommand::CreateVertexArray(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLVertexArrayObjectOES::new(cx, self, Some(id)))
+        // Partii (perf): a pooled name, as createTexture takes (take_object_name), rather than a
+        // round trip to the WebGL thread per createVertexArray.
+        if !vao_pool_enabled() {
+            let (sender, receiver) = webgl_channel().unwrap();
+            self.send_command(WebGLCommand::CreateVertexArray(sender));
+            return receiver
+                .recv()
+                .unwrap()
+                .map(|id| WebGLVertexArrayObjectOES::new(cx, self, Some(id)));
+        }
+        let id = WebGLVertexArrayId::new(self.take_object_name(WebGLObjectNameKind::VertexArray)?);
+        Some(WebGLVertexArrayObjectOES::new(cx, self, Some(id)))
     }
 
     pub(crate) fn create_vertex_array_webgl2(
         &self,
         cx: &mut JSContext,
     ) -> Option<DomRoot<WebGLVertexArrayObject>> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        self.send_command(WebGLCommand::CreateVertexArray(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLVertexArrayObject::new(cx, self, Some(id)))
+        // Partii (perf): a pooled name, as in create_vertex_array.
+        if !vao_pool_enabled() {
+            let (sender, receiver) = webgl_channel().unwrap();
+            self.send_command(WebGLCommand::CreateVertexArray(sender));
+            return receiver
+                .recv()
+                .unwrap()
+                .map(|id| WebGLVertexArrayObject::new(cx, self, Some(id)));
+        }
+        let id = WebGLVertexArrayId::new(self.take_object_name(WebGLObjectNameKind::VertexArray)?);
+        Some(WebGLVertexArrayObject::new(cx, self, Some(id)))
     }
 
     pub(crate) fn delete_vertex_array(
@@ -6185,6 +6197,13 @@ fn tex_unit_cache_enabled() -> bool {
     *ENABLED.get_or_init(|| !matches!(std::env::var("PARTII_WEBGL_TEX_UNIT_CACHE").as_deref(), Ok("0")))
 }
 
+/// Partii (perf): PARTII_WEBGL_VAO_POOL=0 creates each vertex array by a round trip (CreateVertexArray)
+/// rather than from the pooled names (for A/B measurements).
+fn vao_pool_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| !matches!(std::env::var("PARTII_WEBGL_VAO_POOL").as_deref(), Ok("0")))
+}
+
 /// Partii (perf): names reserved per object kind (WebGLRenderingContext::take_object_name): 128, or
 /// PARTII_WEBGL_NAME_BATCH (1 = a round trip per create, as before; for A/B measurements).
 fn object_name_batch() -> u32 {
@@ -6206,7 +6225,7 @@ pub(crate) struct ObjectNamePool {
 
 /// One pool per WebGLObjectNameKind.
 #[derive(Default)]
-pub(crate) struct ObjectNamePools([ObjectNamePool; 4]);
+pub(crate) struct ObjectNamePools([ObjectNamePool; 5]);
 
 // Names and a channel: no GC things.
 #[expect(unsafe_code)]
