@@ -3744,19 +3744,6 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return retval.set(NullValue());
         }
 
-        // A float or half-float texture (OES_texture_(half_)float) has FLOAT components, which
-        // the GL query doesn't always report for WebGL 1's unsized formats.
-        if component_type_query && attachment == constants::COLOR_ATTACHMENT0 {
-            let fb = self.bound_draw_framebuffer.get().unwrap();
-            if matches!(
-                fb.attachment(attachment),
-                Some(WebGLFramebufferAttachmentRoot::Texture(_))
-            ) && fb.color_attachment_is_float()
-            {
-                return retval.set(Int32Value(constants::FLOAT as i32));
-            }
-        }
-
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::GetFramebufferAttachmentParameter(
             target, attachment, pname, sender,
