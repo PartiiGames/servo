@@ -287,6 +287,15 @@ impl<T> Deref for TruncatedDebug<T> {
     }
 }
 
+/// Partii (perf): the WebGL objects whose names the script thread reserves in batches (GenObjectNames).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WebGLObjectNameKind {
+    Buffer,
+    Framebuffer,
+    Renderbuffer,
+    Texture,
+}
+
 /// WebGL Commands for a specific WebGLContext
 #[derive(Debug, Deserialize, Serialize)]
 pub enum WebGLCommand {
@@ -334,6 +343,9 @@ pub enum WebGLCommand {
     CreateFramebuffer(GenericSender<Option<WebGLFramebufferId>>),
     CreateRenderbuffer(GenericSender<Option<WebGLRenderbufferId>>),
     CreateTexture(GenericSender<Option<WebGLTextureId>>),
+    /// Partii (perf): reserve `count` object names of a kind (glGen*, as the Create* commands do) for the
+    /// script thread to hand out without a round trip each (WebGLRenderingContext::take_object_name).
+    GenObjectNames(WebGLObjectNameKind, u32, GenericSender<Vec<u32>>),
     CreateProgram(GenericSender<Option<WebGLProgramId>>),
     CreateShader(u32, GenericSender<Option<WebGLShaderId>>),
     DeleteBuffer(WebGLBufferId),

@@ -14,7 +14,7 @@ use script_bindings::reflector::{DomObject as _, reflect_dom_object};
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     TexDataType, TexFormat, TexParameter, TexParameterBool, TexParameterInt, WebGLCommand,
-    WebGLError, WebGLResult, WebGLTextureId, WebGLVersion, webgl_channel,
+    WebGLError, WebGLObjectNameKind, WebGLResult, WebGLTextureId, WebGLVersion,
 };
 
 use crate::dom::bindings::codegen::Bindings::EXTTextureFilterAnisotropicBinding::EXTTextureFilterAnisotropicConstants;
@@ -170,12 +170,8 @@ impl WebGLTexture {
         cx: &mut JSContext,
         context: &WebGLRenderingContext,
     ) -> Option<DomRoot<Self>> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        context.send_command(WebGLCommand::CreateTexture(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLTexture::new(cx, context, id))
+        let id = context.take_object_name(WebGLObjectNameKind::Texture)?;
+        Some(WebGLTexture::new(cx, context, WebGLTextureId::new(id)))
     }
 
     pub(crate) fn new(

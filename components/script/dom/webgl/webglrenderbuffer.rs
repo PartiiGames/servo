@@ -10,8 +10,8 @@ use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
-    GlType, InternalFormatIntVec, WebGLCommand, WebGLError, WebGLRenderbufferId, WebGLResult,
-    WebGLVersion, webgl_channel,
+    GlType, InternalFormatIntVec, WebGLCommand, WebGLError, WebGLObjectNameKind,
+    WebGLRenderbufferId, WebGLResult, WebGLVersion, webgl_channel,
 };
 
 use crate::dom::bindings::codegen::Bindings::EXTColorBufferHalfFloatBinding::EXTColorBufferHalfFloatConstants;
@@ -114,12 +114,8 @@ impl WebGLRenderbuffer {
         cx: &mut JSContext,
         context: &WebGLRenderingContext,
     ) -> Option<DomRoot<Self>> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        context.send_command(WebGLCommand::CreateRenderbuffer(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLRenderbuffer::new(cx, context, id))
+        let id = context.take_object_name(WebGLObjectNameKind::Renderbuffer)?;
+        Some(WebGLRenderbuffer::new(cx, context, WebGLRenderbufferId::new(id)))
     }
 
     pub(crate) fn new(

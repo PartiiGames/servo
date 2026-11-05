@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::{cmp, ptr};
 
@@ -13,7 +14,7 @@ use dom_struct::dom_struct;
 use euclid::default::{Point2D, Rect, Size2D};
 use js::context::{JSContext, NoGC};
 use js::conversions::ToJSValConvertible;
-use js::jsapi::{JSObject, Type};
+use js::jsapi::{JSObject, JSTracer, Type};
 use js::jsval::{BooleanValue, DoubleValue, Int32Value, NullValue, ObjectValue, UInt32Value};
 use js::rust::{CustomAutoRooterGuard, MutableHandleObject, MutableHandleValue};
 use js::typedarray::{ArrayBufferView, Float32, Int32, TypedArrayElementCreator, Uint32};
@@ -23,14 +24,15 @@ use script_bindings::reflector::{
     AssociatedMemory, Reflector, reflect_weak_referenceable_dom_object,
 };
 use serde::{Deserialize, Serialize};
-use servo_base::generic_channel::GenericSharedMemory;
+use servo_base::generic_channel::{GenericReceiver, GenericSharedMemory};
 use servo_base::{Epoch, generic_channel};
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{
     AlphaTreatment, CompressedTexData, GLContextAttributes, GLLimits, GlType, Parameter,
     SizedDataType, TexDataType, TexFormat, TexParameter, WebGLCommand, WebGLCommandBacktrace,
     WebGLContextId, WebGLError, WebGLFramebufferBindingRequest, WebGLMsg, WebGLMsgSender,
-    WebGLProgramId, WebGLResult, WebGLSLVersion, WebGLVersion, YAxisTreatment, webgl_channel,
+    WebGLObjectNameKind, WebGLProgramId, WebGLResult, WebGLSLVersion, WebGLVersion, YAxisTreatment,
+    webgl_channel,
 };
 use servo_config::pref;
 use webrender_api::ImageKey;
@@ -62,6 +64,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomOnceCell, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::NodeTraits;
@@ -194,6 +197,10 @@ pub(crate) struct WebGLRenderingContext {
     current_clear_color: Cell<(f32, f32, f32, f32)>,
     #[no_trace]
     size: Cell<Size2D<u32>>,
+    /// Partii (perf): object names reserved on the WebGL thread, handed out by create{Buffer, Framebuffer,
+    /// Renderbuffer, Texture} without a round trip each (take_object_name).
+    #[ignore_malloc_size_of = "Channels and a few names"]
+    object_names: DomRefCell<ObjectNamePools>,
     extension_manager: WebGLExtensions,
     capabilities: Capabilities,
     default_vao: DomOnceCell<WebGLVertexArrayObjectOES>,
@@ -271,6 +278,7 @@ impl WebGLRenderingContext {
                     ctx_data.api_type,
                     ctx_data.glsl_version,
                 ),
+                object_names: Default::default(),
                 capabilities: Default::default(),
                 default_vao: Default::default(),
                 current_vao: Default::default(),
@@ -423,6 +431,33 @@ impl WebGLRenderingContext {
     }
 
     #[inline]
+    /// Partii (perf): a new object name of `kind` from the reserved batch. createTexture and friends used to
+    /// wait for a reply from the WebGL thread each, behind everything queued before them (Phaser's boot: ~200
+    /// such waits). Names come in batches of OBJECT_NAME_BATCH (the same glGen* calls), the next batch asked
+    /// for when half the current one is used, so a create waits only when a whole batch went in between.
+    /// None when the WebGL thread has none to give (as the Create* commands answer None).
+    pub(crate) fn take_object_name(&self, kind: WebGLObjectNameKind) -> Option<NonZeroU32> {
+        let mut pools = self.object_names.borrow_mut();
+        let pool = &mut pools.0[kind as usize];
+        if pool.names.is_empty() {
+            match pool.pending.take() {
+                Some(receiver) => pool.names.extend(receiver.recv().unwrap_or_default()),
+                None => {
+                    let (sender, receiver) = webgl_channel().unwrap();
+                    self.send_command(WebGLCommand::GenObjectNames(kind, OBJECT_NAME_BATCH, sender));
+                    pool.names.extend(receiver.recv().unwrap_or_default());
+                },
+            }
+        }
+        let name = pool.names.pop_front().and_then(NonZeroU32::new)?;
+        if pool.names.len() < OBJECT_NAME_BATCH as usize / 2 && pool.pending.is_none() {
+            let (sender, receiver) = webgl_channel().unwrap();
+            self.send_command(WebGLCommand::GenObjectNames(kind, OBJECT_NAME_BATCH, sender));
+            pool.pending = Some(receiver);
+        }
+        Some(name)
+    }
+
     pub(crate) fn send_command(&self, command: WebGLCommand) {
         self.send_with_fallibility(command, Operation::Infallible);
     }
@@ -5686,4 +5721,23 @@ pub(crate) fn clip_copy_to_read_framebuffer(
         (x1 - x0 as i64) as i32,
         (y1 - y0 as i64) as i32,
     ))
+}
+
+/// Partii (perf): names reserved per object kind (WebGLRenderingContext::take_object_name).
+const OBJECT_NAME_BATCH: u32 = 128;
+
+#[derive(Default)]
+pub(crate) struct ObjectNamePool {
+    names: std::collections::VecDeque<u32>,
+    pending: Option<GenericReceiver<Vec<u32>>>,
+}
+
+/// One pool per WebGLObjectNameKind.
+#[derive(Default)]
+pub(crate) struct ObjectNamePools([ObjectNamePool; 4]);
+
+// Names and a channel: no GC things.
+#[expect(unsafe_code)]
+unsafe impl JSTraceable for ObjectNamePools {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {}
 }
