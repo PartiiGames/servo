@@ -85,7 +85,7 @@ use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglbuffer::WebGLBuffer;
 use crate::dom::webgl::webglcontextevent::WebGLContextEvent;
 use crate::dom::webgl::webglframebuffer::{
-    CompleteForRendering, WebGLFramebuffer, WebGLFramebufferAttachmentRoot,
+    AttachedImage, CompleteForRendering, WebGLFramebuffer, WebGLFramebufferAttachmentRoot,
 };
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglprogram::WebGLProgram;
@@ -689,6 +689,48 @@ impl WebGLRenderingContext {
         Ok(())
     }
 
+    /// WebGL 1.0 6.26: a draw that samples a texture level the draw framebuffer renders into (at
+    /// any attachment, whatever drawBuffers says) is a feedback loop. WebGL 2 checks this with
+    /// the sampler types (validate_sampler_types_for_draw). A draw-state check: texture
+    /// bindings, sampler units, filters and attachments change by commands off the allowlist.
+    fn validate_feedback_loops_webgl1(&self) -> WebGLResult<()> {
+        if self.webgl_version() != WebGLVersion::WebGL1 {
+            return Ok(());
+        }
+        let (Some(framebuffer), Some(program)) =
+            (self.bound_draw_framebuffer.get(), self.current_program())
+        else {
+            return Ok(());
+        };
+        for uniform in program.active_uniforms().iter() {
+            let target = match uniform.type_ {
+                constants::SAMPLER_2D => constants::TEXTURE_2D,
+                constants::SAMPLER_CUBE => constants::TEXTURE_CUBE_MAP,
+                _ => continue,
+            };
+            let Some(location) = uniform.location else {
+                continue;
+            };
+            for element in 0..uniform.size.unwrap_or(1).max(1) {
+                let unit = program.sampler_unit(location + element);
+                let Some(texture) = self.textures.texture_at(unit, target) else {
+                    continue;
+                };
+                let Some((first, last)) = texture.sampled_levels() else {
+                    continue;
+                };
+                if framebuffer
+                    .texture_attachment_levels(&texture)
+                    .into_iter()
+                    .any(|level| level >= 0 && (first..=last).contains(&(level as u32)))
+                {
+                    return Err(InvalidOperation);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Applies a stencil func/mask command to the tracked front/back state. The commands stay on
     /// the DrawStateGen allowlist (games change them every few draws); the generation moves only
     /// when the front/back agreement that validate_stencil_for_draw reads changes.
@@ -790,6 +832,21 @@ impl WebGLRenderingContext {
         self.current_vertex_attribs.borrow_mut()[indx as usize] = VertexAttrib::Float(x, y, z, w);
 
         self.send_command(WebGLCommand::VertexAttrib(indx, x, y, z, w));
+    }
+
+    /// Whether a copy into `texture`'s image at `target` and `level` would read that image (the
+    /// read framebuffer's read buffer): a feedback loop, INVALID_OPERATION (WebGL 1.0 6.26,
+    /// GL ES 3.0 4.4.3).
+    fn copy_reads_image(&self, texture: &WebGLTexture, target: TexImageTarget, level: u32) -> bool {
+        let Some(fb) = self.bound_read_framebuffer.get() else {
+            return false;
+        };
+        let face = match target {
+            TexImageTarget::Texture2D => 0,
+            target => target.as_gl_constant() as i32,
+        };
+        fb.attached_image(fb.read_buffer()) ==
+            Some(AttachedImage::Texture(texture.id(), level as i32, face))
     }
 
     /// The size of the framebuffer copies and readPixels read from.
@@ -1444,6 +1501,7 @@ impl WebGLRenderingContext {
         if !cached {
             self.validate_framebuffer()?;
             self.validate_stencil_for_draw()?;
+            self.validate_feedback_loops_webgl1()?;
             self.mark_draw_state_valid(cx, &current_program);
         }
 
@@ -1587,6 +1645,7 @@ impl WebGLRenderingContext {
             self.validate_vao_for_draw_base_instance(cx, 0, primcount, base_instance, &current_program)?;
             self.validate_framebuffer()?;
             self.validate_stencil_for_draw()?;
+            self.validate_feedback_loops_webgl1()?;
             self.mark_draw_state_valid(cx, &current_program);
         }
 
@@ -3389,6 +3448,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         if texture.is_immutable() {
             return self.webgl_error(InvalidOperation);
         }
+        if self.copy_reads_image(&texture, target, level) {
+            return self.webgl_error(InvalidOperation);
+        }
 
         // WebGL 2: the GL ES 3.0 rules, against the read framebuffer's read buffer.
         if self.webgl_version() == WebGLVersion::WebGL2 {
@@ -3534,6 +3596,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         {
             self.webgl_error(InvalidValue);
             return;
+        }
+        if self.copy_reads_image(&texture, target, level) {
+            return self.webgl_error(InvalidOperation);
         }
 
         // Pixels outside the read framebuffer are left alone (WebGL 1.0 5.14.8; GL leaves
