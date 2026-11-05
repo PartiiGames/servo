@@ -806,13 +806,35 @@ impl WebGLProgram {
             .collect::<Vec<_>>();
 
         let (sender, receiver) = webgl_channel().unwrap();
-        self.upcast()
-            .send_command(WebGLCommand::GetUniformIndices(self.id(), names, sender));
+        self.upcast().send_command(WebGLCommand::GetUniformIndices(
+            self.id(),
+            names.clone(),
+            sender,
+        ));
+        let uniforms = self.active_uniforms.borrow();
         Ok(receiver
             .recv()
             .unwrap()
             .into_iter()
-            .map(|index| self.uniform_index_from_gl(index))
+            .zip(names.iter())
+            .map(|(index, name)| {
+                let index = self.uniform_index_from_gl(index);
+                // Only an array's own name or its "[0]" name the uniform (ES 3.0 2.12.6, as
+                // getActiveUniform enumerates it); GL also takes other elements and a scalar
+                // with "[0]".
+                let Some(subscript) = name.strip_suffix(']').and_then(|n| n.rsplit_once('['))
+                else {
+                    return index;
+                };
+                let is_array = uniforms
+                    .get(index as usize)
+                    .is_some_and(|uniform| uniform.size.is_some());
+                if subscript.1 == "0" && is_array {
+                    index
+                } else {
+                    constants2::INVALID_INDEX
+                }
+            })
             .collect())
     }
 
