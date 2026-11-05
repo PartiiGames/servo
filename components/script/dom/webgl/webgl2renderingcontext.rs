@@ -376,8 +376,9 @@ impl WebGL2RenderingContext {
         Ok(())
     }
 
-    /// The draw-time state checks of WebGL 2 (uniform buffers, attribute types, sampler types
-    /// and feedback loops, fragment outputs); a failing one rejects the draw. Draws whose
+    /// The draw-time state checks of WebGL 2 (framebuffer completeness, uniform buffers,
+    /// attribute types, sampler types and feedback loops, fragment outputs); a failing one
+    /// rejects the draw. Draws whose
     /// mode or counts are invalid skip them, so that the base draw reports its own error.
     fn validate_draw_state(
         &self,
@@ -400,6 +401,9 @@ impl WebGL2RenderingContext {
         if !valid_mode || first_or_offset < 0 || count < 0 || primcount < 0 {
             return Ok(());
         }
+        // An incomplete framebuffer is reported before anything about the draw's state (so
+        // INVALID_FRAMEBUFFER_OPERATION wins over a feedback loop's INVALID_OPERATION).
+        self.base.validate_framebuffer()?;
         self.validate_uniform_block_for_draw()?;
         self.validate_vertex_attribs_for_draw(cx)?;
         self.validate_sampler_types_for_draw()?;
@@ -1994,8 +1998,9 @@ impl WebGL2RenderingContext {
                 }
                 // WebGL 2.0, 5.19: sampling a texture level that the draw framebuffer renders
                 // into is a feedback loop.
-                if let Some(framebuffer) = self.base.get_draw_framebuffer_slot().get() {
-                    let (first, last) = texture.sampled_levels();
+                if let Some(framebuffer) = self.base.get_draw_framebuffer_slot().get() &&
+                    let Some((first, last)) = texture.sampled_levels()
+                {
                     if framebuffer
                         .texture_attachment_levels(&texture)
                         .into_iter()

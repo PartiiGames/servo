@@ -348,52 +348,51 @@ impl WebGLTexture {
         self.droppable.is_deleted.get()
     }
 
-    /// The mip levels a draw samples: TEXTURE_BASE_LEVEL alone without a mipmapping min filter,
-    /// otherwise up to TEXTURE_MAX_LEVEL, clamped to an immutable texture's levels.
-    pub(crate) fn sampled_levels(&self) -> (u32, u32) {
-        let mut base = self.base_level.get();
+    /// The mip levels a draw samples, or None when the texture is incomplete (ES 3.0.6 3.8.14;
+    /// an incomplete texture samples as zeros, so it can't form a feedback loop). Without a
+    /// mipmapping min filter that is level_base alone, otherwise level_base to q. An immutable
+    /// texture's base and max levels are clamped to its levels (ES 3.0.6 3.8.10). Only face 0
+    /// of a cube map is looked at.
+    pub(crate) fn sampled_levels(&self) -> Option<(u32, u32)> {
         let mipmapped = !matches!(
             self.min_filter.get(),
             constants::NEAREST | constants::LINEAR
         );
-        let mut max = if mipmapped {
-            self.max_level.get().max(base)
-        } else {
-            base
+        let (base, max) = match self.immutable_levels.get() {
+            Some(levels) => {
+                let last = levels.saturating_sub(1);
+                let base = self.base_level.get().min(last);
+                (base, self.max_level.get().max(base).min(last))
+            },
+            None => (self.base_level.get(), self.max_level.get()),
         };
-        if let Some(levels) = self.immutable_levels.get() {
-            let last = levels.saturating_sub(1);
-            base = base.min(last);
-            max = max.min(last).max(base);
+        if base > max {
+            return None;
         }
-        (base, max)
+        let base_info = self.image_info_at_face(0, base)?;
+        if !mipmapped {
+            return Some((base, base));
+        }
+        let q = self.top_level(base, &base_info).min(max);
+        if !self.is_immutable() && !self.mip_chain_matches(base, q, &base_info) {
+            return None;
+        }
+        Some((base, q))
     }
 
-    /// Whether `level` of this texture can be a complete framebuffer attachment (ES 3.0.6
-    /// 4.4.4.2): for a mutable texture it must lie in [level_base, q], and a level other
-    /// than level_base needs the texture to be mipmap complete. Immutable textures (whose
-    /// levels all exist) and WebGL 1 rules are not affected.
-    pub(crate) fn level_is_attachment_complete(&self, level: u32) -> bool {
-        if self.is_immutable() {
-            return true;
-        }
-        let base = self.base_level.get();
-        let Some(base_info) = self.image_info_at_face(0, base) else {
-            return false;
-        };
-        let is_3d = self.target.get() == Some(constants::TEXTURE_3D);
+    /// p of ES 3.0.6 3.8.10: level_base plus floor(log2) of the base image's largest dimension.
+    fn top_level(&self, base: u32, base_info: &ImageInfo) -> u32 {
         let mut largest = base_info.width().max(base_info.height());
-        if is_3d {
+        if self.target.get() == Some(constants::TEXTURE_3D) {
             largest = largest.max(base_info.depth());
         }
-        let p = (31 - largest.max(1).leading_zeros()).saturating_add(base);
-        let q = p.min(self.max_level.get());
-        if level < base || level > q {
-            return false;
-        }
-        if level == base {
-            return true;
-        }
+        (31 - largest.max(1).leading_zeros()).saturating_add(base)
+    }
+
+    /// Whether levels base..=q are all defined with the base level's format and halving sizes
+    /// (mipmap completeness of a mutable texture).
+    fn mip_chain_matches(&self, base: u32, q: u32, base_info: &ImageInfo) -> bool {
+        let is_3d = self.target.get() == Some(constants::TEXTURE_3D);
         (base..=q).all(|l| {
             let shift = l - base;
             self.image_info_at_face(0, l).is_some_and(|info| {
@@ -408,6 +407,25 @@ impl WebGLTexture {
                         }
             })
         })
+    }
+
+    /// Whether `level` of this texture can be a complete framebuffer attachment (ES 3.0.6
+    /// 4.4.4.2): for a mutable texture it must lie in [level_base, q], and a level other
+    /// than level_base needs the texture to be mipmap complete. Immutable textures (whose
+    /// levels all exist) and WebGL 1 rules are not affected.
+    pub(crate) fn level_is_attachment_complete(&self, level: u32) -> bool {
+        if self.is_immutable() {
+            return true;
+        }
+        let base = self.base_level.get();
+        let Some(base_info) = self.image_info_at_face(0, base) else {
+            return false;
+        };
+        let q = self.top_level(base, &base_info).min(self.max_level.get());
+        if level < base || level > q {
+            return false;
+        }
+        level == base || self.mip_chain_matches(base, q, &base_info)
     }
 
     pub(crate) fn compare_mode(&self) -> u32 {
