@@ -130,6 +130,9 @@ pub(crate) struct ImageFragment {
     /// Whether or not this image is selected.
     #[conditional_malloc_size_of]
     pub selected: Arc<AtomicBool>,
+    /// Partii (perf): a canvas, which WebRender may composite as its own surface rather than
+    /// copying it into the picture cache tiles under it each time it changes.
+    pub prefer_compositor_surface: bool,
 }
 
 #[derive(MallocSizeOf)]
