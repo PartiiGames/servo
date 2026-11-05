@@ -23,6 +23,7 @@ struct Acc {
     raf_max: Duration,
 }
 thread_local!(static ACC: RefCell<Acc> = RefCell::default());
+thread_local!(static LAST_RAF: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
 
 pub(crate) struct Scope(Option<(Instant, bool)>);
 
@@ -40,6 +41,20 @@ impl Drop for Scope {
         };
         let now = Instant::now();
         let d = now - start;
+        if trace() {
+            let start_wall = wall_ms() - d.as_secs_f64() * 1000.0;
+            trace_span(if raf { "raf" } else { "update-the-rendering" }, start_wall, d);
+            if raf {
+                // A long frame: the gap since the previous animation frame callbacks began.
+                let gap = LAST_RAF.replace(Some(start)).map(|last| start - last);
+                if let Some(gap) = gap.filter(|g| g.as_millis() >= 40) {
+                    eprintln!(
+                        "partii-trace frame gap_end={start_wall:.1} gap_ms={:.1}",
+                        gap.as_secs_f64() * 1000.0
+                    );
+                }
+            }
+        }
         ACC.with_borrow_mut(|a| {
             let since = *a.since.get_or_insert(start);
             if raf {
@@ -66,5 +81,26 @@ impl Drop for Scope {
                 a.since = Some(now);
             }
         });
+    }
+}
+
+/// `PARTII_FRAME_PROF=trace`: log each script task or rendering update of 8 ms or more, with a wall clock
+/// shared by every thread (ms since the Unix epoch, mod 10^7), to line long frames up across threads.
+pub(crate) fn trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace"))
+}
+
+pub(crate) fn wall_ms() -> f64 {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (d.as_micros() % 10_000_000_000) as f64 / 1000.0
+}
+
+pub(crate) fn trace_span(what: &str, start_wall_ms: f64, d: Duration) {
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms >= 8.0 {
+        eprintln!("partii-trace script {what} at={start_wall_ms:.1} ms={ms:.1}");
     }
 }
