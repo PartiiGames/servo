@@ -1342,6 +1342,13 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
 
         template = fromJSValTemplate("()", failOrPropagate, exceptionCode)
 
+        # A nullable dictionary (only as a sequence element, e.g. WebGPU's
+        # `sequence<GPUVertexBufferLayout?>`): null and undefined are None, not an empty
+        # dictionary (which would fail on its required members).
+        if type.nullable():
+            declType = CGWrapper(declType, pre="Option<", post=">")
+            return handleOptional(template, declType, handleDefault("None"))
+
         return handleOptional(template, declType, handleDefault(empty))
 
     if type.isUndefined():
