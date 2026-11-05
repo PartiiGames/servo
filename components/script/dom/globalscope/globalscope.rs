@@ -2966,10 +2966,11 @@ impl GlobalScope {
         // Since devices are really freed, `FreeDevice` (which removes the entry) can arrive
         // before a late `DeviceLost`. No entry means nothing can wait on `device.lost` any
         // more (its promise went with the entry), so there is nothing to do.
-        let Some(weak_device) = self.gpu_devices.borrow().get(&device).cloned() else {
-            return;
+        let device_root = match self.gpu_devices.borrow().get(&device) {
+            None => return,
+            Some(weak_device) => weak_device.root(),
         };
-        if let Some(device) = weak_device.root() {
+        if let Some(device) = device_root {
             device.lose(reason, msg);
             return;
         }
