@@ -4517,6 +4517,27 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return self.webgl_error(InvalidValue);
         }
 
+        // A format or type GL ES 2.0 doesn't define for readPixels is INVALID_ENUM; a defined
+        // pair other than the ones below is INVALID_OPERATION.
+        if !matches!(
+            format,
+            constants::ALPHA |
+                constants::RGB |
+                constants::RGBA |
+                constants::LUMINANCE |
+                constants::LUMINANCE_ALPHA
+        ) || !matches!(
+            pixel_type,
+            constants::UNSIGNED_BYTE |
+                constants::UNSIGNED_SHORT_5_6_5 |
+                constants::UNSIGNED_SHORT_4_4_4_4 |
+                constants::UNSIGNED_SHORT_5_5_5_1 |
+                constants::FLOAT |
+                HALF_FLOAT_OES
+        ) {
+            return self.webgl_error(InvalidEnum);
+        }
+
         // RGBA/UNSIGNED_BYTE always; RGBA/FLOAT into a Float32Array from a float colour buffer
         // (WEBGL_color_buffer_float / EXT_color_buffer_half_float).
         let float_read = format == constants::RGBA &&
@@ -4530,12 +4551,12 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return self.webgl_error(InvalidOperation);
         }
 
-        let expected_array_type = if float_read {
-            Type::Float32
-        } else {
-            Type::Uint8
+        let array_type_matches = match pixels.get_array_type() {
+            Type::Float32 => float_read,
+            Type::Uint8 | Type::Uint8Clamped => !float_read,
+            _ => false,
         };
-        if pixels.get_array_type() != expected_array_type {
+        if !array_type_matches {
             return self.webgl_error(InvalidOperation);
         }
 
@@ -6282,6 +6303,9 @@ fn vao_pool_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| !matches!(std::env::var("PARTII_WEBGL_VAO_POOL").as_deref(), Ok("0")))
 }
+
+/// OES_texture_half_float's HALF_FLOAT_OES (WebGL 1 readPixels accepts the enum).
+const HALF_FLOAT_OES: u32 = 0x8D61;
 
 /// One face's stencil reference and masks (stencilFunc / stencilMask).
 #[derive(Clone, Copy)]
