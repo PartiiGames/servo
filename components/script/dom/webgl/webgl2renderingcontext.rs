@@ -21,7 +21,8 @@ use servo_base::generic_channel::{self, GenericSharedMemory};
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{
     GLContextAttributes, InternalFormatParameter, TexDataType, TexFormat, WebGLCommand,
-    WebGLContextId, WebGLResult, WebGLVersion, YAxisTreatment, webgl_channel,
+    WebGLContextId, WebGLFramebufferBindingRequest, WebGLResult, WebGLVersion, YAxisTreatment,
+    webgl_channel,
 };
 use servo_config::pref;
 use url::Host;
@@ -6336,6 +6337,29 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         {
             return self.base.webgl_error(InvalidFramebufferOperation);
         }
+        // The source too: an untouched depth buffer must blit as 1.0, not as whatever GL left
+        // there (multisampled-depth-renderbuffer-initialization). Initializing clears the draw
+        // framebuffer, so bind the source there for it.
+        if let Some(ref fb) = src_fb &&
+            !fb.is_initialized() &&
+            dst_fb.as_ref().is_none_or(|dst| dst.id() != fb.id())
+        {
+            self.base.send_command(WebGLCommand::BindFramebuffer(
+                constants::DRAW_FRAMEBUFFER,
+                WebGLFramebufferBindingRequest::Explicit(fb.id()),
+            ));
+            let status = fb.check_status_for_rendering();
+            self.base.send_command(WebGLCommand::BindFramebuffer(
+                constants::DRAW_FRAMEBUFFER,
+                match dst_fb {
+                    Some(ref dst) => WebGLFramebufferBindingRequest::Explicit(dst.id()),
+                    None => WebGLFramebufferBindingRequest::Default,
+                },
+            ));
+            if let CompleteForRendering::Incomplete = status {
+                return self.base.webgl_error(InvalidFramebufferOperation);
+            }
+        }
 
         let get_default_formats = || -> WebGLResult<(Option<u32>, Option<u32>, Option<u32>)> {
             // All attempts to blit to an antialiased back buffer should fail.
@@ -7811,6 +7835,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         width: i32,
         height: i32,
     ) {
+        // WebGL 1's DEPTH_STENCIL stays single-sampled (WebGL 2.0 5.36).
+        if internal_format == constants::DEPTH_STENCIL && samples > 0 {
+            return self.base.webgl_error(InvalidOperation);
+        }
         self.base
             .renderbuffer_storage(target, samples, internal_format, width, height)
     }

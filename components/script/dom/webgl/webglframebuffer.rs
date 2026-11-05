@@ -640,6 +640,11 @@ impl WebGLFramebuffer {
         // https://github.com/immersive-web/layers/issues/196
     }
 
+    /// Whether the attachments have been given their initial values (done lazily, on use).
+    pub(crate) fn is_initialized(&self) -> bool {
+        self.is_initialized.get()
+    }
+
     pub(crate) fn check_status_for_rendering(&self) -> CompleteForRendering {
         let result = self.check_status();
         if result != constants::FRAMEBUFFER_COMPLETE {
