@@ -959,18 +959,26 @@ impl WebGL2RenderingContext {
                         let last_slot = constants::COLOR_ATTACHMENT0 +
                             self.base.limits().max_color_attachments -
                             1;
+                        // A COLOR_ATTACHMENTi past MAX_COLOR_ATTACHMENTS (ES 3.0 4.5).
                         if last_slot < attachment {
+                            self.base.webgl_error(InvalidOperation);
                             return false;
                         }
                     },
-                    _ => return false,
+                    _ => {
+                        self.base.webgl_error(InvalidEnum);
+                        return false;
+                    },
                 }
             }
         } else {
             for &attachment in attachments {
                 match attachment {
                     constants::COLOR | constants::DEPTH | constants::STENCIL => {},
-                    _ => return false,
+                    _ => {
+                        self.base.webgl_error(InvalidEnum);
+                        return false;
+                    },
                 }
             }
         }
@@ -7848,6 +7856,10 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         match src {
             constants::BACK | constants::NONE => {},
             _ if self.base.valid_color_attachment_enum(src) => {},
+            // COLOR_ATTACHMENTi past MAX_COLOR_ATTACHMENTS (ES 3.0 4.3.1).
+            constants::COLOR_ATTACHMENT0..=constants::COLOR_ATTACHMENT15 => {
+                return self.base.webgl_error(InvalidOperation);
+            },
             _ => return self.base.webgl_error(InvalidEnum),
         }
 
