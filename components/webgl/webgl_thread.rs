@@ -1818,17 +1818,20 @@ impl WebGLImpl {
                 ref data,
             } => {
                 // Partii (perf): texImage2D with null pixels arrives with no data (the DOM sends none
-                // instead of a zero-filled copy). Zeros need no premultiply or flip, so upload a fresh
-                // zeroed buffer (calloc: untouched pages) instead of copying and converting one.
+                // instead of a zero-filled copy). Zeros need no premultiply or flip. How the level is
+                // zeroed (PARTII_TEX_ZERO, tex_zero_mode): upload a fresh calloc'd buffer (default), or
+                // allocate with no data and glClearTexImage it (2D textures, where the GL has it); `none`
+                // leaves it unzeroed, a lower bound for perf measurements only (not WebGL-correct).
                 // Phaser's boot makes ~80 full-canvas render targets this way (hexii's start frame).
-                let pixels = if data.is_empty() && size.width > 0 && size.height > 0 {
-                    let cpp = data_type.element_size() * format.components() /
-                        data_type.components_per_element();
-                    let a = unpacking_alignment.max(1);
-                    let stride = (size.width * cpp + a - 1) & !(a - 1);
-                    Cow::Owned(vec![0u8; (stride * (size.height - 1) + size.width * cpp) as usize])
+                let zero_fill = data.is_empty() && size.width > 0 && size.height > 0;
+                let mode = tex_zero_mode();
+                let clear_fn = if zero_fill && mode == TexZeroMode::Clear && target == gl::TEXTURE_2D {
+                    clear_tex_image_fn(device, ctx)
                 } else {
-                    prepare_pixels(
+                    None
+                };
+                let pixels = if !zero_fill {
+                    Some(prepare_pixels(
                         internal_format,
                         data_type,
                         size,
@@ -1837,7 +1840,18 @@ impl WebGLImpl {
                         y_axis_treatment,
                         pixel_format,
                         Cow::Borrowed(data),
-                    )
+                    ))
+                } else if clear_fn.is_some() || mode == TexZeroMode::None {
+                    None
+                } else {
+                    let cpp = data_type.element_size() * format.components() /
+                        data_type.components_per_element();
+                    let a = unpacking_alignment.max(1);
+                    let stride = (size.width * cpp + a - 1) & !(a - 1);
+                    Some(Cow::Owned(vec![
+                        0u8;
+                        (stride * (size.height - 1) + size.width * cpp) as usize
+                    ]))
                 };
 
                 let (internal_format, format) = luminance_formats(
@@ -1859,8 +1873,12 @@ impl WebGLImpl {
                         0,
                         format,
                         effective_data_type,
-                        PixelUnpackData::Slice(Some(&pixels)),
+                        PixelUnpackData::Slice(pixels.as_deref()),
                     );
+                    if let Some(clear) = clear_fn {
+                        let texture = gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) as u32;
+                        clear(texture, level as i32, format, effective_data_type, std::ptr::null());
+                    }
                 }
             },
             WebGLCommand::TexImage3DPBO {
@@ -4048,4 +4066,31 @@ unsafe fn copy_tex_image_2d(
 fn webgl_stats_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("PARTII_WEBGL_STATS").is_some())
+}
+
+/// Partii (perf): how texImage2D(null) zeroes a level (see WebGLCommand::TexImage2D). `PARTII_TEX_ZERO` =
+/// `upload` (default), `clear` or `none` (measurement only).
+#[derive(Clone, Copy, PartialEq)]
+enum TexZeroMode {
+    Upload,
+    Clear,
+    None,
+}
+
+fn tex_zero_mode() -> TexZeroMode {
+    static MODE: std::sync::OnceLock<TexZeroMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("PARTII_TEX_ZERO").as_deref() {
+        Ok("clear") => TexZeroMode::Clear,
+        Ok("none") => TexZeroMode::None,
+        _ => TexZeroMode::Upload,
+    })
+}
+
+type ClearTexImageFn = unsafe extern "system" fn(u32, i32, u32, u32, *const std::ffi::c_void);
+
+/// glClearTexImage (GL 4.4 / ARB_clear_texture), looked up once; None where the GL has no such entry point.
+fn clear_tex_image_fn(device: &Device, ctx: &Context) -> Option<ClearTexImageFn> {
+    static FN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let address = *FN.get_or_init(|| device.get_proc_address(ctx, "glClearTexImage") as usize);
+    (address != 0).then(|| unsafe { std::mem::transmute::<usize, ClearTexImageFn>(address) })
 }
