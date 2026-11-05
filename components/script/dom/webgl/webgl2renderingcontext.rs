@@ -6448,6 +6448,31 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             }
         }
 
+        // Clip out-of-bounds rectangles here (a resolve's are identical and need no clipping).
+        let (src_x0, src_y0, src_x1, src_y1, dst_x0, dst_y0, dst_x1, dst_y1) = if src_fb
+            .as_ref()
+            .is_some_and(|fb| fb.is_multisampled())
+        {
+            (src_x0, src_y0, src_x1, src_y1, dst_x0, dst_y0, dst_x1, dst_y1)
+        } else {
+            let canvas_size = self.base.size();
+            let canvas_size = (canvas_size.width as i32, canvas_size.height as i32);
+            let src_size = src_fb.as_ref().map_or(Some(canvas_size), |fb| fb.size());
+            let dst_size = dst_fb.as_ref().map_or(Some(canvas_size), |fb| fb.size());
+            match (src_size, dst_size) {
+                (Some(src_size), Some(dst_size)) => {
+                    let x = clip_blit_axis(src_x0, src_x1, dst_x0, dst_x1, src_size.0, dst_size.0);
+                    let y = clip_blit_axis(src_y0, src_y1, dst_y0, dst_y1, src_size.1, dst_size.1);
+                    let (Some((sx0, sx1, dx0, dx1)), Some((sy0, sy1, dy0, dy1))) = (x, y) else {
+                        // No destination pixel maps inside the source: nothing is written.
+                        return;
+                    };
+                    (sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1)
+                },
+                _ => (src_x0, src_y0, src_x1, src_y1, dst_x0, dst_y0, dst_x1, dst_y1),
+            }
+        };
+
         self.base.send_command(WebGLCommand::BlitFrameBuffer(
             src_x0, src_y0, src_x1, src_y1, dst_x0, dst_y0, dst_x1, dst_y1, mask, filter,
         ));
@@ -7799,4 +7824,64 @@ impl WebGL2RenderingContextHelpers for WebGL2RenderingContext {
     fn is_webgl2_enabled(cx: &mut js::context::JSContext, global: HandleObject) -> bool {
         Self::is_webgl2_enabled(cx, global)
     }
+}
+
+/// One axis of blitFramebuffer's clipping (GL ES 3.0 4.3.3, as WebGL 2's conformance tests
+/// read it): a destination pixel is written only if it lies inside the draw buffer and the
+/// centre of its source pixel, under the original rectangles' mapping, lies inside the read
+/// buffer. Returns rectangles that stay inside both buffers and write exactly those pixels, or
+/// None when no pixel is written. Drivers clip with integer steps that change the scale between
+/// steps (Mesa writes one pixel too many or too few at a clipped edge), so they are given
+/// rectangles that need no clipping. Integer scales (a 1:1 copy) keep their exact mapping;
+/// other scales round the source edges to whole pixels.
+fn clip_blit_axis(
+    s0: i32,
+    s1: i32,
+    d0: i32,
+    d1: i32,
+    src_size: i32,
+    dst_size: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let inside = |a: i32, b: i32, size: i32| a.min(b) >= 0 && a.max(b) <= size;
+    if inside(s0, s1, src_size) && inside(d0, d1, dst_size) {
+        return Some((s0, s1, d0, d1));
+    }
+    if s0 == s1 || d0 == d1 || src_size <= 0 || dst_size <= 0 {
+        return None;
+    }
+    let (s0f, d0f) = (s0 as f64, d0 as f64);
+    let scale = (s1 as f64 - s0f) / (d1 as f64 - d0f);
+    let src_at = |x: f64| s0f + (x - d0f) * scale;
+    let written = |x: i32| {
+        let s = src_at(x as f64 + 0.5);
+        s >= 0.0 && s < src_size as f64
+    };
+    // The written pixels are one run: the mapping is monotonic.
+    let (lo, hi) = (d0.min(d1).max(0), d0.max(d1).min(dst_size));
+    let mut first = lo;
+    while first < hi && !written(first) {
+        first += 1;
+    }
+    let mut end = hi;
+    while end > first && !written(end - 1) {
+        end -= 1;
+    }
+    if first >= end {
+        return None;
+    }
+    let (nd0, nd1) = if d0 < d1 { (first, end) } else { (end, first) };
+    let src_edge = |x: i32| src_at(x as f64).round().clamp(0.0, src_size as f64) as i32;
+    let (mut ns0, mut ns1) = (src_edge(nd0), src_edge(nd1));
+    if ns0 == ns1 {
+        // Keep the one source pixel the written centres sample.
+        let centre = src_at((first + end) as f64 / 2.0)
+            .floor()
+            .clamp(0.0, (src_size - 1) as f64) as i32;
+        (ns0, ns1) = if s0 < s1 {
+            (centre, centre + 1)
+        } else {
+            (centre + 1, centre)
+        };
+    }
+    Some((ns0, ns1, nd0, nd1))
 }
