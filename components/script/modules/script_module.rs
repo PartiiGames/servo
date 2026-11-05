@@ -25,16 +25,17 @@ use js::jsapi::{
     CallArgs, ColumnNumberOneOrigin, ExceptionStackBehavior, GetFunctionNativeReserved,
     GetModuleLoadHook, Handle as RawHandle, HandleValue as RawHandleValue, Heap,
     JS_GetFunctionObject, JSContext as RawJSContext, JSObject, JSPROP_ENUMERATE, JSRuntime,
-    JSScript, ModuleErrorBehaviour, ModuleType, SetFunctionNativeReserved, SetModuleLoadHook,
-    SetModuleMetadataHook, SetModulePrivate, SetScriptPrivateReferenceHooks, Value,
+    JSScript, ModuleErrorBehaviour, ModuleType, PromiseState, SetFunctionNativeReserved,
+    SetModuleLoadHook, SetModuleMetadataHook, SetModulePrivate, SetScriptPrivateReferenceHooks,
+    Value,
 };
 use js::jsval::{JSVal, ObjectValue, PrivateValue, UndefinedValue};
 use js::realm::{AutoRealm, CurrentRealm};
 use js::rust::wrappers2::{
     CompileJsonModule1, CompileModule1, CreateDefaultExportSyntheticModule,
-    DefineFunctionWithReserved, GetModuleRequestSpecifier, JS_ClearPendingException,
-    JS_DefineProperty4, JS_GetModulePrivate, JS_GetPendingException, JS_NewStringCopyN,
-    JS_SetPendingException, ModuleEvaluate, ThrowOnModuleEvaluationFailure,
+    DefineFunctionWithReserved, GetModuleRequestSpecifier, GetPromiseState,
+    JS_ClearPendingException, JS_DefineProperty4, JS_GetModulePrivate, JS_GetPendingException,
+    JS_NewStringCopyN, JS_SetPendingException, ModuleEvaluate, ThrowOnModuleEvaluationFailure,
 };
 use js::rust::{Handle, HandleValue, ToString, transform_str_to_source_text};
 use mime::Mime;
@@ -404,6 +405,25 @@ impl ModuleTree {
             rooted!(&in(cx) let mut evaluation_promise = ptr::null_mut::<JSObject>());
             if eval_result.is_object() {
                 evaluation_promise.set(eval_result.to_object());
+            }
+
+            // A module graph with top-level await is still evaluating here: its promise is pending.
+            // ThrowModuleErrorsSync doesn't support that (SpiderMonkey's own note) and, in a release
+            // build, reads a pending promise's result as `undefined` and throws it: every page whose
+            // module awaits at top level got "uncaught exception: undefined". Report a later
+            // rejection when it happens instead (the HTML spec's "upon rejection", as Gecko does).
+            if !evaluation_promise.get().is_null() &&
+                GetPromiseState(evaluation_promise.handle()) == PromiseState::Pending
+            {
+                if !ThrowOnModuleEvaluationFailure(
+                    cx,
+                    evaluation_promise.handle(),
+                    ModuleErrorBehaviour::ReportModuleErrorsAsync,
+                ) {
+                    return Err(RethrowError::from_pending_exception(cx));
+                }
+                debug!("module evaluation continues asynchronously (top-level await)");
+                return Ok(());
             }
 
             let throw_result = ThrowOnModuleEvaluationFailure(
