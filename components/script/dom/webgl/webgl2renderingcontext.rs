@@ -1307,6 +1307,23 @@ impl WebGL2RenderingContext {
         alignment: u32,
         is_3d: bool,
     ) -> Option<UnpackLayout> {
+        self.unpack_layout_with(width, height, depth, cpp, alignment, is_3d, false)
+    }
+
+    /// `unpack_layout`; with `dom_source` (an image source window) a zero UNPACK_IMAGE_HEIGHT
+    /// puts no limit on UNPACK_SKIP_ROWS: the rows come from the source's own height (Chrome
+    /// and the image_bitmap 3D sub-source tests skip half a bitmap's rows into one slice).
+    #[allow(clippy::too_many_arguments)]
+    fn unpack_layout_with(
+        &self,
+        width: u32,
+        height: u32,
+        depth: u32,
+        cpp: u32,
+        alignment: u32,
+        is_3d: bool,
+        dom_source: bool,
+    ) -> Option<UnpackLayout> {
         let params = self.unpack_params.get();
         let (image_height, skip_images) = if is_3d {
             (params.image_height, params.skip_images)
@@ -1326,7 +1343,9 @@ impl WebGL2RenderingContext {
             height
         };
         if params.skip_pixels as u64 + width as u64 > row_pixels as u64 ||
-            (is_3d && params.skip_rows as u64 + height as u64 > rows_per_image as u64)
+            (is_3d &&
+                !(dom_source && image_height == 0) &&
+                params.skip_rows as u64 + height as u64 > rows_per_image as u64)
         {
             self.base.webgl_error(InvalidOperation);
             return None;
@@ -1444,7 +1463,7 @@ impl WebGL2RenderingContext {
                 ..params
             });
         }
-        let layout = self.unpack_layout(width, height, depth, 4, 1, is_3d);
+        let layout = self.unpack_layout_with(width, height, depth, 4, 1, is_3d, true);
         self.unpack_params.set(saved);
         let layout = layout?;
         Some(pixels.map_data(Size2D::new(width, height * depth), |data| {
