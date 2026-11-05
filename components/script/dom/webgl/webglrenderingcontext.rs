@@ -671,23 +671,6 @@ impl WebGLRenderingContext {
         }
 
         handle_potential_webgl_error!(self, texture.tex_parameter(param, value), return);
-
-        // Validate non filterable TEXTURE_2D data_types
-        if target != constants::TEXTURE_2D {
-            return;
-        }
-
-        let target = TexImageTarget::Texture2D;
-        if let Some(info) = texture.image_info_for_target(&target, 0) {
-            self.validate_filterable_texture(
-                &texture,
-                target,
-                0,
-                info.internal_format(),
-                Size2D::new(info.width(), info.height()),
-                info.data_type().unwrap_or(TexDataType::UnsignedByte),
-            );
-        }
     }
 
     fn vertex_attrib(&self, cx: &mut JSContext, indx: u32, x: f32, y: f32, z: f32, w: f32) {
@@ -751,57 +734,68 @@ impl WebGLRenderingContext {
         (alpha_treatment, y_axis_treatment)
     }
 
-    // LINEAR filtering may be forbidden when using WebGL extensions.
-    /// <https://www.khronos.org/registry/webgl/extensions/OES_texture_float_linear/>
-    fn validate_filterable_texture(
-        &self,
-        texture: &WebGLTexture,
-        target: TexImageTarget,
-        level: u32,
-        internal_format: TexFormat,
-        size: Size2D<u32>,
-        data_type: TexDataType,
-    ) -> bool {
-        if self
-            .extension_manager
-            .is_filterable(data_type.as_gl_constant()) ||
-            !texture.is_using_linear_filtering()
-        {
-            return true;
+    /// WebGL 1: the sampler bindings of the current program whose texture is incomplete
+    /// because it is float / half-float without OES_texture_(half_)float_linear yet filters
+    /// with LINEAR (OES_texture_float_linear). Such a texture samples as opaque black.
+    fn incomplete_sampler_bindings(&self) -> Vec<(u32, u32, DomRoot<WebGLTexture>)> {
+        let mut bindings = Vec::new();
+        if self.webgl_version() != WebGLVersion::WebGL1 {
+            return bindings;
         }
-
-        // Handle validation failed: LINEAR filtering not valid for this texture
-        // WebGL Conformance tests expect to fallback to [0, 0, 0, 255] RGBA UNSIGNED_BYTE
-        let data_type = TexDataType::UnsignedByte;
-        let expected_byte_length = size.area() * 4;
-        let mut pixels = vec![0u8; expected_byte_length as usize];
-        for rgba8 in pixels.chunks_mut(4) {
-            rgba8[3] = 255u8;
+        let Some(program) = self.current_program() else {
+            return bindings;
+        };
+        for uniform in program.active_uniforms().iter() {
+            let target = match uniform.type_ {
+                constants::SAMPLER_2D => constants::TEXTURE_2D,
+                constants::SAMPLER_CUBE => constants::TEXTURE_CUBE_MAP,
+                _ => continue,
+            };
+            let Some(location) = uniform.location else {
+                continue;
+            };
+            for element in 0..uniform.size.unwrap_or(1).max(1) {
+                let unit = program.sampler_unit(location + element);
+                let Some(texture) = self.textures.texture_at(unit, target) else {
+                    continue;
+                };
+                let filterable = texture
+                    .image_info_at_face(0, 0)
+                    .and_then(|info| info.data_type())
+                    .is_none_or(|data_type| {
+                        self.extension_manager
+                            .is_filterable(data_type.as_gl_constant())
+                    });
+                if !filterable &&
+                    texture.is_using_linear_filtering() &&
+                    !bindings.iter().any(|(u, t, _)| *u == unit && *t == target)
+                {
+                    bindings.push((unit, target, texture));
+                }
+            }
         }
+        bindings
+    }
 
-        // TODO(nox): AFAICT here we construct a RGBA8 array and then we
-        // convert it to whatever actual format we need, we should probably
-        // construct the desired format from the start.
-        self.tex_image_2d(
-            texture,
-            target,
-            data_type,
-            internal_format,
-            internal_format.to_unsized(),
-            level,
-            0,
-            1,
-            size,
-            TexSource::Pixels(TexPixels::new(
-                GenericSharedMemory::from_vec(pixels),
-                size,
-                PixelFormat::RGBA8,
-                None,
-                YAxisTreatment::AsIs,
-            )),
-        );
-
-        false
+    /// Sends a draw command, with incomplete textures (see `incomplete_sampler_bindings`)
+    /// swapped for a black one for the duration of the draw.
+    fn send_draw_command(&self, command: WebGLCommand) {
+        let bindings = self.incomplete_sampler_bindings();
+        for (unit, target, _) in &bindings {
+            self.send_command(WebGLCommand::ActiveTexture(constants::TEXTURE0 + unit));
+            self.send_command(WebGLCommand::BindIncompleteTexture(*target));
+        }
+        self.send_command(command);
+        if bindings.is_empty() {
+            return;
+        }
+        for (unit, target, texture) in &bindings {
+            self.send_command(WebGLCommand::ActiveTexture(constants::TEXTURE0 + unit));
+            self.send_command(WebGLCommand::BindTexture(*target, Some(texture.id())));
+        }
+        self.send_command(WebGLCommand::ActiveTexture(
+            self.textures.active_unit_enum(),
+        ));
     }
 
     fn validate_stencil_actions(&self, action: u32) -> bool {
@@ -1349,7 +1343,7 @@ impl WebGLRenderingContext {
             return Ok(());
         }
 
-        self.send_command(if base_instance != 0 {
+        self.send_draw_command(if base_instance != 0 {
             WebGLCommand::DrawArraysInstancedBaseInstance {
                 mode,
                 first,
@@ -1487,7 +1481,7 @@ impl WebGLRenderingContext {
         }
 
         let offset = offset as u32;
-        self.send_command(if base_vertex != 0 || base_instance != 0 {
+        self.send_draw_command(if base_vertex != 0 || base_instance != 0 {
             WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance {
                 mode,
                 count,
@@ -5115,21 +5109,6 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
         let size = Size2D::new(width, height);
 
-        if !self.validate_filterable_texture(
-            &texture,
-            target,
-            level,
-            internal_format,
-            size,
-            data_type,
-        ) {
-            // FIXME(nox): What is the spec for this? No error is emitted ever
-            // by validate_filterable_texture.
-            return Ok(());
-        }
-
-        let size = Size2D::new(width, height);
-
         let (alpha_treatment, y_axis_treatment) =
             self.get_current_unpack_state(Alpha::NotPremultiplied);
 
@@ -5212,19 +5191,6 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
                 self.webgl_error(InvalidOperation);
                 Ok(())
             };
-        }
-
-        if !self.validate_filterable_texture(
-            &texture,
-            target,
-            level,
-            internal_format,
-            pixels.size(),
-            data_type,
-        ) {
-            // FIXME(nox): What is the spec for this? No error is emitted ever
-            // by validate_filterable_texture.
-            return Ok(());
         }
 
         self.tex_image_2d(

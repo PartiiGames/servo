@@ -120,6 +120,8 @@ pub struct GLState {
     active_occlusion_queries: u8,
     /// Between beginTransformFeedback and endTransformFeedback (paused included).
     transform_feedback_active: bool,
+    /// Opaque black 1x1 textures (2D, cube map) that stand in for incomplete ones.
+    incomplete_textures: (Option<gl::NativeTexture>, Option<gl::NativeTexture>),
 }
 
 impl GLState {
@@ -232,6 +234,7 @@ impl Default for GLState {
             scissor_empty: false,
             active_occlusion_queries: 0,
             transform_feedback_active: false,
+            incomplete_textures: (None, None),
             color_write_mask: [true, true, true, true],
             clear_color: (0., 0., 0., 0.),
             scissor_test_enabled: false,
@@ -1605,6 +1608,9 @@ impl WebGLImpl {
             },
             WebGLCommand::BindTexture(target, id) => unsafe {
                 gl.bind_texture(target, id.map(WebGLTextureId::glow))
+            },
+            WebGLCommand::BindIncompleteTexture(target) => {
+                Self::bind_incomplete_texture(gl, state, target)
             },
             WebGLCommand::BlitFrameBuffer(
                 src_x0,
@@ -2985,6 +2991,57 @@ impl WebGLImpl {
                 );
             }
         }
+    }
+
+    /// Binds (creating it the first time) the opaque black 1x1 texture for `target` on the
+    /// active unit. Creating it binds only `target`, which ends up bound to it anyway.
+    fn bind_incomplete_texture(gl: &Gl, state: &mut GLState, target: u32) {
+        let slot = match target {
+            gl::TEXTURE_2D => &mut state.incomplete_textures.0,
+            gl::TEXTURE_CUBE_MAP => &mut state.incomplete_textures.1,
+            _ => return,
+        };
+        if let Some(texture) = *slot {
+            unsafe { gl.bind_texture(target, Some(texture)) };
+            return;
+        }
+        let Ok(texture) = (unsafe { gl.create_texture() }) else {
+            return;
+        };
+        let black = [0u8, 0, 0, 255];
+        let faces: &[u32] = if target == gl::TEXTURE_CUBE_MAP {
+            &[
+                gl::TEXTURE_CUBE_MAP_POSITIVE_X,
+                gl::TEXTURE_CUBE_MAP_NEGATIVE_X,
+                gl::TEXTURE_CUBE_MAP_POSITIVE_Y,
+                gl::TEXTURE_CUBE_MAP_NEGATIVE_Y,
+                gl::TEXTURE_CUBE_MAP_POSITIVE_Z,
+                gl::TEXTURE_CUBE_MAP_NEGATIVE_Z,
+            ]
+        } else {
+            &[gl::TEXTURE_2D]
+        };
+        unsafe {
+            gl.bind_texture(target, Some(texture));
+            gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, 1);
+            for &face in faces {
+                gl.tex_image_2d(
+                    face,
+                    0,
+                    gl::RGBA as i32,
+                    1,
+                    1,
+                    0,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    PixelUnpackData::Slice(Some(&black)),
+                );
+            }
+            gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, 4);
+            gl.tex_parameter_i32(target, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+            gl.tex_parameter_i32(target, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+        }
+        *slot = Some(texture);
     }
 
     fn initialize_framebuffer(gl: &Gl, state: &GLState, color: bool, depth: bool, stencil: bool) {

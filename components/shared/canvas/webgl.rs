@@ -705,6 +705,9 @@ pub enum WebGLCommand {
         depth: bool,
         stencil: bool,
     },
+    /// Binds an opaque black 1x1 texture (what an incomplete texture samples as) to `target`
+    /// (TEXTURE_2D or TEXTURE_CUBE_MAP) of the active unit, for one draw.
+    BindIncompleteTexture(u32),
     BeginQuery(u32, WebGLQueryId),
     DeleteQuery(WebGLQueryId),
     EndQuery(u32),
