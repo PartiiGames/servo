@@ -426,6 +426,7 @@ impl WebGLExtensions {
         self.register::<ext::extblendminmax::EXTBlendMinmax>();
         self.register::<ext::extcolorbufferfloat::EXTColorBufferFloat>();
         self.register::<ext::extcolorbufferhalffloat::EXTColorBufferHalfFloat>();
+        self.register::<ext::extfloatblend::EXTFloatBlend>();
         self.register::<ext::extfragdepth::EXTFragDepth>();
         self.register::<ext::extshadertexturelod::EXTShaderTextureLod>();
         self.register::<ext::exttexturecompressionbptc::EXTTextureCompressionBPTC>();
@@ -462,6 +463,12 @@ impl WebGLExtensions {
 
     pub(crate) fn is_blend_minmax_enabled(&self) -> bool {
         self.features.borrow().blend_minmax_enabled
+    }
+
+    /// WebGL 1: whether blendColor keeps values outside [0, 1] (a float colour buffer
+    /// extension was enabled explicitly).
+    pub(crate) fn is_blend_color_unclamped(&self) -> bool {
+        self.is_enabled::<WEBGLColorBufferFloat>() || self.is_enabled::<EXTColorBufferHalfFloat>()
     }
 
     pub(crate) fn is_float_buffer_renderable(&self) -> bool {
