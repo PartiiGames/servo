@@ -244,12 +244,12 @@ impl WebGLFramebuffer {
     }
 
     #[cfg(feature = "webxr")]
-    fn is_in_xr_session(&self) -> bool {
+    pub(crate) fn is_in_xr_session(&self) -> bool {
         self.xr_session.get().is_some()
     }
 
     #[cfg(not(feature = "webxr"))]
-    fn is_in_xr_session(&self) -> bool {
+    pub(crate) fn is_in_xr_session(&self) -> bool {
         false
     }
 

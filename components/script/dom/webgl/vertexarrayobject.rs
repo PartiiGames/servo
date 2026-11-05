@@ -7,7 +7,8 @@ use std::cell::Cell;
 use script_bindings::cell::{DomRefCell, Ref};
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
-    ActiveAttribInfo, WebGLCommand, WebGLError, WebGLResult, WebGLVersion, WebGLVertexArrayId,
+    ActiveAttribInfo, WebGLCommand, WebGLError, WebGLProgramId, WebGLResult, WebGLVersion,
+    WebGLVertexArrayId,
 };
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
@@ -26,6 +27,12 @@ pub(crate) struct VertexArrayObject {
     is_deleted: Cell<bool>,
     vertex_attribs: DomRefCell<Box<[VertexAttribData]>>,
     element_array_buffer: MutNullableDom<WebGLBuffer>,
+    /// Partii (perf): the (draw-state generation, program) pairs whose draw-time state checks passed
+    /// with this vertex array bound, the latest first (WebGLRenderingContext::draw_state_cached). Two,
+    /// for a mesh drawn by its shadow and its main program each frame.
+    #[ignore_malloc_size_of = "Plain data"]
+    #[no_trace]
+    draw_validated: Cell<[(u64, Option<WebGLProgramId>); 2]>,
 }
 
 impl VertexArrayObject {
@@ -38,7 +45,22 @@ impl VertexArrayObject {
             is_deleted: Default::default(),
             vertex_attribs: DomRefCell::new(vec![Default::default(); max_vertex_attribs].into()),
             element_array_buffer: Default::default(),
+            draw_validated: Cell::new([(0, None); 2]),
         }
+    }
+
+    /// Whether `program`'s draw-time state checks passed with this vertex array at `generation`.
+    #[inline]
+    pub(crate) fn draw_validated(&self, generation: u64, program: WebGLProgramId) -> bool {
+        self.draw_validated
+            .get()
+            .contains(&(generation, Some(program)))
+    }
+
+    pub(crate) fn set_draw_validated(&self, generation: u64, program: WebGLProgramId) {
+        let [latest, _] = self.draw_validated.get();
+        self.draw_validated
+            .set([(generation, Some(program)), latest]);
     }
 
     pub(crate) fn id(&self) -> Option<WebGLVertexArrayId> {

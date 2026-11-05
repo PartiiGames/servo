@@ -6,7 +6,9 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::cell::Ref;
 use script_bindings::reflector::reflect_dom_object;
-use servo_canvas_traits::webgl::{ActiveAttribInfo, WebGLResult, WebGLVertexArrayId};
+use servo_canvas_traits::webgl::{
+    ActiveAttribInfo, WebGLProgramId, WebGLResult, WebGLVertexArrayId,
+};
 
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
@@ -63,6 +65,14 @@ impl WebGLVertexArrayObjectOES {
 
     pub(crate) fn element_array_buffer(&self) -> &MutNullableDom<WebGLBuffer> {
         self.array_object.element_array_buffer()
+    }
+
+    pub(crate) fn draw_validated(&self, generation: u64, program: WebGLProgramId) -> bool {
+        self.array_object.draw_validated(generation, program)
+    }
+
+    pub(crate) fn set_draw_validated(&self, generation: u64, program: WebGLProgramId) {
+        self.array_object.set_draw_validated(generation, program)
     }
 
     pub(crate) fn get_vertex_attrib(&self, index: u32) -> Option<Ref<'_, VertexAttribData>> {
