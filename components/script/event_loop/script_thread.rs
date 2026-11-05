@@ -1116,6 +1116,7 @@ impl ScriptThread {
     ///
     /// Returns true if any reflows produced a new display list.
     pub(crate) fn update_the_rendering(&self, cx: &mut js::context::JSContext) -> bool {
+        let _prof = crate::partii_frame_prof::Scope::new(false);
         let now = Instant::now();
         self.last_render_opportunity_time.set(Some(now));
         self.cancel_scheduled_update_the_rendering();

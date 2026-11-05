@@ -2024,6 +2024,7 @@ impl Document {
 
     /// <https://html.spec.whatwg.org/multipage/#run-the-animation-frame-callbacks>
     pub(crate) fn run_the_animation_frame_callbacks(&self, cx: &mut CurrentRealm) {
+        let _prof = crate::partii_frame_prof::Scope::new(true);
         self.running_animation_callbacks.set(true);
         let timing = self.global().performance(cx).Now();
 
