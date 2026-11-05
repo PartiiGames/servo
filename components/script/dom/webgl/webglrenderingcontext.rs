@@ -938,7 +938,9 @@ impl WebGLRenderingContext {
 
     /// WebGL 1: the sampler bindings of the current program whose texture is incomplete
     /// because it is float / half-float without OES_texture_(half_)float_linear yet filters
-    /// with LINEAR (OES_texture_float_linear). Such a texture samples as opaque black.
+    /// with LINEAR (OES_texture_float_linear), or because it is non-power-of-two sized and
+    /// repeats or mipmaps (`WebGLTexture::is_incomplete_npot`; desktop GL would sample it).
+    /// Such a texture samples as opaque black.
     fn incomplete_sampler_bindings(&self) -> Vec<(u32, u32, DomRoot<WebGLTexture>)> {
         let mut bindings = Vec::new();
         if self.webgl_version() != WebGLVersion::WebGL1 {
@@ -968,10 +970,9 @@ impl WebGLRenderingContext {
                         self.extension_manager
                             .is_filterable(data_type.as_gl_constant())
                     });
-                if !filterable &&
-                    texture.is_using_linear_filtering() &&
-                    !bindings.iter().any(|(u, t, _)| *u == unit && *t == target)
-                {
+                let incomplete = (!filterable && texture.is_using_linear_filtering()) ||
+                    texture.is_incomplete_npot();
+                if incomplete && !bindings.iter().any(|(u, t, _)| *u == unit && *t == target) {
                     bindings.push((unit, target, texture));
                 }
             }
@@ -1696,6 +1697,21 @@ impl WebGLRenderingContext {
         if count == 0 || primcount == 0 {
             return Ok(());
         }
+        // Instanced attributes read draw arguments (primcount, base_instance), so they're
+        // checked on every draw, cached or not.
+        let active_attribs = current_program.active_attribs();
+        match self.webgl_version() {
+            WebGLVersion::WebGL1 => self.current_vao(cx).validate_instanced_attribs(
+                primcount as u32,
+                0,
+                &active_attribs,
+            ),
+            WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).validate_instanced_attribs(
+                primcount as u32,
+                base_instance,
+                &active_attribs,
+            ),
+        }?;
 
         let offset = offset as u32;
         self.send_draw_command(if base_vertex != 0 || base_instance != 0 {

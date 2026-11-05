@@ -285,6 +285,38 @@ impl VertexArrayObject {
         self.validate_for_draw_base_instance(required_len, instance_count, 0, active_attribs)
     }
 
+    /// The instanced half of `validate_for_draw` (WebGL 1.0 6.6), for draws that count no
+    /// vertices (drawElements*): every enabled, active attribute with a divisor must hold
+    /// enough elements for `instance_count` instances from `base_instance`.
+    pub(crate) fn validate_instanced_attribs(
+        &self,
+        instance_count: u32,
+        base_instance: u32,
+        active_attribs: &[ActiveAttribInfo],
+    ) -> WebGLResult<()> {
+        if instance_count == 0 {
+            return Ok(());
+        }
+        let attribs = self.vertex_attribs.borrow();
+        for location in active_attribs.iter().filter_map(|info| info.location) {
+            let Some(attrib) = attribs.get(location as usize) else {
+                continue;
+            };
+            if !attrib.enabled_as_array || attrib.divisor == 0 || attrib.buffer.is_none() {
+                continue;
+            }
+            if attrib
+                .max_vertices()
+                .saturating_sub(base_instance)
+                .checked_mul(attrib.divisor)
+                .is_some_and(|v| v < instance_count)
+            {
+                return Err(WebGLError::InvalidOperation);
+            }
+        }
+        Ok(())
+    }
+
     /// `validate_for_draw` for draws whose instanced attributes start at `base_instance`
     /// (WEBGL_draw_instanced_base_vertex_base_instance).
     pub(crate) fn validate_for_draw_base_instance(

@@ -118,4 +118,14 @@ impl WebGLVertexArrayObjectOES {
         self.array_object
             .validate_for_draw(required_len, instance_count, active_attribs)
     }
+
+    pub(crate) fn validate_instanced_attribs(
+        &self,
+        instance_count: u32,
+        base_instance: u32,
+        active_attribs: &[ActiveAttribInfo],
+    ) -> WebGLResult<()> {
+        self.array_object
+            .validate_instanced_attribs(instance_count, base_instance, active_attribs)
+    }
 }

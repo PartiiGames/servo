@@ -123,6 +123,9 @@ pub(crate) struct WebGLTexture {
     // Store information for min and mag filters
     min_filter: Cell<u32>,
     mag_filter: Cell<u32>,
+    /// TEXTURE_WRAP_S and _T, for WebGL 1's non-power-of-two completeness rule.
+    wrap_s: Cell<u32>,
+    wrap_t: Cell<u32>,
     /// Framebuffers this texture is attached to (pruned as they let go of it), whose
     /// completeness changes when it is re-specified.
     attached_framebuffers: DomRefCell<Vec<Dom<WebGLFramebuffer>>>,
@@ -152,6 +155,8 @@ impl WebGLTexture {
             face_count: Cell::new(0),
             min_filter: Cell::new(constants::NEAREST_MIPMAP_LINEAR),
             mag_filter: Cell::new(constants::LINEAR),
+            wrap_s: Cell::new(constants::REPEAT),
+            wrap_t: Cell::new(constants::REPEAT),
             image_info_array: DomRefCell::new(Vec::new()),
             attached_framebuffers: Default::default(),
             droppable: DroppableWebGLTexture {
@@ -558,6 +563,11 @@ impl WebGLTexture {
             },
             constants::TEXTURE_WRAP_S | constants::TEXTURE_WRAP_T => match int_value as u32 {
                 constants::CLAMP_TO_EDGE | constants::MIRRORED_REPEAT | constants::REPEAT => {
+                    if param == constants::TEXTURE_WRAP_S {
+                        self.wrap_s.set(int_value as u32);
+                    } else {
+                        self.wrap_t.set(int_value as u32);
+                    }
                     context.send_command(WebGLCommand::TexParameteri(target, param, int_value));
                     Ok(())
                 },
@@ -581,6 +591,23 @@ impl WebGLTexture {
 
     pub(crate) fn mag_filter(&self) -> u32 {
         self.mag_filter.get()
+    }
+
+    /// WebGL 1.0 (GL ES 2.0 3.8.2): a texture whose base image isn't power-of-two sized is
+    /// incomplete unless it clamps to edge and doesn't mipmap; it samples as opaque black.
+    pub(crate) fn is_incomplete_npot(&self) -> bool {
+        let Some(base) = self.image_info_at_face(0, 0) else {
+            return false;
+        };
+        if base.width().is_power_of_two() && base.height().is_power_of_two() {
+            return false;
+        }
+        self.wrap_s.get() != constants::CLAMP_TO_EDGE ||
+            self.wrap_t.get() != constants::CLAMP_TO_EDGE ||
+            !matches!(
+                self.min_filter.get(),
+                constants::NEAREST | constants::LINEAR
+            )
     }
 
     pub(crate) fn is_using_linear_filtering(&self) -> bool {
