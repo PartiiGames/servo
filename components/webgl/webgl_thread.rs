@@ -114,9 +114,26 @@ pub struct GLState {
     /// WebGL 2 contexts on desktop GL are core profile, which has no ALPHA, LUMINANCE or
     /// LUMINANCE_ALPHA textures: they are stored as R / RG textures with a swizzle.
     emulate_luminance: bool,
+    /// The scissor box has no area (glScissor with a zero width or height).
+    scissor_empty: bool,
+    /// ANY_SAMPLES_PASSED(_CONSERVATIVE) queries between beginQuery and endQuery.
+    active_occlusion_queries: u8,
+    /// Between beginTransformFeedback and endTransformFeedback (paused included).
+    transform_feedback_active: bool,
 }
 
 impl GLState {
+    /// Whether a draw can be dropped: with an empty scissor box it writes nothing, and Mesa's
+    /// llvmpipe resets an active occlusion query to 0 for such a draw issued after ones that
+    /// passed samples (occlusion-query-scissor, anglebug 7157). Transform feedback still
+    /// captures scissored-out draws, so those always run.
+    fn draw_writes_nothing_under_query(&self) -> bool {
+        self.scissor_test_enabled &&
+            self.scissor_empty &&
+            self.active_occlusion_queries > 0 &&
+            !self.transform_feedback_active
+    }
+
     // Are we faking having no alpha / depth / stencil?
     fn fake_no_alpha(&self) -> bool {
         self.drawing_to_default_framebuffer &
@@ -212,6 +229,9 @@ impl Default for GLState {
             _webgl_version: WebGLVersion::WebGL1,
             requested_flags: ContextAttributeFlags::empty(),
             emulate_luminance: false,
+            scissor_empty: false,
+            active_occlusion_queries: 0,
+            transform_feedback_active: false,
             color_write_mask: [true, true, true, true],
             clear_color: (0., 0., 0., 0.),
             scissor_test_enabled: false,
@@ -1134,6 +1154,20 @@ impl WebGLImpl {
         // Ensure there are no pending GL errors from other parts of the pipeline.
         debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
 
+        if state.draw_writes_nothing_under_query() &&
+            matches!(
+                command,
+                WebGLCommand::DrawArrays { .. } |
+                    WebGLCommand::DrawArraysInstanced { .. } |
+                    WebGLCommand::DrawElements { .. } |
+                    WebGLCommand::DrawElementsInstanced { .. } |
+                    WebGLCommand::DrawArraysInstancedBaseInstance { .. } |
+                    WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance { .. }
+            )
+        {
+            return;
+        }
+
         match command {
             WebGLCommand::GetContextAttributes(ref sender) => sender.send(*attributes).unwrap(),
             WebGLCommand::ActiveTexture(target) => unsafe { gl.active_texture(target) },
@@ -1396,6 +1430,7 @@ impl WebGLImpl {
                 // end up as negative numbers here, but I don't even think
                 // that can happen in the real world.
                 unsafe { gl.scissor(x, y, width as i32, height as i32) };
+                state.scissor_empty = width == 0 || height == 0;
             },
             WebGLCommand::StencilFunc(func, ref_, mask) => {
                 state.stencil_value_mask = (mask, mask);
@@ -1462,9 +1497,11 @@ impl WebGLImpl {
             },
             WebGLCommand::BeginTransformFeedback(mode) => {
                 unsafe { gl.begin_transform_feedback(mode) };
+                state.transform_feedback_active = true;
             },
             WebGLCommand::EndTransformFeedback() => {
                 unsafe { gl.end_transform_feedback() };
+                state.transform_feedback_active = false;
             },
             WebGLCommand::PauseTransformFeedback() => {
                 unsafe { gl.pause_transform_feedback() };
@@ -2811,9 +2848,16 @@ impl WebGLImpl {
             } => Self::initialize_framebuffer(gl, state, color, depth, stencil),
             WebGLCommand::BeginQuery(target, query_id) => {
                 unsafe { gl.begin_query(target, query_id.glow()) };
+                if is_occlusion_query(target) {
+                    state.active_occlusion_queries += 1;
+                }
             },
             WebGLCommand::EndQuery(target) => {
                 unsafe { gl.end_query(target) };
+                if is_occlusion_query(target) {
+                    state.active_occlusion_queries =
+                        state.active_occlusion_queries.saturating_sub(1);
+                }
             },
             WebGLCommand::DeleteQuery(query_id) => {
                 unsafe { gl.delete_query(query_id.glow()) };
@@ -3857,6 +3901,13 @@ fn texture_parameter_target(target: u32) -> u32 {
 
 /// The R / RG transfer format standing in for ALPHA, LUMINANCE and LUMINANCE_ALPHA on core
 /// profile contexts (same bytes per pixel, so client data needs no conversion).
+fn is_occlusion_query(target: u32) -> bool {
+    matches!(
+        target,
+        gl::ANY_SAMPLES_PASSED | gl::ANY_SAMPLES_PASSED_CONSERVATIVE
+    )
+}
+
 fn luminance_transfer_format(state: &GLState, format: TexFormat) -> u32 {
     if !state.emulate_luminance {
         return format.as_gl_constant();
