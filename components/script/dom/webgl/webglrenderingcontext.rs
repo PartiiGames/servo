@@ -14,7 +14,7 @@ use dom_struct::dom_struct;
 use euclid::default::{Point2D, Rect, Size2D};
 use js::context::{JSContext, NoGC};
 use js::conversions::ToJSValConvertible;
-use js::jsapi::{JSObject, Type};
+use js::jsapi::{JSObject, JSTracer, Type};
 use js::jsval::{BooleanValue, DoubleValue, Int32Value, NullValue, ObjectValue, UInt32Value};
 use js::rust::{CustomAutoRooterGuard, MutableHandleObject, MutableHandleValue};
 use js::typedarray::{ArrayBufferView, Float32, Int32, TypedArrayElementCreator, Uint32};
@@ -64,6 +64,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomOnceCell, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::NodeTraits;
@@ -199,8 +200,7 @@ pub(crate) struct WebGLRenderingContext {
     /// Partii (perf): object names reserved on the WebGL thread, handed out by create{Buffer, Framebuffer,
     /// Renderbuffer, Texture} without a round trip each (take_object_name).
     #[ignore_malloc_size_of = "Channels and a few names"]
-    #[no_trace]
-    object_names: DomRefCell<[ObjectNamePool; 4]>,
+    object_names: DomRefCell<ObjectNamePools>,
     extension_manager: WebGLExtensions,
     capabilities: Capabilities,
     default_vao: DomOnceCell<WebGLVertexArrayObjectOES>,
@@ -439,7 +439,7 @@ impl WebGLRenderingContext {
     pub(crate) fn take_object_name(&self, kind: WebGLObjectNameKind) -> Option<NonZeroU32> {
         let batch = object_name_batch();
         let mut pools = self.object_names.borrow_mut();
-        let pool = &mut pools[kind as usize];
+        let pool = &mut pools.0[kind as usize];
         if pool.names.is_empty() {
             match pool.pending.take() {
                 Some(receiver) => pool.names.extend(receiver.recv().unwrap_or_default()),
@@ -5741,4 +5741,14 @@ fn object_name_batch() -> u32 {
 pub(crate) struct ObjectNamePool {
     names: std::collections::VecDeque<u32>,
     pending: Option<GenericReceiver<Vec<u32>>>,
+}
+
+/// One pool per WebGLObjectNameKind.
+#[derive(Default)]
+pub(crate) struct ObjectNamePools([ObjectNamePool; 4]);
+
+// Names and a channel: no GC things.
+#[expect(unsafe_code)]
+unsafe impl JSTraceable for ObjectNamePools {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {}
 }
