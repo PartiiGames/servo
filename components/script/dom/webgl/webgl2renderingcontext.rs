@@ -415,11 +415,13 @@ impl WebGL2RenderingContext {
         }
         // An incomplete framebuffer is reported before anything about the draw's state (so
         // INVALID_FRAMEBUFFER_OPERATION wins over a feedback loop's INVALID_OPERATION).
-        self.base.validate_framebuffer()?;
-        self.validate_uniform_block_for_draw()?;
-        self.validate_vertex_attribs_for_draw(cx)?;
-        self.validate_sampler_types_for_draw()?;
-        self.validate_fragment_outputs_for_draw()
+        use crate::dom::webgl::webglrenderingcontext::draw_skip;
+        if !draw_skip("fb") { self.base.validate_framebuffer()?; }
+        if !draw_skip("ubo") { self.validate_uniform_block_for_draw()?; }
+        if !draw_skip("attr") { self.validate_vertex_attribs_for_draw(cx)?; }
+        if !draw_skip("samp") { self.validate_sampler_types_for_draw()?; }
+        if !draw_skip("frag") { self.validate_fragment_outputs_for_draw()?; }
+        Ok(())
     }
 
     pub(crate) fn base_context(&self) -> DomRoot<WebGLRenderingContext> {
@@ -1965,10 +1967,10 @@ impl WebGL2RenderingContext {
             .current_program()
             .is_some_and(|program| self.base.draw_state_cached(&program))
         {
-            self.validate_transform_feedback_buffers_for_draw(cx)?;
+            if !crate::dom::webgl::webglrenderingcontext::draw_skip("tf") { self.validate_transform_feedback_buffers_for_draw(cx)?; }
         }
-        let recorded =
-            self.validate_transform_feedback_for_draw(mode, count, primcount, indexed)?;
+        let recorded = if crate::dom::webgl::webglrenderingcontext::draw_skip("tf") { None } else {
+            self.validate_transform_feedback_for_draw(mode, count, primcount, indexed)? };
         draw(cx)?;
         if let Some(vertices) = recorded {
             self.with_current_transform_feedback(|tf| tf.add_vertices_recorded(vertices));
@@ -3898,6 +3900,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn DrawElements(&self, cx: &mut JSContext, mode: u32, count: i32, type_: u32, offset: i64) {
+        if crate::dom::webgl::webglrenderingcontext::draw_skip("all") {
+            return;
+        }
         handle_potential_webgl_error!(
             self.base,
             self.draw_elements_checked(cx, mode, count, type_, offset, 1)

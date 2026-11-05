@@ -1259,16 +1259,16 @@ impl WebGLRenderingContext {
         // With no vertices to count, the attribute check reads no draw argument (it is then part of
         // the cached state checks).
         if !cached || required_len > 0 {
-            self.validate_vao_for_draw_base_instance(
+            if !draw_skip("vao") { self.validate_vao_for_draw_base_instance(
                 cx,
                 required_len,
                 primcount,
                 base_instance,
                 &current_program,
-            )?;
+            )?; }
         }
         if !cached {
-            self.validate_framebuffer()?;
+            if !draw_skip("fb") { self.validate_framebuffer()?; }
             self.mark_draw_state_valid(&current_program);
         }
 
@@ -1276,7 +1276,7 @@ impl WebGLRenderingContext {
             return Ok(());
         }
 
-        self.send_command(if base_instance != 0 {
+        if !draw_skip("send") { self.send_command(if base_instance != 0 {
             WebGLCommand::DrawArraysInstancedBaseInstance {
                 mode,
                 first,
@@ -1293,8 +1293,8 @@ impl WebGLRenderingContext {
                 count,
                 primcount,
             }
-        });
-        self.mark_as_dirty();
+        }); }
+        if !draw_skip("dirty") { self.mark_as_dirty(); }
         Ok(())
     }
 
@@ -1376,8 +1376,8 @@ impl WebGLRenderingContext {
         // With no vertex count, the attribute check reads no draw argument: it is one of the
         // cached state checks.
         if !cached {
-            self.validate_vao_for_draw_base_instance(cx, 0, primcount, base_instance, &current_program)?;
-            self.validate_framebuffer()?;
+            if !draw_skip("vao") { self.validate_vao_for_draw_base_instance(cx, 0, primcount, base_instance, &current_program)?; }
+            if !draw_skip("fb") { self.validate_framebuffer()?; }
             self.mark_draw_state_valid(&current_program);
         }
 
@@ -1386,7 +1386,7 @@ impl WebGLRenderingContext {
         }
 
         let offset = offset as u32;
-        self.send_command(if base_vertex != 0 || base_instance != 0 {
+        if !draw_skip("send") { self.send_command(if base_vertex != 0 || base_instance != 0 {
             WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance {
                 mode,
                 count,
@@ -1411,8 +1411,8 @@ impl WebGLRenderingContext {
                 offset,
                 primcount,
             }
-        });
-        self.mark_as_dirty();
+        }); }
+        if !draw_skip("dirty") { self.mark_as_dirty(); }
         Ok(())
     }
 
@@ -5839,6 +5839,23 @@ pub(crate) fn clip_copy_to_read_framebuffer(
         (x1 - x0 as i64) as i32,
         (y1 - y0 as i64) as i32,
     ))
+}
+
+/// Partii (perf, measurement only): PARTII_DRAW_SKIP=fb/ubo/attr/samp/frag/tf/vao/dirty/send/all skips
+/// that part of every draw, to attribute a draw's script-side cost (with PARTII_WEBGL_DRAW_CACHE=0).
+/// Never ships.
+pub(crate) fn draw_skip(name: &str) -> bool {
+    static SKIP: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    SKIP.get_or_init(|| {
+        std::env::var("PARTII_DRAW_SKIP")
+            .unwrap_or_default()
+            .split(['/', ','])
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    })
+    .iter()
+    .any(|s| s == name)
 }
 
 /// Partii (perf): PARTII_WEBGL_DRAW_CACHE=0 validates every draw's state in full, as before the draw
