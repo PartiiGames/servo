@@ -314,11 +314,16 @@ impl WebGLRenderingContext {
             size,
             attrs,
         ) {
-            Ok(ctx) => Some(reflect_weak_referenceable_dom_object(
-                cx,
-                Rc::new(ctx),
-                global,
-            )),
+            Ok(ctx) => {
+                if object_name_prefill() {
+                    ctx.prefill_object_names();
+                }
+                Some(reflect_weak_referenceable_dom_object(
+                    cx,
+                    Rc::new(ctx),
+                    global,
+                ))
+            },
             Err(msg) => {
                 error!("Couldn't create WebGLRenderingContext: {}", msg);
                 let event = WebGLContextEvent::new(
@@ -435,6 +440,33 @@ impl WebGLRenderingContext {
         }
     }
 
+    /// Asks for a first batch of every pooled kind as the context is made, before any upload is
+    /// queued, so even the first create of a kind takes a name that has already arrived instead of
+    /// waiting out the queue.
+    fn prefill_object_names(&self) {
+        if object_name_batch() <= 1 {
+            return;
+        }
+        let mut pools = self.object_names.borrow_mut();
+        for kind in [
+            WebGLObjectNameKind::Buffer,
+            WebGLObjectNameKind::Framebuffer,
+            WebGLObjectNameKind::Renderbuffer,
+            WebGLObjectNameKind::Texture,
+            WebGLObjectNameKind::Program,
+            WebGLObjectNameKind::VertexShader,
+            WebGLObjectNameKind::FragmentShader,
+        ] {
+            let (sender, receiver) = webgl_channel().unwrap();
+            self.send_command(WebGLCommand::GenObjectNames(
+                kind,
+                object_name_batch_for(kind),
+                sender,
+            ));
+            pools.0[kind as usize].pending = Some(receiver);
+        }
+    }
+
     #[inline]
     /// Partii (perf): a new object name of `kind` from the reserved batch. createTexture and friends used to
     /// wait for a reply from the WebGL thread each, behind everything queued before them (Phaser's boot: ~200
@@ -442,12 +474,7 @@ impl WebGLRenderingContext {
     /// for when half the current one is used, so a create waits only when a whole batch went in between.
     /// None when the WebGL thread has none to give (as the Create* commands answer None).
     pub(crate) fn take_object_name(&self, kind: WebGLObjectNameKind) -> Option<NonZeroU32> {
-        let batch = match kind {
-            WebGLObjectNameKind::Program |
-            WebGLObjectNameKind::VertexShader |
-            WebGLObjectNameKind::FragmentShader => object_name_batch().min(16),
-            _ => object_name_batch(),
-        };
+        let batch = object_name_batch_for(kind);
         let mut pools = self.object_names.borrow_mut();
         let pool = &mut pools.0[kind as usize];
         if pool.names.is_empty() {
@@ -5753,6 +5780,23 @@ fn object_name_batch() -> u32 {
             .filter(|&n: &u32| n >= 1)
             .unwrap_or(128)
     })
+}
+
+/// Programs and shaders are real (empty) GL objects, not just names, so their batches stay small.
+fn object_name_batch_for(kind: WebGLObjectNameKind) -> u32 {
+    match kind {
+        WebGLObjectNameKind::Program |
+        WebGLObjectNameKind::VertexShader |
+        WebGLObjectNameKind::FragmentShader => object_name_batch().min(16),
+        _ => object_name_batch(),
+    }
+}
+
+/// Partii (perf, A/B): PARTII_WEBGL_NAME_PREFILL=0 leaves the pools empty until the first create
+/// of each kind.
+fn object_name_prefill() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_NAME_PREFILL").map_or(true, |v| v != "0"))
 }
 
 #[derive(Default)]
