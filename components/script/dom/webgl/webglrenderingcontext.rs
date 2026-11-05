@@ -31,7 +31,7 @@ use servo_canvas_traits::webgl::{
     AlphaTreatment, CompressedTexData, GLContextAttributes, GLLimits, GlType, Parameter,
     SizedDataType, TexDataType, TexFormat, TexParameter, WebGLCommand, WebGLCommandBacktrace,
     WebGLContextId, WebGLError, WebGLFramebufferBindingRequest, WebGLMsg, WebGLMsgSender,
-    WebGLObjectNameKind, WebGLProgramId, WebGLResult, WebGLSLVersion, WebGLVersion, YAxisTreatment,
+    WebGLObjectNameKind, WebGLProgramId, WebGLResult, WebGLVersion, YAxisTreatment,
     webgl_channel,
 };
 use servo_config::pref;
@@ -220,8 +220,6 @@ pub(crate) struct WebGLRenderingContext {
     reflector_: Reflector<AssociatedMemory>,
     #[no_trace]
     webgl_version: WebGLVersion,
-    #[no_trace]
-    glsl_version: WebGLSLVersion,
     #[ignore_malloc_size_of = "Defined in surfman"]
     #[no_trace]
     limits: GLLimits,
@@ -311,7 +309,6 @@ impl WebGLRenderingContext {
             Self {
                 reflector_: Reflector::new(),
                 webgl_version,
-                glsl_version: ctx_data.glsl_version,
                 limits: ctx_data.limits,
                 canvas,
                 last_error: Cell::new(None),
@@ -3551,13 +3548,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         handle_potential_webgl_error!(self, self.validate_ownership(shader), return);
         handle_potential_webgl_error!(
             self,
-            shader.compile(
-                self.api_type,
-                self.webgl_version,
-                self.glsl_version,
-                &self.limits,
-                &self.extension_manager,
-            )
+            shader.compile(self.webgl_version, &self.limits, &self.extension_manager)
         )
     }
 
@@ -4078,7 +4069,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             KHRParallelShaderCompileConstants::COMPLETION_STATUS_KHR
                 if self.extension_manager.is_parallel_shader_compile_enabled() =>
             {
-                BooleanValue(true)
+                BooleanValue(shader.compile_completed())
             },
             _ => {
                 self.webgl_error(InvalidEnum);

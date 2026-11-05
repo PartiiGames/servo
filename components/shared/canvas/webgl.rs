@@ -325,7 +325,15 @@ pub enum WebGLCommand {
     DepthRange(f32, f32),
     Enable(u32),
     Disable(u32),
-    CompileShader(WebGLShaderId, String),
+    /// Translates a shader source with ANGLE and compiles the result, answering with the
+    /// outcome. Done on the WebGL thread so that compileShader / linkProgram don't block
+    /// script (KHR_parallel_shader_compile), while commands stay in order.
+    CompileShader(
+        WebGLShaderId,
+        String,
+        ShaderTranslation,
+        GenericSender<ShaderCompileInfo>,
+    ),
     /// copyTexImage2D; `read_size` is the read framebuffer's size, for the WebGL rule that
     /// pixels outside it are zero.
     CopyTexImage2D {
@@ -904,6 +912,39 @@ pub enum WebGLFramebufferBindingRequest {
 }
 
 pub type WebGLResult<T> = Result<T, WebGLError>;
+
+/// What the shader translator needs besides the source: the shader type, the WebGL version,
+/// the context's limits and the extensions enabled at compileShader.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ShaderTranslation {
+    pub shader_type: u32,
+    pub webgl2: bool,
+    pub max_vertex_attribs: i32,
+    pub max_vertex_uniform_vectors: i32,
+    pub max_vertex_texture_image_units: i32,
+    pub max_combined_texture_image_units: i32,
+    pub max_texture_image_units: i32,
+    pub max_fragment_uniform_vectors: i32,
+    pub max_vertex_output_vectors: i32,
+    pub max_fragment_input_vectors: i32,
+    pub max_varying_vectors: i32,
+    pub min_program_texel_offset: i32,
+    pub max_program_texel_offset: i32,
+    pub max_draw_buffers: i32,
+    pub oes_standard_derivatives: bool,
+    pub ext_shader_texture_lod: bool,
+    pub ext_frag_depth: bool,
+    /// gl_DrawID (WEBGL_multi_draw), emulated as a uniform.
+    pub angle_multi_draw: bool,
+}
+
+/// The outcome of a CompileShader command.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShaderCompileInfo {
+    /// The translated source when translation succeeded.
+    pub object_code: Option<String>,
+    pub info_log: String,
+}
 
 /// Information about a WebGL program linking operation.
 #[derive(Clone, Debug, Deserialize, Serialize)]

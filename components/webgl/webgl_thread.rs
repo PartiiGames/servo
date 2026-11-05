@@ -22,6 +22,7 @@ use glow::{
 use half::f16;
 use itertools::Itertools;
 use log::{debug, error, trace, warn};
+use mozangle::shaders::{BuiltInResources, CompileOptions, Output, ShaderValidator};
 use paint_api::{
     CrossProcessPaintApi, PainterSurfmanDetailsMap, SerializableImageData,
     WebRenderExternalImageIdManager, WebRenderImageHandlerType,
@@ -44,7 +45,7 @@ use servo_canvas_traits::webgl::{
     TexFormat, WebGLBufferId, WebGLChan, WebGLCommand, WebGLCommandBacktrace, WebGLContextId,
     WebGLCreateContextResult, WebGLFramebufferBindingRequest, WebGLFramebufferId, WebGLMsg,
     WebGLMsgSender, WebGLObjectNameKind, WebGLProgramId, WebGLQueryId, WebGLRenderbufferId,
-    WebGLSLVersion,
+    ShaderCompileInfo, ShaderTranslation, WebGLSLVersion,
     WebGLSamplerId, WebGLShaderId, WebGLSyncId, WebGLTextureId, WebGLVersion, WebGLVertexArrayId,
     YAxisTreatment,
 };
@@ -1558,8 +1559,12 @@ impl WebGLImpl {
             WebGLCommand::GetProgramInfoLog(program_id, ref chan) => {
                 Self::program_info_log(gl, program_id, chan)
             },
-            WebGLCommand::CompileShader(shader_id, ref source) => {
-                Self::compile_shader(gl, shader_id, source)
+            WebGLCommand::CompileShader(shader_id, ref source, ref translation, ref sender) => {
+                let info = Self::translate_shader(gl, source, translation);
+                if let Some(ref object_code) = info.object_code {
+                    Self::compile_shader(gl, shader_id, object_code);
+                }
+                let _ = sender.send(info);
             },
             WebGLCommand::CreateBuffer(ref chan) => Self::create_buffer(gl, chan),
             WebGLCommand::CreateFramebuffer(ref chan) => Self::create_framebuffer(gl, chan),
@@ -3359,6 +3364,120 @@ impl WebGLImpl {
     }
 
     #[inline]
+    /// Translates a WebGL shader with ANGLE into the GLSL this context takes.
+    fn translate_shader(gl: &Gl, source: &str, t: &ShaderTranslation) -> ShaderCompileInfo {
+        static INITIALIZATION: std::sync::Once = std::sync::Once::new();
+        INITIALIZATION.call_once(|| mozangle::shaders::initialize().unwrap());
+
+        let mut params = BuiltInResources {
+            MaxVertexAttribs: t.max_vertex_attribs,
+            MaxVertexUniformVectors: t.max_vertex_uniform_vectors,
+            MaxVertexTextureImageUnits: t.max_vertex_texture_image_units,
+            MaxCombinedTextureImageUnits: t.max_combined_texture_image_units,
+            MaxTextureImageUnits: t.max_texture_image_units,
+            MaxFragmentUniformVectors: t.max_fragment_uniform_vectors,
+
+            MaxVertexOutputVectors: t.max_vertex_output_vectors,
+            MaxFragmentInputVectors: t.max_fragment_input_vectors,
+            MaxVaryingVectors: t.max_varying_vectors,
+
+            OES_standard_derivatives: t.oes_standard_derivatives as _,
+            EXT_shader_texture_lod: t.ext_shader_texture_lod as _,
+            EXT_frag_depth: t.ext_frag_depth as _,
+            ANGLE_multi_draw: t.angle_multi_draw as _,
+
+            FragmentPrecisionHigh: 1,
+            ..Default::default()
+        };
+        if t.webgl2 {
+            params.MinProgramTexelOffset = t.min_program_texel_offset;
+            params.MaxProgramTexelOffset = t.max_program_texel_offset;
+            params.MaxDrawBuffers = t.max_draw_buffers;
+        }
+
+        let is_gles = gl.version().is_embedded;
+        let validator = if !t.webgl2 {
+            let output_format = if is_gles { Output::Essl } else { Output::Glsl };
+            ShaderValidator::for_webgl(t.shader_type, output_format, &params)
+        } else {
+            let output_format = if is_gles {
+                Output::Essl
+            } else {
+                let glsl_version = WebGLThread::get_glsl_version(gl);
+                match (glsl_version.major, glsl_version.minor) {
+                    (1, 30) => Output::Glsl130,
+                    (1, 40) => Output::Glsl140,
+                    (1, 50) => Output::Glsl150Core,
+                    (3, 30) => Output::Glsl330Core,
+                    (4, 0) => Output::Glsl400Core,
+                    (4, 10) => Output::Glsl410Core,
+                    (4, 20) => Output::Glsl420Core,
+                    (4, 30) => Output::Glsl430Core,
+                    (4, 40) => Output::Glsl440Core,
+                    (4, _) => Output::Glsl450Core,
+                    _ => Output::Glsl140,
+                }
+            };
+            ShaderValidator::for_webgl2(t.shader_type, output_format, &params)
+        };
+        let Some(validator) = validator else {
+            return ShaderCompileInfo {
+                object_code: None,
+                info_log: String::new(),
+            };
+        };
+
+        // Replicating
+        // https://searchfox.org/mozilla-esr115/rev/f1fb0868dc63b89ccf9eea157960d1ec27fb55a2/dom/canvas/WebGLShaderValidator.cpp#29
+        let mut options = CompileOptions::mozangle();
+        options.set_variables(1);
+        options.set_enforcePackingRestrictions(1);
+        options.set_objectCode(1);
+        options.set_initGLPosition(1);
+        options.set_initializeUninitializedLocals(1);
+        options.set_initOutputVariables(1);
+
+        options.set_limitExpressionComplexity(1);
+        options.set_limitCallStackDepth(1);
+        // gl_DrawID as a uniform the draw calls set (WEBGL_multi_draw).
+        options.set_emulateGLDrawID(1);
+
+        if cfg!(target_os = "macos") {
+            options.set_removeInvariantAndCentroidForESSL3(1);
+
+            // Work around https://bugs.webkit.org/show_bug.cgi?id=124684,
+            // https://chromium.googlesource.com/angle/angle/+/5e70cf9d0b1bb
+            options.set_unfoldShortCircuit(1);
+            // Work around that Mac drivers handle struct scopes incorrectly.
+            options.set_regenerateStructNames(1);
+            // TODO: Only apply this workaround to Intel hardware
+            // Work around that Intel drivers on Mac OSX handle for-loop incorrectly.
+            options.set_addAndTrueToLoopCondition(1);
+            options.set_rewriteTexelFetchOffsetToTexelFetch(1);
+        } else {
+            // We want to do this everywhere, but to do this on Mac, we need
+            // to do it only on Mac OSX > 10.6 as this causes the shader
+            // compiler in 10.6 to crash
+            options.set_clampIndirectArrayBounds(1);
+        }
+
+        let object_code = match validator.compile(&[source], options) {
+            Ok(()) => {
+                let object_code = validator.object_code();
+                debug!("Shader translated: {}", object_code);
+                Some(object_code)
+            },
+            Err(error) => {
+                debug!("Shader translation failed: {}", error);
+                None
+            },
+        };
+        ShaderCompileInfo {
+            object_code,
+            info_log: validator.info_log(),
+        }
+    }
+
     fn compile_shader(gl: &Gl, shader_id: WebGLShaderId, source: &str) {
         unsafe {
             gl.shader_source(shader_id.glow(), source);

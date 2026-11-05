@@ -5,6 +5,7 @@
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -28,7 +29,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use crate::dom::webgl::webglshader::{FragOutputKind, WebGLShader};
+use crate::dom::webgl::webglshader::{CompileJob, FragOutputKind, WebGLShader};
 use crate::dom::webgl::webgluniformlocation::WebGLUniformLocation;
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
@@ -205,6 +206,12 @@ pub(crate) struct WebGLProgram {
     sampler_units: DomRefCell<HashMap<i32, i32>>,
     /// bindAttribLocation calls so far (name -> index), for the link-time aliasing check.
     attrib_bindings: DomRefCell<HashMap<String, u32>>,
+    /// The vertex and fragment compiles the pending link uses, checked when it resolves.
+    #[no_trace]
+    #[ignore_malloc_size_of = "channel"]
+    link_compiles: RefCell<Option<(Rc<CompileJob>, Rc<CompileJob>)>>,
+    /// The bindAttribLocation calls the pending link uses.
+    link_attrib_bindings: DomRefCell<HashMap<String, u32>>,
     /// The fragment shader's outputs by location at the last link (see
     /// `WebGLShader::fragment_outputs`), for the WebGL 2 draw buffer check.
     fragment_outputs: DomRefCell<Option<Box<[Option<FragOutputKind>]>>>,
@@ -235,6 +242,8 @@ impl WebGLProgram {
             pending_link: RefCell::new(None),
             sampler_units: Default::default(),
             attrib_bindings: Default::default(),
+            link_compiles: Default::default(),
+            link_attrib_bindings: Default::default(),
             fragment_outputs: Default::default(),
             emulated_builtins: Default::default(),
             hidden_uniform_indices: DomRefCell::new(vec![].into()),
@@ -339,21 +348,25 @@ impl WebGLProgram {
         *self.uniform_block_bindings.borrow_mut() = Box::new([]);
         *self.fragment_outputs.borrow_mut() = None;
 
-        match self.fragment_shader.get() {
-            Some(ref shader) if shader.successfully_compiled() => {
-                *self.fragment_outputs.borrow_mut() = shader.fragment_outputs();
-            },
-            _ => return Ok(()), // callers use gl.LINK_STATUS to check link errors
-        }
-
-        match self.vertex_shader.get() {
-            Some(ref shader) if shader.successfully_compiled() => {
-                if self.inputs_alias(shader) {
-                    return Ok(());
-                }
-            },
-            _ => return Ok(()), // callers use gl.LINK_STATUS to check link errors
-        }
+        // Callers use gl.LINK_STATUS to check link errors. Compiles still in flight are
+        // checked when the link resolves (KHR_parallel_shader_compile: linkProgram mustn't
+        // wait for them).
+        let Some(fragment) = self
+            .fragment_shader
+            .get()
+            .and_then(|shader| shader.compile_job())
+        else {
+            return Ok(());
+        };
+        let Some(vertex) = self
+            .vertex_shader
+            .get()
+            .and_then(|shader| shader.compile_job())
+        else {
+            return Ok(());
+        };
+        *self.link_compiles.borrow_mut() = Some((vertex, fragment));
+        *self.link_attrib_bindings.borrow_mut() = self.attrib_bindings.borrow().clone();
 
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast()
@@ -365,11 +378,11 @@ impl WebGLProgram {
     /// Whether two declared vertex inputs (active or not) would share a location with the
     /// current bindAttribLocation calls, which fails the link (GLSL ES 3.00.6 12.46). Only
     /// known for ESSL 3.00 shaders whose inputs could be read; otherwise GL decides.
-    fn inputs_alias(&self, vertex_shader: &WebGLShader) -> bool {
-        let Some(inputs) = vertex_shader.vertex_inputs() else {
+    fn inputs_alias(&self, vertex: &CompileJob) -> bool {
+        let Some(ref inputs) = vertex.vertex_inputs else {
             return false;
         };
-        let bindings = self.attrib_bindings.borrow();
+        let bindings = self.link_attrib_bindings.borrow();
         let mut used: Vec<(u32, u32)> = vec![];
         for input in inputs.iter() {
             let Some(start) = input
@@ -436,6 +449,15 @@ impl WebGLProgram {
     }
 
     fn apply_link_info(&self, link_info: ProgramLinkInfo) {
+        if let Some((vertex, fragment)) = self.link_compiles.borrow_mut().take() {
+            if !vertex.outcome().succeeded || !fragment.outcome().succeeded {
+                return;
+            }
+            *self.fragment_outputs.borrow_mut() = fragment.outcome().fragment_outputs.clone();
+            if self.inputs_alias(&vertex) {
+                return;
+            }
+        }
         {
             let mut used_locs = HashSet::new();
             let mut used_names = HashSet::new();

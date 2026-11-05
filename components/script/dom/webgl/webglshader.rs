@@ -3,20 +3,18 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
-use std::cell::Cell;
-use std::os::raw::c_int;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
-use std::sync::Once;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
-use mozangle::shaders::{BuiltInResources, CompileOptions, Output, ShaderValidator};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_weak_referenceable_dom_object;
 use script_bindings::weakref::WeakRef;
+use servo_base::generic_channel::{GenericReceiver, TryReceiveError};
 use servo_canvas_traits::webgl::{
-    GLLimits, GlType, WebGLCommand, WebGLError, WebGLResult, WebGLSLVersion, WebGLShaderId,
-    WebGLVersion, webgl_channel,
+    GLLimits, ShaderCompileInfo, ShaderTranslation, WebGLCommand, WebGLError, WebGLResult,
+    WebGLShaderId, WebGLVersion, webgl_channel,
 };
 #[cfg(feature = "webgl")]
 use {
@@ -37,11 +35,75 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 
-#[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf, PartialEq)]
-pub(crate) enum ShaderCompilationStatus {
-    NotCompiled,
-    Succeeded,
-    Failed,
+/// A compileShader the WebGL thread translates (ANGLE) and compiles. Its answer is read
+/// lazily, so pages polling COMPLETION_STATUS_KHR (KHR_parallel_shader_compile) don't wait for
+/// it, and linkProgram takes the job so the link sees this compile even if the shader is
+/// recompiled before the link is read.
+pub(crate) struct CompileJob {
+    receiver: RefCell<Option<GenericReceiver<ShaderCompileInfo>>>,
+    outcome: OnceCell<CompileOutcome>,
+    shader_type: u32,
+    essl3: bool,
+    /// See `parse_vertex_inputs`; read from the source at compileShader.
+    pub(crate) vertex_inputs: Option<Box<[VertexInput]>>,
+}
+
+pub(crate) struct CompileOutcome {
+    pub(crate) succeeded: bool,
+    pub(crate) info_log: String,
+    /// See `parse_fragment_outputs`; None for vertex shaders or when they couldn't be read.
+    pub(crate) fragment_outputs: Option<Box<[Option<FragOutputKind>]>>,
+}
+
+impl CompileJob {
+    fn finish(&self, info: Option<ShaderCompileInfo>) -> CompileOutcome {
+        let Some(info) = info else {
+            // The context is gone.
+            return CompileOutcome {
+                succeeded: false,
+                info_log: String::new(),
+                fragment_outputs: None,
+            };
+        };
+        let fragment_outputs = match info.object_code {
+            Some(ref object_code) if self.shader_type == constants::FRAGMENT_SHADER => {
+                parse_fragment_outputs(object_code, self.essl3)
+            },
+            _ => None,
+        };
+        CompileOutcome {
+            succeeded: info.object_code.is_some(),
+            info_log: info.info_log,
+            fragment_outputs,
+        }
+    }
+
+    /// The outcome, waiting for it if needed.
+    pub(crate) fn outcome(&self) -> &CompileOutcome {
+        self.outcome.get_or_init(|| {
+            let receiver = self.receiver.borrow_mut().take();
+            self.finish(receiver.and_then(|receiver| receiver.recv().ok()))
+        })
+    }
+
+    /// Whether the outcome is in, without waiting for it.
+    pub(crate) fn completed(&self) -> bool {
+        if self.outcome.get().is_some() {
+            return true;
+        }
+        let result = match self.receiver.borrow().as_ref() {
+            None => return true,
+            Some(receiver) => receiver.try_recv(),
+        };
+        let info = match result {
+            Ok(info) => Some(info),
+            Err(TryReceiveError::Empty) => return false,
+            Err(TryReceiveError::ReceiveError(_)) => None,
+        };
+        self.receiver.borrow_mut().take();
+        let _ = self.outcome.set(self.finish(info));
+        true
+    }
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
@@ -81,20 +143,16 @@ pub(crate) struct WebGLShader {
     webgl_object: WebGLObject,
     gl_type: u32,
     source: DomRefCell<DOMString>,
-    info_log: DomRefCell<DOMString>,
     attached_counter: Cell<u32>,
-    compilation_status: Cell<ShaderCompilationStatus>,
-    /// A compiled fragment shader's outputs by location (None where nothing is declared), for
-    /// the WebGL 2 draw check against the draw buffers. None when they couldn't be read.
-    fragment_outputs: DomRefCell<Option<Box<[Option<FragOutputKind>]>>>,
-    /// A compiled ESSL 3.00 vertex shader's declared inputs, active or not (see
-    /// `parse_vertex_inputs`), for the link-time aliasing check. None when unknown.
-    vertex_inputs: DomRefCell<Option<Box<[VertexInput]>>>,
+    /// The last compileShader, if any.
+    #[no_trace]
+    #[ignore_malloc_size_of = "channel"]
+    compile_job: DomRefCell<Option<Rc<CompileJob>>>,
     droppable: DroppableWebGLShader,
 }
 
 /// A vertex shader input as declared in the source.
-#[derive(Clone, Debug, JSTraceable, MallocSizeOf)]
+#[derive(Clone, Debug)]
 pub(crate) struct VertexInput {
     pub(crate) name: String,
     /// `layout(location = N)`, which overrides bindAttribLocation.
@@ -342,20 +400,14 @@ fn parse_fragment_outputs(object_code: &str, essl3: bool) -> Option<Box<[Option<
     Some(outputs.into())
 }
 
-static GLSLANG_INITIALIZATION: Once = Once::new();
-
 impl WebGLShader {
     fn new_inherited(context: &WebGLRenderingContext, id: WebGLShaderId, shader_type: u32) -> Self {
-        GLSLANG_INITIALIZATION.call_once(|| ::mozangle::shaders::initialize().unwrap());
         Self {
             webgl_object: WebGLObject::new_inherited(context),
             gl_type: shader_type,
             source: Default::default(),
-            info_log: Default::default(),
             attached_counter: Cell::new(0),
-            compilation_status: Cell::new(ShaderCompilationStatus::NotCompiled),
-            fragment_outputs: Default::default(),
-            vertex_inputs: Default::default(),
+            compile_job: Default::default(),
             droppable: DroppableWebGLShader {
                 context: WeakRef::new(context),
                 id,
@@ -403,150 +455,61 @@ impl WebGLShader {
     /// glCompileShader
     pub(crate) fn compile(
         &self,
-        api_type: GlType,
         webgl_version: WebGLVersion,
-        glsl_version: WebGLSLVersion,
         limits: &GLLimits,
         ext: &WebGLExtensions,
     ) -> WebGLResult<()> {
         if self.droppable.marked_for_deletion.get() && !self.is_attached() {
             return Err(WebGLError::InvalidValue);
         }
-        if self.compilation_status.get() != ShaderCompilationStatus::NotCompiled {
-            debug!("Compiling already compiled shader {}", self.id());
-        }
 
-        let source = self.source.borrow();
-
-        let mut params = BuiltInResources {
-            MaxVertexAttribs: limits.max_vertex_attribs as c_int,
-            MaxVertexUniformVectors: limits.max_vertex_uniform_vectors as c_int,
-            MaxVertexTextureImageUnits: limits.max_vertex_texture_image_units as c_int,
-            MaxCombinedTextureImageUnits: limits.max_combined_texture_image_units as c_int,
-            MaxTextureImageUnits: limits.max_texture_image_units as c_int,
-            MaxFragmentUniformVectors: limits.max_fragment_uniform_vectors as c_int,
-
-            MaxVertexOutputVectors: limits.max_vertex_output_vectors as c_int,
-            MaxFragmentInputVectors: limits.max_fragment_input_vectors as c_int,
-            MaxVaryingVectors: limits.max_varying_vectors as c_int,
-
-            OES_standard_derivatives: ext.is_enabled::<OESStandardDerivatives>() as c_int,
-            EXT_shader_texture_lod: ext.is_enabled::<EXTShaderTextureLod>() as c_int,
-            EXT_frag_depth: ext.is_enabled::<EXTFragDepth>() as c_int,
-            // gl_DrawID; the translator turns it into the uniform angle_DrawID (emulateGLDrawID).
-            ANGLE_multi_draw: (ext.is_enabled::<WEBGLMultiDraw>() ||
-                ext.is_enabled::<WEBGLMultiDrawInstancedBaseVertexBaseInstance>())
-                as c_int,
-
-            FragmentPrecisionHigh: 1,
+        let source: String = (*self.source.borrow().str()).to_owned();
+        let webgl2 = webgl_version == WebGLVersion::WebGL2;
+        let mut translation = ShaderTranslation {
+            shader_type: self.gl_type,
+            webgl2,
+            max_vertex_attribs: limits.max_vertex_attribs as i32,
+            max_vertex_uniform_vectors: limits.max_vertex_uniform_vectors as i32,
+            max_vertex_texture_image_units: limits.max_vertex_texture_image_units as i32,
+            max_combined_texture_image_units: limits.max_combined_texture_image_units as i32,
+            max_texture_image_units: limits.max_texture_image_units as i32,
+            max_fragment_uniform_vectors: limits.max_fragment_uniform_vectors as i32,
+            max_vertex_output_vectors: limits.max_vertex_output_vectors as i32,
+            max_fragment_input_vectors: limits.max_fragment_input_vectors as i32,
+            max_varying_vectors: limits.max_varying_vectors as i32,
+            oes_standard_derivatives: ext.is_enabled::<OESStandardDerivatives>(),
+            ext_shader_texture_lod: ext.is_enabled::<EXTShaderTextureLod>(),
+            ext_frag_depth: ext.is_enabled::<EXTFragDepth>(),
+            angle_multi_draw: ext.is_enabled::<WEBGLMultiDraw>() ||
+                ext.is_enabled::<WEBGLMultiDrawInstancedBaseVertexBaseInstance>(),
             ..Default::default()
         };
-
-        if webgl_version == WebGLVersion::WebGL2 {
-            params.MinProgramTexelOffset = limits.min_program_texel_offset as c_int;
-            params.MaxProgramTexelOffset = limits.max_program_texel_offset as c_int;
-            params.MaxDrawBuffers = limits.max_draw_buffers as c_int;
+        if webgl2 {
+            translation.min_program_texel_offset = limits.min_program_texel_offset as i32;
+            translation.max_program_texel_offset = limits.max_program_texel_offset as i32;
+            translation.max_draw_buffers = limits.max_draw_buffers as i32;
         }
 
-        let validator = match webgl_version {
-            WebGLVersion::WebGL1 => {
-                let output_format = if api_type == GlType::Gles {
-                    Output::Essl
-                } else {
-                    Output::Glsl
-                };
-                ShaderValidator::for_webgl(self.gl_type, output_format, &params).unwrap()
-            },
-            WebGLVersion::WebGL2 => {
-                let output_format = if api_type == GlType::Gles {
-                    Output::Essl
-                } else {
-                    match (glsl_version.major, glsl_version.minor) {
-                        (1, 30) => Output::Glsl130,
-                        (1, 40) => Output::Glsl140,
-                        (1, 50) => Output::Glsl150Core,
-                        (3, 30) => Output::Glsl330Core,
-                        (4, 0) => Output::Glsl400Core,
-                        (4, 10) => Output::Glsl410Core,
-                        (4, 20) => Output::Glsl420Core,
-                        (4, 30) => Output::Glsl430Core,
-                        (4, 40) => Output::Glsl440Core,
-                        (4, _) => Output::Glsl450Core,
-                        _ => Output::Glsl140,
-                    }
-                };
-                ShaderValidator::for_webgl2(self.gl_type, output_format, &params).unwrap()
-            },
-        };
-
-        // Replicating
-        // https://searchfox.org/mozilla-esr115/rev/f1fb0868dc63b89ccf9eea157960d1ec27fb55a2/dom/canvas/WebGLShaderValidator.cpp#29
-        let mut options = CompileOptions::mozangle();
-        options.set_variables(1);
-        options.set_enforcePackingRestrictions(1);
-        options.set_objectCode(1);
-        options.set_initGLPosition(1);
-        options.set_initializeUninitializedLocals(1);
-        options.set_initOutputVariables(1);
-
-        options.set_limitExpressionComplexity(1);
-        options.set_limitCallStackDepth(1);
-        // gl_DrawID as a uniform the draw calls set (WEBGL_multi_draw).
-        options.set_emulateGLDrawID(1);
-
-        if cfg!(target_os = "macos") {
-            options.set_removeInvariantAndCentroidForESSL3(1);
-
-            // Work around https://bugs.webkit.org/show_bug.cgi?id=124684,
-            // https://chromium.googlesource.com/angle/angle/+/5e70cf9d0b1bb
-            options.set_unfoldShortCircuit(1);
-            // Work around that Mac drivers handle struct scopes incorrectly.
-            options.set_regenerateStructNames(1);
-            // TODO: Only apply this workaround to Intel hardware
-            // Work around that Intel drivers on Mac OSX handle for-loop incorrectly.
-            options.set_addAndTrueToLoopCondition(1);
-            options.set_rewriteTexelFetchOffsetToTexelFetch(1);
+        let essl3 = is_essl3(&source);
+        let vertex_inputs = if self.gl_type == constants::VERTEX_SHADER && essl3 {
+            parse_vertex_inputs(&source)
         } else {
-            // We want to do this everywhere, but to do this on Mac, we need
-            // to do it only on Mac OSX > 10.6 as this causes the shader
-            // compiler in 10.6 to crash
-            options.set_clampIndirectArrayBounds(1);
-        }
-
-        match validator.compile(&[&source.str()], options) {
-            Ok(()) => {
-                let translated_source = validator.object_code();
-                debug!("Shader translated: {}", translated_source);
-                *self.fragment_outputs.borrow_mut() = if self.gl_type == constants::FRAGMENT_SHADER
-                {
-                    parse_fragment_outputs(&translated_source, is_essl3(&source.str()))
-                } else {
-                    None
-                };
-                *self.vertex_inputs.borrow_mut() =
-                    if self.gl_type == constants::VERTEX_SHADER && is_essl3(&source.str()) {
-                        parse_vertex_inputs(&source.str())
-                    } else {
-                        None
-                    };
-                // NOTE: At this point we should be pretty sure that the compilation in the paint thread
-                // will succeed.
-                // It could be interesting to retrieve the info log from the paint thread though
-                self.upcast()
-                    .send_command(WebGLCommand::CompileShader(self.id(), translated_source));
-                self.compilation_status
-                    .set(ShaderCompilationStatus::Succeeded);
-            },
-            Err(error) => {
-                *self.fragment_outputs.borrow_mut() = None;
-                *self.vertex_inputs.borrow_mut() = None;
-                self.compilation_status.set(ShaderCompilationStatus::Failed);
-                debug!("Shader {} compilation failed: {}", self.id(), error);
-            },
-        }
-
-        *self.info_log.borrow_mut() = validator.info_log().into();
-
+            None
+        };
+        let (sender, receiver) = webgl_channel().unwrap();
+        self.upcast().send_command(WebGLCommand::CompileShader(
+            self.id(),
+            source,
+            translation,
+            sender,
+        ));
+        *self.compile_job.borrow_mut() = Some(Rc::new(CompileJob {
+            receiver: RefCell::new(Some(receiver)),
+            outcome: OnceCell::new(),
+            shader_type: self.gl_type,
+            essl3,
+            vertex_inputs,
+        }));
         Ok(())
     }
 
@@ -580,7 +543,10 @@ impl WebGLShader {
 
     /// glGetShaderInfoLog
     pub(crate) fn info_log(&self) -> DOMString {
-        self.info_log.borrow().clone()
+        match self.compile_job() {
+            Some(job) => job.outcome().info_log.clone().into(),
+            None => DOMString::new(),
+        }
     }
 
     /// Get the shader source
@@ -594,16 +560,17 @@ impl WebGLShader {
     }
 
     pub(crate) fn successfully_compiled(&self) -> bool {
-        self.compilation_status.get() == ShaderCompilationStatus::Succeeded
+        self.compile_job()
+            .is_some_and(|job| job.outcome().succeeded)
     }
 
-    /// The last successful compile's fragment outputs by location (see
-    /// `parse_fragment_outputs`); None for vertex shaders or when they couldn't be read.
-    pub(crate) fn vertex_inputs(&self) -> Option<Box<[VertexInput]>> {
-        self.vertex_inputs.borrow().clone()
+    /// COMPLETION_STATUS_KHR: whether the last compileShader has finished, without waiting.
+    pub(crate) fn compile_completed(&self) -> bool {
+        self.compile_job().is_none_or(|job| job.completed())
     }
 
-    pub(crate) fn fragment_outputs(&self) -> Option<Box<[Option<FragOutputKind>]>> {
-        self.fragment_outputs.borrow().clone()
+    /// The last compileShader, for linkProgram.
+    pub(crate) fn compile_job(&self) -> Option<Rc<CompileJob>> {
+        self.compile_job.borrow().clone()
     }
 }
