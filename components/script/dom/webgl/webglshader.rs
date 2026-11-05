@@ -24,6 +24,7 @@ use {
     crate::dom::webgl::extensions::oesstandardderivatives::OESStandardDerivatives,
     crate::dom::webgl::extensions::webglmultidraw::WEBGLMultiDraw,
     crate::dom::webgl::extensions::webglmultidrawinstancedbasevertexbaseinstance::WEBGLMultiDrawInstancedBaseVertexBaseInstance,
+    crate::dom::webgl::shaderinterface::ShaderInterface,
     crate::dom::webgl::webglobject::WebGLObject,
     crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext},
     crate::dom::webglrenderingcontext::capture_webgl_backtrace,
@@ -43,9 +44,11 @@ pub(crate) struct CompileJob {
     receiver: RefCell<Option<GenericReceiver<ShaderCompileInfo>>>,
     outcome: OnceCell<CompileOutcome>,
     shader_type: u32,
-    essl3: bool,
+    pub(crate) essl3: bool,
     /// See `parse_vertex_inputs`; read from the source at compileShader.
     pub(crate) vertex_inputs: Option<Box<[VertexInput]>>,
+    /// The declarations the link compares between the stages (ShaderInterface::parse).
+    pub(crate) interface: Option<ShaderInterface>,
 }
 
 pub(crate) struct CompileOutcome {
@@ -496,6 +499,7 @@ impl WebGLShader {
         } else {
             None
         };
+        let interface = ShaderInterface::parse(&source, self.gl_type == constants::VERTEX_SHADER);
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast().send_command(WebGLCommand::CompileShader(
             self.id(),
@@ -509,6 +513,7 @@ impl WebGLShader {
             shader_type: self.gl_type,
             essl3,
             vertex_inputs,
+            interface,
         }));
         Ok(())
     }

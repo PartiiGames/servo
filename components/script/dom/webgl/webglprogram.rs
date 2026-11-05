@@ -26,6 +26,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::webgl::shaderinterface::link_mismatch;
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
@@ -462,6 +463,29 @@ impl WebGLProgram {
             *self.fragment_outputs.borrow_mut() = fragment.outcome().fragment_outputs.clone();
             if self.inputs_alias(&vertex) {
                 return;
+            }
+            // Interface rules GL drivers don't check: both stages in one ESSL version (GLSL ES
+            // 3.00.6 1.5), uniform and block precisions, built-in invariance and the ESSL 1.00
+            // varying packing limit (shaderinterface).
+            if vertex.essl3 != fragment.essl3 {
+                return;
+            }
+            if let (Some(vertex_interface), Some(fragment_interface)) =
+                (&vertex.interface, &fragment.interface)
+            {
+                let max_varying_vectors = self
+                    .upcast::<WebGLObject>()
+                    .context()
+                    .map_or(8, |context| context.limits().max_varying_vectors);
+                if let Some(reason) = link_mismatch(
+                    vertex_interface,
+                    fragment_interface,
+                    vertex.essl3,
+                    max_varying_vectors,
+                ) {
+                    log::debug!("linkProgram fails: {reason}");
+                    return;
+                }
             }
         }
         {
