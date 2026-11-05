@@ -403,19 +403,40 @@ impl WebGLFramebuffer {
             Some(WebGLFramebufferAttachment::Texture {
                 texture: att_tex,
                 level,
-                ..
-            }) => match att_tex.image_info_at_face(0, *level as u32) {
-                Some(_)
-                    if self.webgl_version == WebGLVersion::WebGL2 &&
-                        !att_tex.level_is_attachment_complete(*level as u32) =>
-                {
-                    return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
-                },
-                Some(info) => (
-                    Some(info.internal_format().as_gl_constant()),
-                    Some((info.width() as i32, info.height() as i32)),
-                ),
-                None => return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT),
+                face_or_layer,
+            }) => {
+                // A cube map face attachment records its face target; the image is that face's.
+                let is_cube = att_tex.target() == Some(constants::TEXTURE_CUBE_MAP);
+                let face = if is_cube {
+                    face_or_layer
+                        .checked_sub(constants::TEXTURE_CUBE_MAP_POSITIVE_X as i32)
+                        .filter(|face| (0..6).contains(face))
+                        .unwrap_or(0) as u8
+                } else {
+                    0
+                };
+                match att_tex.image_info_at_face(face, *level as u32) {
+                    // WebGL 1 (as other browsers): a face of a cube map that isn't cube complete at
+                    // that level is an incomplete attachment (cube-incomplete-fbo).
+                    Some(_)
+                        if self.webgl_version == WebGLVersion::WebGL1 &&
+                            is_cube &&
+                            !att_tex.cube_level_is_complete(*level as u32) =>
+                    {
+                        return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
+                    },
+                    Some(_)
+                        if self.webgl_version == WebGLVersion::WebGL2 &&
+                            !att_tex.level_is_attachment_complete(*level as u32) =>
+                    {
+                        return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
+                    },
+                    Some(info) => (
+                        Some(info.internal_format().as_gl_constant()),
+                        Some((info.width() as i32, info.height() as i32)),
+                    ),
+                    None => return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT),
+                }
             },
             None => (None, None),
         };

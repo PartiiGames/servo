@@ -637,6 +637,21 @@ impl WebGLTexture {
         Ok(())
     }
 
+    /// Whether all six faces of a cube map have an image at `level`, square, of one size and
+    /// internal format.
+    pub(crate) fn cube_level_is_complete(&self, level: u32) -> bool {
+        let Some(first) = self.image_info_at_face(0, level) else {
+            return false;
+        };
+        (0..6).all(|face| {
+            self.image_info_at_face(face, level).is_some_and(|info| {
+                info.internal_format == first.internal_format &&
+                    info.width == first.width &&
+                    info.height == first.width
+            })
+        })
+    }
+
     fn is_cube_complete(&self) -> bool {
         debug_assert_eq!(self.face_count.get(), 6);
 
