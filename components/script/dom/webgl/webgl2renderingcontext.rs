@@ -453,6 +453,7 @@ impl WebGL2RenderingContext {
         // An incomplete framebuffer is reported before anything about the draw's state (so
         // INVALID_FRAMEBUFFER_OPERATION wins over a feedback loop's INVALID_OPERATION).
         self.base.validate_framebuffer()?;
+        self.base.validate_stencil_for_draw()?;
         self.validate_uniform_block_for_draw()?;
         self.validate_vertex_attribs_for_draw(cx)?;
         self.validate_sampler_types_for_draw()?;

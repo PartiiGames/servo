@@ -260,6 +260,13 @@ pub(crate) struct WebGLRenderingContext {
     draw_state_gen: DrawStateGen,
     extension_manager: WebGLExtensions,
     capabilities: Capabilities,
+    /// Front and back stencil reference and masks, for the draw-time check that they agree
+    /// (WebGL 1.0 6.11).
+    #[ignore_malloc_size_of = "Because it's small"]
+    #[no_trace]
+    stencil_state: Cell<StencilState>,
+    /// Whether the default framebuffer was asked for a stencil buffer.
+    default_framebuffer_stencil: bool,
     default_vao: DomOnceCell<WebGLVertexArrayObjectOES>,
     current_vao: MutNullableDom<WebGLVertexArrayObjectOES>,
     default_vao_webgl2: DomOnceCell<WebGLVertexArrayObject>,
@@ -292,6 +299,7 @@ impl WebGLRenderingContext {
             return Err("WebGL needs a Window or a dedicated or shared worker".into());
         };
 
+        let default_framebuffer_stencil = attrs.stencil;
         let (sender, receiver) = webgl_channel().unwrap();
         webgl_chan
             .send(WebGLMsg::CreateContext(
@@ -338,6 +346,8 @@ impl WebGLRenderingContext {
                 object_names: Default::default(),
                 draw_state_gen: Default::default(),
                 capabilities: Default::default(),
+                stencil_state: Default::default(),
+                default_framebuffer_stencil,
                 default_vao: Default::default(),
                 current_vao: Default::default(),
                 default_vao_webgl2: Default::default(),
@@ -649,6 +659,51 @@ impl WebGLRenderingContext {
                 CompleteForRendering::MissingColorAttachment => Err(InvalidOperation),
             },
             None => Ok(()),
+        }
+    }
+
+    /// WebGL 1.0 6.11 (and WebGL 2.0 5.x): with the stencil test on and a stencil buffer to draw
+    /// into, the front and back stencil reference, value mask and write mask must agree in the
+    /// buffer's bits, else the draw is INVALID_OPERATION. A draw-state check: its inputs change
+    /// by enable/disable and framebuffer commands (off the DrawStateGen allowlist) or by a
+    /// stencil command that flips the agreement (set_stencil_state moves the generation).
+    pub(crate) fn validate_stencil_for_draw(&self) -> WebGLResult<()> {
+        if !self.stencil_state.get().mismatched() ||
+            !self
+                .capabilities
+                .is_enabled(constants::STENCIL_TEST)
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let has_stencil = match self.bound_draw_framebuffer.get() {
+            Some(fb) => fb
+                .attachment_internal_format(constants::STENCIL_ATTACHMENT)
+                .or_else(|| fb.attachment_internal_format(constants::DEPTH_STENCIL_ATTACHMENT))
+                .is_some(),
+            None => self.default_framebuffer_stencil,
+        };
+        if has_stencil {
+            return Err(InvalidOperation);
+        }
+        Ok(())
+    }
+
+    /// Applies a stencil func/mask command to the tracked front/back state. The commands stay on
+    /// the DrawStateGen allowlist (games change them every few draws); the generation moves only
+    /// when the front/back agreement that validate_stencil_for_draw reads changes.
+    fn set_stencil_state(&self, face: u32, update: impl Fn(&mut StencilFace)) {
+        let mut state = self.stencil_state.get();
+        let before = state.mismatched();
+        if face != constants::BACK {
+            update(&mut state.front);
+        }
+        if face != constants::FRONT {
+            update(&mut state.back);
+        }
+        self.stencil_state.set(state);
+        if state.mismatched() != before {
+            self.draw_state_gen.bump();
         }
     }
 
@@ -1388,6 +1443,7 @@ impl WebGLRenderingContext {
         }
         if !cached {
             self.validate_framebuffer()?;
+            self.validate_stencil_for_draw()?;
             self.mark_draw_state_valid(cx, &current_program);
         }
 
@@ -1530,6 +1586,7 @@ impl WebGLRenderingContext {
         if !cached {
             self.validate_vao_for_draw_base_instance(cx, 0, primcount, base_instance, &current_program)?;
             self.validate_framebuffer()?;
+            self.validate_stencil_for_draw()?;
             self.mark_draw_state_valid(cx, &current_program);
         }
 
@@ -4588,7 +4645,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             constants::GREATER |
             constants::NOTEQUAL |
             constants::GEQUAL |
-            constants::ALWAYS => self.send_command(WebGLCommand::StencilFunc(func, ref_, mask)),
+            constants::ALWAYS => {
+                self.set_stencil_state(constants::FRONT_AND_BACK, |face| {
+                    face.reference = ref_;
+                    face.value_mask = mask;
+                });
+                self.send_command(WebGLCommand::StencilFunc(func, ref_, mask))
+            },
             _ => self.webgl_error(InvalidEnum),
         }
     }
@@ -4609,6 +4672,10 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             constants::NOTEQUAL |
             constants::GEQUAL |
             constants::ALWAYS => {
+                self.set_stencil_state(face, |state| {
+                    state.reference = ref_;
+                    state.value_mask = mask;
+                });
                 self.send_command(WebGLCommand::StencilFuncSeparate(face, func, ref_, mask))
             },
             _ => self.webgl_error(InvalidEnum),
@@ -4617,6 +4684,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn StencilMask(&self, mask: u32) {
+        self.set_stencil_state(constants::FRONT_AND_BACK, |face| face.write_mask = mask);
         self.send_command(WebGLCommand::StencilMask(mask))
     }
 
@@ -4624,6 +4692,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
     fn StencilMaskSeparate(&self, face: u32, mask: u32) {
         match face {
             constants::FRONT | constants::BACK | constants::FRONT_AND_BACK => {
+                self.set_stencil_state(face, |state| state.write_mask = mask);
                 self.send_command(WebGLCommand::StencilMaskSeparate(face, mask))
             },
             _ => self.webgl_error(InvalidEnum),
@@ -6094,6 +6163,13 @@ impl DrawStateGen {
         self.0.get()
     }
 
+    /// Moves the generation on: for state changed without a command off the allowlist (the
+    /// front/back stencil agreement, WebGLRenderingContext::set_stencil_state).
+    #[inline]
+    pub(crate) fn bump(&self) {
+        self.0.set(self.0.get() + 1);
+    }
+
     /// Moves the generation on unless `command` leaves every draw-time state check as it was:
     /// uniforms other than uniform1i(v) (which set sampler units), useProgram and bindVertexArray
     /// (the cache is per vertex array and program), bindTexture and bindSampler (each unit's
@@ -6205,6 +6281,46 @@ fn tex_unit_cache_enabled() -> bool {
 fn vao_pool_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| !matches!(std::env::var("PARTII_WEBGL_VAO_POOL").as_deref(), Ok("0")))
+}
+
+/// One face's stencil reference and masks (stencilFunc / stencilMask).
+#[derive(Clone, Copy)]
+struct StencilFace {
+    reference: i32,
+    value_mask: u32,
+    write_mask: u32,
+}
+
+#[derive(Clone, Copy)]
+struct StencilState {
+    front: StencilFace,
+    back: StencilFace,
+}
+
+impl Default for StencilState {
+    fn default() -> Self {
+        let face = StencilFace {
+            reference: 0,
+            value_mask: u32::MAX,
+            write_mask: u32::MAX,
+        };
+        StencilState {
+            front: face,
+            back: face,
+        }
+    }
+}
+
+impl StencilState {
+    /// Whether front and back disagree in the stencil buffer's bits: every stencil format a
+    /// WebGL framebuffer can have here holds 8, the reference clamped to [0, 255] as GL does.
+    fn mismatched(&self) -> bool {
+        const BITS: u32 = 0xff;
+        let (front, back) = (self.front, self.back);
+        (front.write_mask ^ back.write_mask) & BITS != 0 ||
+            (front.value_mask ^ back.value_mask) & BITS != 0 ||
+            front.reference.clamp(0, BITS as i32) != back.reference.clamp(0, BITS as i32)
+    }
 }
 
 /// Partii (perf): names reserved per object kind (WebGLRenderingContext::take_object_name): 128, or
