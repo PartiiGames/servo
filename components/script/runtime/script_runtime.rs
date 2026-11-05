@@ -627,6 +627,13 @@ impl Runtime {
                 .is_enabled(DiagnosticsLoggingOption::GcProfile)
             {
                 SetGCSliceCallback(cx, Some(gc_slice_callback));
+            } else if gc_stats::enabled() {
+                SetGCSliceCallback(cx, Some(gc_stats::slice_callback));
+                js::rust::wrappers2::AddGCNurseryCollectionCallback(
+                    cx,
+                    Some(gc_stats::nursery_callback),
+                    ptr::null_mut(),
+                );
             }
         }
 
@@ -949,6 +956,169 @@ unsafe extern "C" fn get_size(obj: *mut JSObject) -> usize {
             )
         })
     })
+}
+
+/// Opt-in GC pause recording for measurement: with `PARTII_GC_STATS=<dir>` every script and
+/// worker thread writes `<dir>/gc-<pid>-<n>.jsonl`, one line per major GC slice ("slice": its
+/// wall time, whether the cycle was incremental, the reason, GC heap bytes after it), per finished
+/// cycle ("cycle": slices and wall time from first to last slice) and per minor (nursery) GC
+/// ("minor"). Times in ms; `t` is ms since the process started. Off unless the variable is set.
+mod gc_stats {
+    use std::cell::RefCell;
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+    use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    use js::jsapi::{
+        GCDescription, GCNurseryProgress, GCProgress, GCReason, JS_GetGCParameter,
+        JSContext as RawJSContext, JSGCParamKey,
+    };
+
+    static DIR: LazyLock<Option<std::ffi::OsString>> =
+        LazyLock::new(|| std::env::var_os("PARTII_GC_STATS"));
+    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn enabled() -> bool {
+        LazyLock::force(&START);
+        DIR.is_some()
+    }
+
+    struct Stats {
+        out: BufWriter<File>,
+        cycle_start: Option<Instant>,
+        slice_start: Option<Instant>,
+        minor_start: Option<Instant>,
+        slices: u32,
+        cycle: u64,
+        minors: u32,
+    }
+
+    thread_local!(static STATS: RefCell<Option<Stats>> = const { RefCell::new(None) });
+
+    fn with(f: impl FnOnce(&mut Stats)) {
+        STATS.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            if cell.is_none() {
+                let Some(dir) = DIR.as_ref() else { return };
+                let name = format!(
+                    "gc-{}-{}.jsonl",
+                    std::process::id(),
+                    SEQ.fetch_add(1, Ordering::Relaxed)
+                );
+                let Ok(file) = File::create(std::path::Path::new(dir).join(name)) else {
+                    return;
+                };
+                let mut out = BufWriter::new(file);
+                let thread = std::thread::current();
+                let _ = writeln!(
+                    out,
+                    "{{\"k\":\"thread\",\"name\":{:?}}}",
+                    thread.name().unwrap_or("?")
+                );
+                *cell = Some(Stats {
+                    out,
+                    cycle_start: None,
+                    slice_start: None,
+                    minor_start: None,
+                    slices: 0,
+                    cycle: 0,
+                    minors: 0,
+                });
+            }
+            if let Some(stats) = cell.as_mut() {
+                f(stats);
+            }
+        })
+    }
+
+    fn ms(since: Instant) -> f64 {
+        since.elapsed().as_secs_f64() * 1000.0
+    }
+
+    #[expect(unsafe_code)]
+    fn heap_bytes(cx: *mut RawJSContext) -> u32 {
+        unsafe { JS_GetGCParameter(cx, JSGCParamKey::JSGC_BYTES) }
+    }
+
+    #[expect(unsafe_code)]
+    pub(super) unsafe extern "C" fn slice_callback(
+        cx: *mut RawJSContext,
+        progress: GCProgress,
+        desc: *const GCDescription,
+    ) {
+        let (reason, zone) = if desc.is_null() {
+            (None, false)
+        } else {
+            let desc = unsafe { &*desc };
+            (Some(desc.reason_), desc.isZone_)
+        };
+        with(|s| match progress {
+            GCProgress::GC_CYCLE_BEGIN => {
+                s.cycle += 1;
+                s.slices = 0;
+                s.cycle_start = Some(Instant::now());
+            },
+            GCProgress::GC_SLICE_BEGIN => s.slice_start = Some(Instant::now()),
+            GCProgress::GC_SLICE_END => {
+                let Some(start) = s.slice_start.take() else { return };
+                s.slices += 1;
+                let _ = writeln!(
+                    s.out,
+                    "{{\"k\":\"slice\",\"t\":{:.1},\"ms\":{:.3},\"cycle\":{},\"n\":{},\"reason\":\"{:?}\",\"zone\":{},\"bytes\":{}}}",
+                    ms(*START),
+                    ms(start),
+                    s.cycle,
+                    s.slices,
+                    reason.unwrap_or(GCReason::NO_REASON),
+                    zone,
+                    heap_bytes(cx)
+                );
+                let _ = s.out.flush();
+            },
+            GCProgress::GC_CYCLE_END => {
+                let Some(start) = s.cycle_start.take() else { return };
+                let _ = writeln!(
+                    s.out,
+                    "{{\"k\":\"cycle\",\"t\":{:.1},\"ms\":{:.3},\"cycle\":{},\"slices\":{},\"bytes\":{}}}",
+                    ms(*START),
+                    ms(start),
+                    s.cycle,
+                    s.slices,
+                    heap_bytes(cx)
+                );
+                let _ = s.out.flush();
+            },
+        });
+    }
+
+    #[expect(unsafe_code)]
+    pub(super) unsafe extern "C" fn nursery_callback(
+        _cx: *mut RawJSContext,
+        progress: GCNurseryProgress,
+        reason: GCReason,
+        _data: *mut std::os::raw::c_void,
+    ) {
+        with(|s| match progress {
+            GCNurseryProgress::GC_NURSERY_COLLECTION_START => s.minor_start = Some(Instant::now()),
+            GCNurseryProgress::GC_NURSERY_COLLECTION_END => {
+                let Some(start) = s.minor_start.take() else { return };
+                let _ = writeln!(
+                    s.out,
+                    "{{\"k\":\"minor\",\"t\":{:.1},\"ms\":{:.3},\"reason\":\"{:?}\"}}",
+                    ms(*START),
+                    ms(start),
+                    reason
+                );
+                s.minors += 1;
+                if s.minors % 64 == 0 {
+                    let _ = s.out.flush();
+                }
+            },
+        });
+    }
 }
 
 thread_local!(static GC_CYCLE_START: Cell<Option<Instant>> = const { Cell::new(None) });
