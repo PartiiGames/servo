@@ -468,6 +468,20 @@ impl Painter {
                         self.webrender_gl.finish();
                     }
                     let t3 = std::time::Instant::now();
+                    // Partii (perf, measurement builds): PARTII_FRAME_PROF=trace logs renders of 20 ms or more.
+                    if std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace") &&
+                        t3 - t0 >= std::time::Duration::from_millis(20)
+                    {
+                        let d = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        let ms = (t3 - t0).as_secs_f64() * 1000.0;
+                        eprintln!(
+                            "partii-trace paint render at={:.1} ms={ms:.1} update={:.1}",
+                            (d.as_micros() % 10_000_000_000) as f64 / 1000.0 - ms,
+                            (t1 - t0).as_secs_f64() * 1000.0
+                        );
+                    }
                     let (taken, offscreen) = self
                         .webrender_renderer
                         .as_ref()
