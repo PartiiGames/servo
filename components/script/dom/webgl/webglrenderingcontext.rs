@@ -797,9 +797,8 @@ impl WebGLRenderingContext {
                     return Err(Error::Security(None));
                 }
 
-                // Vector images are not currently supported here and there are
-                // some open questions in the specification about how to handle them:
-                // See https://github.com/KhronosGroup/WebGL/issues/1503
+                // Vector (SVG) images are rasterized at their natural size, as in other
+                // engines (see https://github.com/KhronosGroup/WebGL/issues/1503).
                 let Some(snapshot) = image.get_raster_image_data() else {
                     return Ok(None);
                 };

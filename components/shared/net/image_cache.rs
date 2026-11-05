@@ -228,6 +228,17 @@ pub trait ImageCache: Sync + Send {
         svg_id: Option<Uuid>,
     ) -> Option<RasterImage>;
 
+    /// Rasterizes the given vector image at `size` on the calling thread and returns the result
+    /// (premultiplied RGBA8), reusing a finished asynchronous rasterization at that size when
+    /// there is one. Nothing is cached and no WebRender key is assigned: this is for callers that
+    /// need the pixels synchronously, such as WebGL texture uploads from an SVG `<img>`. Returns
+    /// `None` for an unknown image, an empty or oversized `size`, or a failed render.
+    fn rasterize_vector_image_now(
+        &self,
+        image_id: VectorImageId,
+        size: DeviceIntSize,
+    ) -> Option<RasterImage>;
+
     /// Adds a new listener to be notified once the given `image_id` has been rasterized at
     /// the given `size`. The listener will receive a `VectorImageRasterizationComplete`
     /// message on the given `sender`, even if the listener is called after rasterization

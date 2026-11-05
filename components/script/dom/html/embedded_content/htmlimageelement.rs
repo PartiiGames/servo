@@ -29,6 +29,7 @@ use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_url::ServoUrl;
 use servo_url::origin::MutableOrigin;
 use style::attr::{AttrValue, LengthOrPercentageOrAuto};
+use webrender_api::units::DeviceIntSize;
 
 use crate::dom::activation::Activatable;
 use crate::dom::bindings::codegen::Bindings::DOMRectBinding::DOMRect_Binding::DOMRectMethods;
@@ -162,13 +163,23 @@ impl HTMLImageElement {
         self.current_request.borrow().load_time
     }
 
-    /// Gets the copy of the raster image data.
+    /// Gets the copy of the raster image data. A vector (SVG) image is rasterized at its natural
+    /// size on this thread, as other engines do for WebGL/WebGPU uploads from an SVG `<img>`.
     pub(crate) fn get_raster_image_data(&self) -> Option<Snapshot> {
-        let Some(raster_image) = self.image_data()?.as_raster_image() else {
-            warn!("Vector image is not supported as raster image source");
-            return None;
-        };
-        Some(raster_image.as_snapshot())
+        match self.image_data()? {
+            Image::Raster(raster_image) => Some(raster_image.as_snapshot()),
+            Image::Vector(vector_image) => {
+                let size = DeviceIntSize::new(
+                    vector_image.metadata.width as i32,
+                    vector_image.metadata.height as i32,
+                );
+                let raster_image = self
+                    .owner_window()
+                    .image_cache()
+                    .rasterize_vector_image_now(vector_image.id, size)?;
+                Some(raster_image.as_snapshot())
+            },
+        }
     }
 }
 
