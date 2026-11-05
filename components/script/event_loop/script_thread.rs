@@ -1626,6 +1626,8 @@ impl ScriptThread {
                         continue;
                     }
 
+                    let prof_trace = crate::partii_frame_prof::trace()
+                        .then(|| (crate::partii_frame_prof::wall_ms(), Instant::now(), format!("{category:?}")));
                     let exiting = self.profile_event(category, pipeline_id, || {
                         match msg {
                             MixedMessage::FromConstellation(ScriptThreadMessage::ExitScriptThread) => {
@@ -1654,6 +1656,9 @@ impl ScriptThread {
                         false
                     });
 
+                    if let Some((wall, start, what)) = prof_trace {
+                        crate::partii_frame_prof::trace_span(&format!("task:{what}"), wall, start.elapsed());
+                    }
                     // If an `ExitScriptThread` message was handled above, bail out now.
                     if exiting {
                         return false;
