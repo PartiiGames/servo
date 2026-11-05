@@ -2204,7 +2204,9 @@ impl ScriptThread {
                 reason,
                 msg,
             } => {
-                let global = self.documents.borrow().find_global(pipeline_id).unwrap();
+                let Some(global) = self.documents.borrow().find_global(pipeline_id) else {
+                    return; // the page is already gone
+                };
                 let mut realm = enter_auto_realm(cx, &*global);
                 let cx = &mut realm.current_realm();
                 global.gpu_device_lost(cx, device, reason, msg);
