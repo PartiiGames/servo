@@ -440,8 +440,18 @@ impl WebGLThread {
 
     fn process(&mut self) {
         let webgl_chan = WebGLChan(self.sender.clone());
+        let mut prof = frame_prof::Acc::default();
         while let Ok(Ok(msg)) = self.receiver.recv() {
+            if !frame_prof::enabled() {
+                if self.handle_msg(msg, &webgl_chan) {
+                    break;
+                }
+                continue;
+            }
+            let class = frame_prof::class_of(&msg);
+            let start = std::time::Instant::now();
             let exit = self.handle_msg(msg, &webgl_chan);
+            prof.record(class, start);
             if exit {
                 break;
             }
@@ -1055,6 +1065,13 @@ impl WebGLThread {
             // The compositor shows the surface: resolve the multisampled drawing into it.
             let surface = surface_framebuffer(&data.device, &data.ctx);
             data.state.resolve_msaa(&data.gl, surface);
+            // Partii (perf, measurement builds): PARTII_FRAME_PROF=finish waits for the frame's
+            // rasterization here, so it shows apart from the swap.
+            if frame_prof::finish() {
+                let start = std::time::Instant::now();
+                unsafe { data.gl.finish() };
+                frame_prof::add_raster(start.elapsed());
+            }
 
             // Check to see if any of the current framebuffer bindings are the surface we're about
             // to swap out. If so, we'll have to reset them after destroying the surface.
@@ -5107,4 +5124,109 @@ fn strip_fragment_output_invariance(object_code: String) -> String {
         stripped.push('\n');
     }
     stripped
+}
+
+/// Partii (perf stream, measurement builds only): `PARTII_FRAME_PROF=1` logs, every 2 s, the WebGL thread's
+/// wall time per second by message class (busy vs waiting for messages), for the frame's critical path.
+mod frame_prof {
+    use std::time::{Duration, Instant};
+
+    use servo_canvas_traits::webgl::{WebGLCommand as C, WebGLMsg};
+
+    pub(super) fn enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("PARTII_FRAME_PROF").is_some())
+    }
+
+    pub(super) fn finish() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "finish"))
+    }
+
+    thread_local!(static RASTER: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) });
+
+    pub(super) fn add_raster(d: Duration) {
+        RASTER.set(RASTER.get() + d);
+    }
+
+    pub(super) const NAMES: [&str; 9] =
+        ["swap", "draw", "clear", "upload", "buffer", "sync", "uniform", "state", "other"];
+
+    pub(super) fn class_of(msg: &WebGLMsg) -> usize {
+        let WebGLMsg::WebGLCommand(_, command, _) = msg else {
+            return if matches!(msg, WebGLMsg::SwapBuffers(..)) { 0 } else { 8 };
+        };
+        match command {
+            C::DrawArrays { .. } |
+            C::DrawElements { .. } |
+            C::DrawArraysInstanced { .. } |
+            C::DrawElementsInstanced { .. } |
+            C::DrawArraysInstancedBaseInstance { .. } |
+            C::DrawElementsInstancedBaseVertexBaseInstance { .. } => 1,
+            C::Clear(..) | C::ClearBufferfv(..) | C::ClearBufferiv(..) | C::ClearBufferuiv(..) |
+            C::ClearBufferfi(..) | C::BlitFrameBuffer(..) => 2,
+            C::TexImage2D { .. } |
+            C::TexSubImage2D { .. } |
+            C::TexImage3D { .. } |
+            C::TexSubImage3D { .. } |
+            C::CompressedTexImage2D { .. } |
+            C::GenerateMipmap(..) |
+            C::TexStorage2D(..) |
+            C::RenderbufferStorage(..) |
+            C::RenderbufferStorageMultisample(..) => 3,
+            C::BufferData(..) | C::BufferSubData(..) => 4,
+            C::ReadPixels(..) | C::ReadPixelsPP(..) | C::Finish(..) | C::GetProgramValidateStatus(..) => 5,
+            C::Uniform1f(..) | C::Uniform1fv(..) | C::Uniform1i(..) | C::Uniform1iv(..) |
+            C::Uniform2fv(..) | C::Uniform3fv(..) | C::Uniform4fv(..) | C::Uniform4f(..) |
+            C::UniformMatrix3fv(..) | C::UniformMatrix4fv(..) => 6,
+            _ => 7,
+        }
+    }
+
+    #[derive(Default)]
+    pub(super) struct Acc {
+        since: Option<Instant>,
+        last_end: Option<Instant>,
+        idle: Duration,
+        busy: [Duration; 9],
+        count: [u32; 9],
+        max_swap: Duration,
+    }
+
+    impl Acc {
+        pub(super) fn record(&mut self, class: usize, start: Instant) {
+            let now = Instant::now();
+            let since = *self.since.get_or_insert(start);
+            if let Some(last) = self.last_end {
+                self.idle += start.saturating_duration_since(last);
+            }
+            self.last_end = Some(now);
+            let d = now - start;
+            self.busy[class] += d;
+            self.count[class] += 1;
+            if class == 0 {
+                self.max_swap = self.max_swap.max(d);
+            }
+            let w = (now - since).as_secs_f64();
+            if w >= 2.0 {
+                let ms = |d: Duration| d.as_secs_f64() * 1000.0 / w;
+                let total: Duration = self.busy.iter().sum();
+                let mut line = format!(
+                    "partii-webgl-prof: busy_ms_s={:.1} idle_ms_s={:.1} swaps_s={:.1} swap_max_ms={:.2}",
+                    ms(total),
+                    ms(self.idle),
+                    self.count[0] as f64 / w,
+                    self.max_swap.as_secs_f64() * 1000.0
+                );
+                line += &format!(" raster_in_swap_ms_s={:.1}", ms(RASTER.replace(Duration::ZERO)));
+                for (i, name) in NAMES.iter().enumerate() {
+                    line += &format!(" {name}_ms_s={:.1} {name}_n_s={:.0}", ms(self.busy[i]), self.count[i] as f64 / w);
+                }
+                eprintln!("{line}");
+                *self = Acc::default();
+                self.since = Some(now);
+                self.last_end = Some(now);
+            }
+        }
+    }
 }
