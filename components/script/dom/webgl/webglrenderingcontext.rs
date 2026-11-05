@@ -433,10 +433,11 @@ impl WebGLRenderingContext {
     #[inline]
     /// Partii (perf): a new object name of `kind` from the reserved batch. createTexture and friends used to
     /// wait for a reply from the WebGL thread each, behind everything queued before them (Phaser's boot: ~200
-    /// such waits). Names come in batches of OBJECT_NAME_BATCH (the same glGen* calls), the next batch asked
+    /// such waits). Names come in batches of object_name_batch() (the same glGen* calls), the next batch asked
     /// for when half the current one is used, so a create waits only when a whole batch went in between.
     /// None when the WebGL thread has none to give (as the Create* commands answer None).
     pub(crate) fn take_object_name(&self, kind: WebGLObjectNameKind) -> Option<NonZeroU32> {
+        let batch = object_name_batch();
         let mut pools = self.object_names.borrow_mut();
         let pool = &mut pools[kind as usize];
         if pool.names.is_empty() {
@@ -444,15 +445,15 @@ impl WebGLRenderingContext {
                 Some(receiver) => pool.names.extend(receiver.recv().unwrap_or_default()),
                 None => {
                     let (sender, receiver) = webgl_channel().unwrap();
-                    self.send_command(WebGLCommand::GenObjectNames(kind, OBJECT_NAME_BATCH, sender));
+                    self.send_command(WebGLCommand::GenObjectNames(kind, batch, sender));
                     pool.names.extend(receiver.recv().unwrap_or_default());
                 },
             }
         }
         let name = pool.names.pop_front().and_then(NonZeroU32::new)?;
-        if pool.names.len() < OBJECT_NAME_BATCH as usize / 2 && pool.pending.is_none() {
+        if batch > 1 && pool.names.len() < batch as usize / 2 && pool.pending.is_none() {
             let (sender, receiver) = webgl_channel().unwrap();
-            self.send_command(WebGLCommand::GenObjectNames(kind, OBJECT_NAME_BATCH, sender));
+            self.send_command(WebGLCommand::GenObjectNames(kind, batch, sender));
             pool.pending = Some(receiver);
         }
         Some(name)
@@ -5723,8 +5724,18 @@ pub(crate) fn clip_copy_to_read_framebuffer(
     ))
 }
 
-/// Partii (perf): names reserved per object kind (WebGLRenderingContext::take_object_name).
-const OBJECT_NAME_BATCH: u32 = 128;
+/// Partii (perf): names reserved per object kind (WebGLRenderingContext::take_object_name): 128, or
+/// PARTII_WEBGL_NAME_BATCH (1 = a round trip per create, as before; for A/B measurements).
+fn object_name_batch() -> u32 {
+    static BATCH: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *BATCH.get_or_init(|| {
+        std::env::var("PARTII_WEBGL_NAME_BATCH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n: &u32| n >= 1)
+            .unwrap_or(128)
+    })
+}
 
 #[derive(Default)]
 pub(crate) struct ObjectNamePool {
