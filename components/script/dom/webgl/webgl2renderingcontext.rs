@@ -5957,12 +5957,13 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         }
         // A DOM source converts only to colour formats and types (an integer format such as
         // RGB10_A2UI can't take it); the WebGL 1 path below doesn't know the WebGL 2 ones.
+        // INVALID_VALUE, as Chromium reports it (tex-image-with-different-data-source).
         if let (Some(format), Some(data_type)) = (
             TexFormat::from_gl_constant(internal_format as u32),
             TexDataType::from_webgl_constant(data_type, WebGLVersion::WebGL2),
         ) && !Self::can_convert_image_source(format, data_type)
         {
-            self.base.webgl_error(InvalidOperation);
+            self.base.webgl_error(InvalidValue);
             return Ok(());
         }
         self.base.TexImage2D_(
