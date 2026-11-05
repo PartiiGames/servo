@@ -21,7 +21,7 @@ use crate::dom::bindings::codegen::Bindings::EXTTextureFilterAnisotropicBinding:
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::webgl::extensions::oestexturefloatlinear::OESTextureFloatLinear;
 use crate::dom::webgl::validations::types::TexImageTarget;
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
@@ -123,8 +123,9 @@ pub(crate) struct WebGLTexture {
     // Store information for min and mag filters
     min_filter: Cell<u32>,
     mag_filter: Cell<u32>,
-    /// Framebuffer that this texture is attached to.
-    attached_framebuffer: MutNullableDom<WebGLFramebuffer>,
+    /// Framebuffers this texture is attached to (pruned as they let go of it), whose
+    /// completeness changes when it is re-specified.
+    attached_framebuffers: DomRefCell<Vec<Dom<WebGLFramebuffer>>>,
     /// Number of immutable levels.
     immutable_levels: Cell<Option<u32>>,
     /// TEXTURE_COMPARE_MODE, for the draw-time sampler type check.
@@ -152,7 +153,7 @@ impl WebGLTexture {
             min_filter: Cell::new(constants::NEAREST_MIPMAP_LINEAR),
             mag_filter: Cell::new(constants::LINEAR),
             image_info_array: DomRefCell::new(Vec::new()),
-            attached_framebuffer: Default::default(),
+            attached_framebuffers: Default::default(),
             droppable: DroppableWebGLTexture {
                 context: WeakRef::new(context),
                 id,
@@ -261,9 +262,7 @@ impl WebGLTexture {
         let face_index = self.face_index_for_target(&target);
         self.set_image_infos_at_level_and_face(level, face_index, image_info);
 
-        if let Some(fb) = self.attached_framebuffer.get() {
-            fb.update_status();
-        }
+        self.update_attached_framebuffers();
 
         self.update_size();
 
@@ -503,9 +502,7 @@ impl WebGLTexture {
                     }
                     context.send_command(WebGLCommand::TexParameteri(target, param, int_value));
                     // The levels a framebuffer may attach depend on these.
-                    if let Some(fb) = self.attached_framebuffer.get() {
-                        fb.update_status();
-                    }
+                    self.update_attached_framebuffers();
                     return Ok(());
                 },
                 constants::TEXTURE_COMPARE_FUNC => match int_value as u32 {
@@ -751,11 +748,33 @@ impl WebGLTexture {
     }
 
     pub(crate) fn attach_to_framebuffer(&self, fb: &WebGLFramebuffer) {
-        self.attached_framebuffer.set(Some(fb));
+        let mut framebuffers = self.attached_framebuffers.borrow_mut();
+        if !framebuffers
+            .iter()
+            .any(|attached| std::ptr::eq(&**attached, fb))
+        {
+            framebuffers.push(Dom::from_ref(fb));
+        }
     }
 
-    pub(crate) fn detach_from_framebuffer(&self) {
-        self.attached_framebuffer.set(None);
+    /// The framebuffer drops this texture from one attachment point; it may still hold it at
+    /// another, so the list is pruned in `update_attached_framebuffers`.
+    pub(crate) fn detach_from_framebuffer(&self) {}
+
+    /// Re-evaluates the completeness of every framebuffer this texture is attached to.
+    fn update_attached_framebuffers(&self) {
+        let framebuffers: Vec<DomRoot<WebGLFramebuffer>> = self
+            .attached_framebuffers
+            .borrow()
+            .iter()
+            .map(|fb| DomRoot::from_ref(&**fb))
+            .collect();
+        for fb in &framebuffers {
+            fb.update_status();
+        }
+        self.attached_framebuffers
+            .borrow_mut()
+            .retain(|fb| fb.has_texture(self.id()));
     }
 
     pub(crate) fn storage(
@@ -806,9 +825,7 @@ impl WebGLTexture {
 
         self.immutable_levels.set(Some(levels));
 
-        if let Some(fb) = self.attached_framebuffer.get() {
-            fb.update_status();
-        }
+        self.update_attached_framebuffers();
 
         self.update_size();
 

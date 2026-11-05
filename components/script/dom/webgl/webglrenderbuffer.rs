@@ -7,6 +7,7 @@ use std::cell::Cell;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
@@ -19,7 +20,7 @@ use crate::dom::bindings::codegen::Bindings::WEBGLColorBufferFloatBinding::WEBGL
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
@@ -88,7 +89,9 @@ pub(crate) struct WebGLRenderbuffer {
     /// The sample count the storage was allocated with (0: single-sampled).
     samples: Cell<i32>,
     is_initialized: Cell<bool>,
-    attached_framebuffer: MutNullableDom<WebGLFramebuffer>,
+    /// Framebuffers this renderbuffer is attached to (pruned as they let go of it), whose
+    /// completeness changes when it is re-specified.
+    attached_framebuffers: DomRefCell<Vec<Dom<WebGLFramebuffer>>>,
     droppable: DroppableWebGLRenderbuffer,
 }
 
@@ -101,7 +104,7 @@ impl WebGLRenderbuffer {
             samples: Cell::new(0),
             size: Cell::new(None),
             is_initialized: Cell::new(false),
-            attached_framebuffer: Default::default(),
+            attached_framebuffers: Default::default(),
             droppable: DroppableWebGLRenderbuffer {
                 context: WeakRef::new(context),
                 id,
@@ -308,9 +311,7 @@ impl WebGLRenderbuffer {
         self.samples.set(sample_count);
         self.is_initialized.set(false);
 
-        if let Some(fb) = self.attached_framebuffer.get() {
-            fb.update_status();
-        }
+        self.update_attached_framebuffers();
 
         let command = match sample_count {
             0 => WebGLCommand::RenderbufferStorage(
@@ -334,10 +335,32 @@ impl WebGLRenderbuffer {
     }
 
     pub(crate) fn attach_to_framebuffer(&self, fb: &WebGLFramebuffer) {
-        self.attached_framebuffer.set(Some(fb));
+        let mut framebuffers = self.attached_framebuffers.borrow_mut();
+        if !framebuffers
+            .iter()
+            .any(|attached| std::ptr::eq(&**attached, fb))
+        {
+            framebuffers.push(Dom::from_ref(fb));
+        }
     }
 
-    pub(crate) fn detach_from_framebuffer(&self) {
-        self.attached_framebuffer.set(None);
+    /// The framebuffer drops this renderbuffer from one attachment point; it may still hold it at
+    /// another, so the list is pruned in `update_attached_framebuffers`.
+    pub(crate) fn detach_from_framebuffer(&self) {}
+
+    /// Re-evaluates the completeness of every framebuffer this renderbuffer is attached to.
+    fn update_attached_framebuffers(&self) {
+        let framebuffers: Vec<DomRoot<WebGLFramebuffer>> = self
+            .attached_framebuffers
+            .borrow()
+            .iter()
+            .map(|fb| DomRoot::from_ref(&**fb))
+            .collect();
+        for fb in &framebuffers {
+            fb.update_status();
+        }
+        self.attached_framebuffers
+            .borrow_mut()
+            .retain(|fb| fb.has_renderbuffer(self.id()));
     }
 }

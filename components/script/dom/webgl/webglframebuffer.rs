@@ -310,6 +310,30 @@ impl WebGLFramebuffer {
         }
     }
 
+    fn attachments(&self) -> impl Iterator<Item = &DomRefCell<Option<WebGLFramebufferAttachment>>> {
+        self.colors
+            .iter()
+            .chain([&self.depth, &self.stencil, &self.depthstencil])
+    }
+
+    /// Whether `texture` is attached at any attachment point.
+    pub(crate) fn has_texture(&self, texture: WebGLTextureId) -> bool {
+        self.attachments().any(|attachment| {
+            matches!(*attachment.borrow(), Some(WebGLFramebufferAttachment::Texture {
+                texture: ref attached, ..
+            }) if attached.id() == texture)
+        })
+    }
+
+    /// Whether `renderbuffer` is attached at any attachment point.
+    pub(crate) fn has_renderbuffer(&self, renderbuffer: WebGLRenderbufferId) -> bool {
+        self.attachments().any(|attachment| {
+            matches!(*attachment.borrow(), Some(WebGLFramebufferAttachment::Renderbuffer(
+                ref attached
+            )) if attached.id() == renderbuffer)
+        })
+    }
+
     /// What image is attached at `attachment`, to tell when a blit reads and writes the same one.
     pub(crate) fn attached_image(&self, attachment: u32) -> Option<AttachedImage> {
         let binding = self.attachment_binding(attachment)?;
