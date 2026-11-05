@@ -838,7 +838,12 @@ impl WebGLRenderingContext {
     /// read framebuffer's read buffer): a feedback loop, INVALID_OPERATION (WebGL 1.0 6.26,
     /// GL ES 3.0 4.4.3).
     fn copy_reads_image(&self, texture: &WebGLTexture, target: TexImageTarget, level: u32) -> bool {
-        let Some(fb) = self.bound_read_framebuffer.get() else {
+        // WebGL 1 has one framebuffer binding, kept in the draw slot.
+        let fb = match self.webgl_version() {
+            WebGLVersion::WebGL1 => self.bound_draw_framebuffer.get(),
+            WebGLVersion::WebGL2 => self.bound_read_framebuffer.get(),
+        };
+        let Some(fb) = fb else {
             return false;
         };
         let face = match target {
