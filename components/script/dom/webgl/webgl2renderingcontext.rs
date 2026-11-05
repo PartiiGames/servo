@@ -71,7 +71,8 @@ use crate::dom::webgl::webglprogram::WebGLProgram;
 use crate::dom::webgl::webglquery::WebGLQuery;
 use crate::dom::webgl::webglrenderbuffer::WebGLRenderbuffer;
 use crate::dom::webgl::webglrenderingcontext::{
-    CompressedSource, Operation, TexPixels, TexSource, VertexAttrib, WebGLRenderingContext,
+    CompressedSource, DrawStateCache, Operation, TexPixels, TexSource, VertexAttrib,
+    WebGLRenderingContext,
     array_buffer_type_to_sized_type, clip_copy_to_read_framebuffer, is_sampler_type, uniform_get,
     uniform_typed,
 };
@@ -384,6 +385,50 @@ impl WebGL2RenderingContext {
     /// attribute types, sampler types and feedback loops, fragment outputs); a failing one
     /// rejects the draw. Draws whose
     /// mode or counts are invalid skip them, so that the base draw reports its own error.
+    /// Partii (perf): the draw-time state checks this draw still needs (draw_state_cached): none,
+    /// the sampler check alone, or all of them (validate_draw_state). True when the rest of the
+    /// draw may skip its own state checks too.
+    fn draw_state_checks(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        first_or_offset: i64,
+        count: i32,
+        primcount: i32,
+    ) -> WebGLResult<bool> {
+        match self.base.draw_state_cached(cx) {
+            DrawStateCache::Hit => Ok(true),
+            DrawStateCache::Samplers if Self::draw_args_checkable(mode, first_or_offset, count, primcount) => {
+                self.check_sampler_types_for_draw()?;
+                if let Some(program) = self.base.current_program() {
+                    self.base.mark_draw_state_valid(cx, &program);
+                }
+                Ok(true)
+            },
+            _ => {
+                self.validate_draw_state(cx, mode, first_or_offset, count, primcount)?;
+                Ok(false)
+            },
+        }
+    }
+
+    /// Whether a draw's mode and counts are valid, so that its state checks apply (otherwise the
+    /// base draw reports the argument error).
+    fn draw_args_checkable(mode: u32, first_or_offset: i64, count: i32, primcount: i32) -> bool {
+        matches!(
+            mode,
+            constants::POINTS |
+                constants::LINE_STRIP |
+                constants::LINE_LOOP |
+                constants::LINES |
+                constants::TRIANGLE_STRIP |
+                constants::TRIANGLE_FAN |
+                constants::TRIANGLES
+        ) && first_or_offset >= 0 &&
+            count >= 0 &&
+            primcount >= 0
+    }
+
     fn validate_draw_state(
         &self,
         cx: &mut JSContext,
@@ -2023,10 +2068,7 @@ impl WebGL2RenderingContext {
     ) -> WebGLResult<()> {
         // Partii (perf): the state checks passed already for this program and vertex array, with
         // nothing sent since that could change their outcome (draw_state_cached, DrawStateGen).
-        let cached = self.base.draw_state_cached(cx);
-        if !cached {
-            self.validate_draw_state(cx, mode, first as i64, count, primcount)?;
-        }
+        let cached = self.draw_state_checks(cx, mode, first as i64, count, primcount)?;
         self.draw_with_transform_feedback(cx, mode, count, primcount, false, cached, |cx| {
             self.base.draw_arrays_instanced_base_instance_checked(
                 cx,
@@ -2070,10 +2112,7 @@ impl WebGL2RenderingContext {
         base_instance: u32,
     ) -> WebGLResult<()> {
         // Partii (perf): as in draw_arrays_checked_base_instance.
-        let cached = self.base.draw_state_cached(cx);
-        if !cached {
-            self.validate_draw_state(cx, mode, offset, count, primcount)?;
-        }
+        let cached = self.draw_state_checks(cx, mode, offset, count, primcount)?;
         self.draw_with_transform_feedback(cx, mode, count, primcount, true, cached, |cx| {
             self.base.draw_elements_instanced_base_vertex_base_instance_checked(
                 cx,
@@ -2097,6 +2136,34 @@ impl WebGL2RenderingContext {
     /// INVALID_OPERATION. Units without a complete texture are left alone. Also catches
     /// texture/framebuffer feedback loops.
     fn validate_sampler_types_for_draw(&self) -> WebGLResult<()> {
+        let Some(program) = self.base.current_program() else {
+            return Ok(());
+        };
+        // Partii (perf): the units the samplers read, all of them before any check can fail, for
+        // the draw-state cache's per-unit test (draw_state_cached).
+        {
+            let uniforms = program.active_uniforms();
+            let mut units = program.draw_sampler_units_mut();
+            units.clear();
+            for uniform in uniforms.iter() {
+                if sampler_target_and_kind(uniform.type_).is_none() {
+                    continue;
+                }
+                let Some(location) = uniform.location else {
+                    continue;
+                };
+                for element in 0..uniform.size.unwrap_or(1).max(1) {
+                    units.push(program.sampler_unit(location + element));
+                }
+            }
+        }
+        self.check_sampler_types_for_draw()
+    }
+
+    /// The sampler type and feedback-loop checks of validate_sampler_types_for_draw, without
+    /// listing the program's sampler units again (the draw-state cache's sampler-only path: the
+    /// units can't have changed, as uniform1i(v) and links end every record).
+    fn check_sampler_types_for_draw(&self) -> WebGLResult<()> {
         let Some(program) = self.base.current_program() else {
             return Ok(());
         };
@@ -7010,7 +7077,17 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
             let result = sampler.bind(&self.base, unit);
             match result {
-                Ok(_) => self.samplers[unit as usize].set(Some(sampler)),
+                Ok(_) => {
+                    // Partii (perf): bindSampler doesn't move the draw-state generation; the unit's
+                    // binding sequence number covers it (draw_state_cached).
+                    if self.samplers[unit as usize]
+                        .get()
+                        .is_none_or(|bound| !std::ptr::eq(&*bound, sampler))
+                    {
+                        self.base.textures().note_unit_changed(unit);
+                    }
+                    self.samplers[unit as usize].set(Some(sampler))
+                },
                 Err(error) => self.base.webgl_error(error),
             }
         } else {
@@ -7020,6 +7097,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             }
             self.base
                 .send_command(WebGLCommand::BindSampler(unit, None));
+            if self.samplers[unit as usize].get().is_some() {
+                self.base.textures().note_unit_changed(unit);
+            }
             self.samplers[unit as usize].set(None);
         }
     }

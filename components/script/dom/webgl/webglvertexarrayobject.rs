@@ -67,12 +67,13 @@ impl WebGLVertexArrayObject {
         self.array_object.element_array_buffer()
     }
 
-    pub(crate) fn draw_validated(&self, generation: u64, program: WebGLProgramId) -> bool {
+    pub(crate) fn draw_validated(&self, generation: u64, program: WebGLProgramId) -> Option<u64> {
         self.array_object.draw_validated(generation, program)
     }
 
-    pub(crate) fn set_draw_validated(&self, generation: u64, program: WebGLProgramId) {
-        self.array_object.set_draw_validated(generation, program)
+    pub(crate) fn set_draw_validated(&self, generation: u64, program: WebGLProgramId, textures: u64) {
+        self.array_object
+            .set_draw_validated(generation, program, textures)
     }
 
     pub(crate) fn get_vertex_attrib(&self, index: u32) -> Option<Ref<'_, VertexAttribData>> {

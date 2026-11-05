@@ -27,12 +27,13 @@ pub(crate) struct VertexArrayObject {
     is_deleted: Cell<bool>,
     vertex_attribs: DomRefCell<Box<[VertexAttribData]>>,
     element_array_buffer: MutNullableDom<WebGLBuffer>,
-    /// Partii (perf): the (draw-state generation, program) pairs whose draw-time state checks passed
-    /// with this vertex array bound, the latest first (WebGLRenderingContext::draw_state_cached). Two,
-    /// for a mesh drawn by its shadow and its main program each frame.
+    /// Partii (perf): the (draw-state generation, program, texture binding sequence) triples whose
+    /// draw-time state checks passed with this vertex array bound, the latest first
+    /// (WebGLRenderingContext::draw_state_cached). Two, for a mesh drawn by its shadow and its main
+    /// program each frame.
     #[ignore_malloc_size_of = "Plain data"]
     #[no_trace]
-    draw_validated: Cell<[(u64, Option<WebGLProgramId>); 2]>,
+    draw_validated: Cell<[(u64, Option<WebGLProgramId>, u64); 2]>,
 }
 
 impl VertexArrayObject {
@@ -45,22 +46,32 @@ impl VertexArrayObject {
             is_deleted: Default::default(),
             vertex_attribs: DomRefCell::new(vec![Default::default(); max_vertex_attribs].into()),
             element_array_buffer: Default::default(),
-            draw_validated: Cell::new([(0, None); 2]),
+            draw_validated: Cell::new([(0, None, 0); 2]),
         }
     }
 
-    /// Whether `program`'s draw-time state checks passed with this vertex array at `generation`.
+    /// The texture binding sequence at which `program`'s draw-time state checks passed with this
+    /// vertex array at `generation`, if they did.
     #[inline]
-    pub(crate) fn draw_validated(&self, generation: u64, program: WebGLProgramId) -> bool {
+    pub(crate) fn draw_validated(&self, generation: u64, program: WebGLProgramId) -> Option<u64> {
         self.draw_validated
             .get()
-            .contains(&(generation, Some(program)))
+            .iter()
+            .find(|(g, p, _)| *g == generation && *p == Some(program))
+            .map(|(_, _, textures)| *textures)
     }
 
-    pub(crate) fn set_draw_validated(&self, generation: u64, program: WebGLProgramId) {
-        let [latest, _] = self.draw_validated.get();
-        self.draw_validated
-            .set([(generation, Some(program)), latest]);
+    /// Records that `program`'s checks passed at `generation` and texture binding sequence
+    /// `textures`, replacing its entry for an earlier sequence of the same generation.
+    pub(crate) fn set_draw_validated(&self, generation: u64, program: WebGLProgramId, textures: u64) {
+        let [latest, older] = self.draw_validated.get();
+        let entry = (generation, Some(program), textures);
+        let same = |e: &(u64, Option<WebGLProgramId>, u64)| e.0 == generation && e.1 == Some(program);
+        self.draw_validated.set(if same(&latest) {
+            [entry, older]
+        } else {
+            [entry, latest]
+        });
     }
 
     pub(crate) fn id(&self) -> Option<WebGLVertexArrayId> {

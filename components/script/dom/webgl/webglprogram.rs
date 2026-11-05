@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
-use script_bindings::cell::{DomRefCell, Ref};
+use script_bindings::cell::{DomRefCell, Ref, RefMut};
 use script_bindings::reflector::reflect_dom_object;
 use script_bindings::weakref::WeakRef;
 use servo_base::generic_channel::{GenericReceiver, TryReceiveError};
@@ -182,6 +182,11 @@ pub(crate) struct WebGLProgram {
     link_called: Cell<bool>,
     linked: Cell<bool>,
     link_generation: Cell<u64>,
+    /// Partii (perf): the texture units this program's samplers read, as of the last full sampler
+    /// check (WebGL2RenderingContext::validate_sampler_types_for_draw). They change only by
+    /// uniform1i(v) or a link, which end every draw-state record.
+    #[ignore_malloc_size_of = "A few units"]
+    draw_sampler_units: DomRefCell<Vec<u32>>,
     fragment_shader: MutNullableDom<WebGLShader>,
     vertex_shader: MutNullableDom<WebGLShader>,
     #[no_trace]
@@ -230,6 +235,7 @@ impl WebGLProgram {
             link_called: Default::default(),
             linked: Default::default(),
             link_generation: Default::default(),
+            draw_sampler_units: Default::default(),
             fragment_shader: Default::default(),
             vertex_shader: Default::default(),
             active_attribs: DomRefCell::new(vec![].into()),
@@ -1022,6 +1028,14 @@ impl WebGLProgram {
                 (None, None) => vec![],
             },
         )
+    }
+
+    pub(crate) fn draw_sampler_units_mut(&self) -> RefMut<'_, Vec<u32>> {
+        self.draw_sampler_units.borrow_mut()
+    }
+
+    pub(crate) fn draw_sampler_units(&self) -> Ref<'_, [u32]> {
+        Ref::map(self.draw_sampler_units.borrow(), |units| &**units)
     }
 
     pub(crate) fn link_generation(&self) -> u64 {

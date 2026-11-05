@@ -498,28 +498,49 @@ impl WebGLRenderingContext {
 
     /// Partii (perf): whether the current program's draw-time state checks (the ones that read no
     /// draw argument) passed with the bound vertex array and nothing that could change their outcome
-    /// sent since (DrawStateGen).
+    /// sent since (DrawStateGen). Texture and sampler bindings don't move the generation: each
+    /// texture unit holds the binding sequence number of its last change (Textures), and a record
+    /// made before a change to a unit the program samples asks for the sampler check alone
+    /// (WebGL 2; WebGL 1 has no draw-time sampler check).
     #[inline]
-    pub(crate) fn draw_state_cached(&self, cx: &mut JSContext) -> bool {
+    pub(crate) fn draw_state_cached(&self, cx: &mut JSContext) -> DrawStateCache {
         if !draw_cache_enabled() {
-            return false;
+            return DrawStateCache::Miss;
         }
         let Some(program) = self.current_program.get() else {
-            return false;
+            return DrawStateCache::Miss;
         };
         let generation = self.draw_state_gen.get();
-        match self.webgl_version() {
-            WebGLVersion::WebGL1 => self.current_vao(cx).draw_validated(generation, program.id()),
-            WebGLVersion::WebGL2 => self
-                .current_vao_webgl2(cx)
-                .draw_validated(generation, program.id()),
+        if self.webgl_version() == WebGLVersion::WebGL1 {
+            return match self.current_vao(cx).draw_validated(generation, program.id()) {
+                Some(_) => DrawStateCache::Hit,
+                None => DrawStateCache::Miss,
+            };
         }
+        let vao = self.current_vao_webgl2(cx);
+        let Some(validated_at) = vao.draw_validated(generation, program.id()) else {
+            return DrawStateCache::Miss;
+        };
+        let sequence = self.textures.binding_sequence();
+        if validated_at == sequence {
+            return DrawStateCache::Hit;
+        }
+        if program
+            .draw_sampler_units()
+            .iter()
+            .any(|&unit| self.textures.unit_changed_since(unit, validated_at))
+        {
+            return DrawStateCache::Samplers;
+        }
+        // Only units this program doesn't sample changed: still valid, from now on too.
+        vao.set_draw_validated(generation, program.id(), sequence);
+        DrawStateCache::Hit
     }
 
     /// Partii (perf): records that every draw-time state check passed for `program` with the bound
     /// vertex array (see draw_state_cached). Not while the draw framebuffer belongs to an XR
     /// session, whose completeness depends on the frame.
-    fn mark_draw_state_valid(&self, cx: &mut JSContext, program: &WebGLProgram) {
+    pub(crate) fn mark_draw_state_valid(&self, cx: &mut JSContext, program: &WebGLProgram) {
         if !draw_cache_enabled() ||
             self.bound_draw_framebuffer
                 .get()
@@ -528,13 +549,16 @@ impl WebGLRenderingContext {
             return;
         }
         let generation = self.draw_state_gen.get();
+        let sequence = self.textures.binding_sequence();
         match self.webgl_version() {
-            WebGLVersion::WebGL1 => self
-                .current_vao(cx)
-                .set_draw_validated(generation, program.id()),
-            WebGLVersion::WebGL2 => self
-                .current_vao_webgl2(cx)
-                .set_draw_validated(generation, program.id()),
+            WebGLVersion::WebGL1 => {
+                self.current_vao(cx)
+                    .set_draw_validated(generation, program.id(), sequence)
+            },
+            WebGLVersion::WebGL2 => {
+                self.current_vao_webgl2(cx)
+                    .set_draw_validated(generation, program.id(), sequence)
+            },
         }
     }
 
@@ -1292,7 +1316,8 @@ impl WebGLRenderingContext {
         primcount: i32,
         base_instance: u32,
     ) -> WebGLResult<()> {
-        let cached = self.draw_state_cached(cx);
+        // WebGL 1 (the only caller that isn't WebGL 2's checked draws) answers Hit or Miss.
+        let cached = self.draw_state_cached(cx) == DrawStateCache::Hit;
         self.draw_arrays_instanced_base_instance_checked(
             cx,
             mode,
@@ -1420,7 +1445,7 @@ impl WebGLRenderingContext {
         base_vertex: i32,
         base_instance: u32,
     ) -> WebGLResult<()> {
-        let cached = self.draw_state_cached(cx);
+        let cached = self.draw_state_cached(cx) == DrawStateCache::Hit;
         self.draw_elements_instanced_base_vertex_base_instance_checked(
             cx,
             mode,
@@ -3146,6 +3171,13 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             handle_potential_webgl_error!(self, texture.bind(target), return);
         } else {
             self.send_command(WebGLCommand::BindTexture(target, None));
+        }
+        // Partii (perf): bindTexture doesn't move the draw-state generation; the unit's binding
+        // sequence number does the same job for the sampler check (draw_state_cached).
+        if texture_slot.get().as_deref().map(|t| t as *const WebGLTexture) !=
+            texture.map(|t| t as *const WebGLTexture)
+        {
+            self.textures.note_active_unit_changed();
         }
         texture_slot.set(texture);
     }
@@ -5564,6 +5596,9 @@ capabilities! {
 pub(crate) struct Textures {
     active_unit: Cell<u32>,
     units: Box<[TextureUnit]>,
+    /// Partii (perf): counts texture and sampler binding changes; each unit keeps the count at its
+    /// last change (TextureUnit::changed_at), for the draw-state cache.
+    binding_sequence: Cell<u64>,
 }
 
 impl Textures {
@@ -5574,7 +5609,33 @@ impl Textures {
                 .map(|_| Default::default())
                 .collect::<Vec<_>>()
                 .into(),
+            binding_sequence: Default::default(),
         }
+    }
+
+    pub(crate) fn binding_sequence(&self) -> u64 {
+        self.binding_sequence.get()
+    }
+
+    /// A texture or sampler binding of `unit` changed.
+    pub(crate) fn note_unit_changed(&self, unit: u32) {
+        let Some(unit) = self.units.get(unit as usize) else {
+            return;
+        };
+        let sequence = self.binding_sequence.get() + 1;
+        self.binding_sequence.set(sequence);
+        unit.changed_at.set(sequence);
+    }
+
+    fn note_active_unit_changed(&self) {
+        self.note_unit_changed(self.active_unit.get());
+    }
+
+    /// Whether a binding of `unit` changed after binding sequence number `sequence`.
+    pub(crate) fn unit_changed_since(&self, unit: u32, sequence: u64) -> bool {
+        self.units
+            .get(unit as usize)
+            .is_some_and(|unit| unit.changed_at.get() > sequence)
     }
 
     pub(crate) fn active_unit_enum(&self) -> u32 {
@@ -5658,6 +5719,8 @@ struct TextureUnit {
     tex_cube_map: MutNullableDom<WebGLTexture>,
     tex_2d_array: MutNullableDom<WebGLTexture>,
     tex_3d: MutNullableDom<WebGLTexture>,
+    /// Partii (perf): Textures::binding_sequence at this unit's last texture or sampler change.
+    changed_at: Cell<u64>,
 }
 
 impl TextureUnit {
@@ -5973,6 +6036,18 @@ pub(crate) fn clip_copy_to_read_framebuffer(
     ))
 }
 
+/// Partii (perf): what a draw may skip of its draw-time state checks (draw_state_cached).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum DrawStateCache {
+    /// Run them all.
+    Miss,
+    /// Skip them all.
+    Hit,
+    /// Only a texture or sampler binding the program samples changed: run the sampler check
+    /// (sampler types, feedback loops) and skip the rest.
+    Samplers,
+}
+
 /// Partii (perf): PARTII_WEBGL_DRAW_CACHE=0 validates every draw's state in full, as before the draw
 /// validation cache (for A/B measurements).
 fn draw_cache_enabled() -> bool {
@@ -6006,7 +6081,8 @@ impl DrawStateGen {
 
     /// Moves the generation on unless `command` leaves every draw-time state check as it was:
     /// uniforms other than uniform1i(v) (which set sampler units), useProgram and bindVertexArray
-    /// (the cache is per vertex array and program), draws, clears, fixed-function state no check reads, and queries.
+    /// (the cache is per vertex array and program), bindTexture and bindSampler (each unit's
+    /// binding sequence number covers them: Textures), draws, clears, fixed-function state no check reads, and queries.
     #[inline]
     pub(crate) fn note(&self, command: &WebGLCommand) {
         use WebGLCommand as C;
@@ -6045,6 +6121,8 @@ impl DrawStateGen {
                 C::UniformMatrix3x4fv(..) |
                 C::UseProgram(..) |
                 C::BindVertexArray(..) |
+                C::BindTexture(..) |
+                C::BindSampler(..) |
                 C::DrawArrays { .. } |
                 C::DrawArraysInstanced { .. } |
                 C::DrawElements { .. } |
@@ -6091,10 +6169,20 @@ impl DrawStateGen {
                 C::GetParameterFloat2(..) |
                 C::GetParameterFloat4(..)
         );
+        // PARTII_WEBGL_TEX_UNIT_CACHE=0: texture and sampler binds move the generation (round 8).
+        let keeps = keeps &&
+            (tex_unit_cache_enabled() || !matches!(command, C::BindTexture(..) | C::BindSampler(..)));
         if !keeps {
             self.0.set(self.0.get() + 1);
         }
     }
+}
+
+/// Partii (perf): PARTII_WEBGL_TEX_UNIT_CACHE=0 makes texture and sampler binds end every draw-state
+/// record again, as before per-unit binding sequence numbers (for A/B measurements).
+fn tex_unit_cache_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| !matches!(std::env::var("PARTII_WEBGL_TEX_UNIT_CACHE").as_deref(), Ok("0")))
 }
 
 /// Partii (perf): names reserved per object kind (WebGLRenderingContext::take_object_name): 128, or
