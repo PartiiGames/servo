@@ -2444,6 +2444,34 @@ impl WebGLImpl {
             } => unsafe {
                 gl.draw_elements_instanced(mode, count, type_, offset as i32, primcount)
             },
+            WebGLCommand::DrawArraysInstancedBaseInstance {
+                mode,
+                first,
+                count,
+                primcount,
+                base_instance,
+            } => unsafe {
+                gl.draw_arrays_instanced_base_instance(mode, first, count, primcount, base_instance)
+            },
+            WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance {
+                mode,
+                count,
+                type_,
+                offset,
+                primcount,
+                base_vertex,
+                base_instance,
+            } => unsafe {
+                gl.draw_elements_instanced_base_vertex_base_instance(
+                    mode,
+                    count,
+                    type_,
+                    offset as i32,
+                    primcount,
+                    base_vertex,
+                    base_instance,
+                )
+            },
             WebGLCommand::VertexAttribDivisor { index, divisor } => unsafe {
                 gl.vertex_attrib_divisor(index, divisor)
             },

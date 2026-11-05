@@ -1157,6 +1157,20 @@ impl WebGLRenderingContext {
         count: i32,
         primcount: i32,
     ) -> WebGLResult<()> {
+        self.draw_arrays_instanced_base_instance(cx, mode, first, count, primcount, 0)
+    }
+
+    /// drawArraysInstanced whose instanced attributes start at `base_instance`
+    /// (WEBGL_draw_instanced_base_vertex_base_instance, WebGL 2 only; 0 elsewhere).
+    pub(crate) fn draw_arrays_instanced_base_instance(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        first: i32,
+        count: i32,
+        primcount: i32,
+        base_instance: u32,
+    ) -> WebGLResult<()> {
         match mode {
             constants::POINTS |
             constants::LINE_STRIP |
@@ -1190,9 +1204,10 @@ impl WebGLRenderingContext {
                 primcount as u32,
                 &current_program.active_attribs(),
             )?,
-            WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).validate_for_draw(
+            WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).validate_for_draw_base_instance(
                 required_len,
                 primcount as u32,
+                base_instance,
                 &current_program.active_attribs(),
             )?,
         };
@@ -1203,7 +1218,15 @@ impl WebGLRenderingContext {
             return Ok(());
         }
 
-        self.send_command(if primcount == 1 {
+        self.send_command(if base_instance != 0 {
+            WebGLCommand::DrawArraysInstancedBaseInstance {
+                mode,
+                first,
+                count,
+                primcount,
+                base_instance,
+            }
+        } else if primcount == 1 {
             WebGLCommand::DrawArrays { mode, first, count }
         } else {
             WebGLCommand::DrawArraysInstanced {
@@ -1226,6 +1249,25 @@ impl WebGLRenderingContext {
         type_: u32,
         offset: i64,
         primcount: i32,
+    ) -> WebGLResult<()> {
+        self.draw_elements_instanced_base_vertex_base_instance(
+            cx, mode, count, type_, offset, primcount, 0, 0,
+        )
+    }
+
+    /// drawElementsInstanced with a base vertex added to each index and instanced attributes
+    /// starting at `base_instance` (WEBGL_draw_instanced_base_vertex_base_instance, WebGL 2 only).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_elements_instanced_base_vertex_base_instance(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        count: i32,
+        type_: u32,
+        offset: i64,
+        primcount: i32,
+        base_vertex: i32,
+        base_instance: u32,
     ) -> WebGLResult<()> {
         match mode {
             constants::POINTS |
@@ -1278,9 +1320,10 @@ impl WebGLRenderingContext {
                 primcount as u32,
                 &current_program.active_attribs(),
             )?,
-            WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).validate_for_draw(
+            WebGLVersion::WebGL2 => self.current_vao_webgl2(cx).validate_for_draw_base_instance(
                 0,
                 primcount as u32,
+                base_instance,
                 &current_program.active_attribs(),
             )?,
         };
@@ -1292,7 +1335,17 @@ impl WebGLRenderingContext {
         }
 
         let offset = offset as u32;
-        self.send_command(if primcount == 1 {
+        self.send_command(if base_vertex != 0 || base_instance != 0 {
+            WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance {
+                mode,
+                count,
+                type_,
+                offset,
+                primcount,
+                base_vertex,
+                base_instance,
+            }
+        } else if primcount == 1 {
             WebGLCommand::DrawElements {
                 mode,
                 count,

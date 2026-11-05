@@ -249,6 +249,18 @@ impl VertexArrayObject {
         instance_count: u32,
         active_attribs: &[ActiveAttribInfo],
     ) -> WebGLResult<()> {
+        self.validate_for_draw_base_instance(required_len, instance_count, 0, active_attribs)
+    }
+
+    /// `validate_for_draw` for draws whose instanced attributes start at `base_instance`
+    /// (WEBGL_draw_instanced_base_vertex_base_instance).
+    pub(crate) fn validate_for_draw_base_instance(
+        &self,
+        required_len: u32,
+        instance_count: u32,
+        base_instance: u32,
+        active_attribs: &[ActiveAttribInfo],
+    ) -> WebGLResult<()> {
         // TODO(nox): Cache limits per VAO.
         let attribs = self.vertex_attribs.borrow();
         // https://www.khronos.org/registry/webgl/specs/latest/1.0/#6.2
@@ -280,6 +292,7 @@ impl VertexArrayObject {
                         return Err(WebGLError::InvalidOperation);
                     }
                 } else if max_vertices
+                    .saturating_sub(base_instance)
                     .checked_mul(attrib.divisor)
                     .is_some_and(|v| v < instance_count)
                 {

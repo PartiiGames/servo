@@ -1969,10 +1969,30 @@ impl WebGL2RenderingContext {
         count: i32,
         primcount: i32,
     ) -> WebGLResult<()> {
+        self.draw_arrays_checked_base_instance(cx, mode, first, count, primcount, 0)
+    }
+
+    /// `draw_arrays_checked` with instanced attributes starting at `base_instance`
+    /// (WEBGL_(multi_)draw_instanced_base_vertex_base_instance).
+    pub(crate) fn draw_arrays_checked_base_instance(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        first: i32,
+        count: i32,
+        primcount: i32,
+        base_instance: u32,
+    ) -> WebGLResult<()> {
         self.validate_draw_state(cx, mode, first as i64, count, primcount)?;
         self.draw_with_transform_feedback(cx, mode, count, primcount, false, |cx| {
-            self.base
-                .draw_arrays_instanced(cx, mode, first, count, primcount)
+            self.base.draw_arrays_instanced_base_instance(
+                cx,
+                mode,
+                first,
+                count,
+                primcount,
+                base_instance,
+            )
         })
     }
 
@@ -1986,10 +2006,37 @@ impl WebGL2RenderingContext {
         offset: i64,
         primcount: i32,
     ) -> WebGLResult<()> {
+        self.draw_elements_checked_base_vertex_base_instance(
+            cx, mode, count, type_, offset, primcount, 0, 0,
+        )
+    }
+
+    /// `draw_elements_checked` with a base vertex and base instance
+    /// (WEBGL_(multi_)draw_instanced_base_vertex_base_instance).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_elements_checked_base_vertex_base_instance(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        count: i32,
+        type_: u32,
+        offset: i64,
+        primcount: i32,
+        base_vertex: i32,
+        base_instance: u32,
+    ) -> WebGLResult<()> {
         self.validate_draw_state(cx, mode, offset, count, primcount)?;
         self.draw_with_transform_feedback(cx, mode, count, primcount, true, |cx| {
-            self.base
-                .draw_elements_instanced(cx, mode, count, type_, offset, primcount)
+            self.base.draw_elements_instanced_base_vertex_base_instance(
+                cx,
+                mode,
+                count,
+                type_,
+                offset,
+                primcount,
+                base_vertex,
+                base_instance,
+            )
         })
     }
 

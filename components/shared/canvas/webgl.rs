@@ -649,6 +649,23 @@ pub enum WebGLCommand {
         offset: u32,
         primcount: i32,
     },
+    /// WEBGL_draw_instanced_base_vertex_base_instance (GL 4.2 / ARB_base_instance).
+    DrawArraysInstancedBaseInstance {
+        mode: u32,
+        first: i32,
+        count: i32,
+        primcount: i32,
+        base_instance: u32,
+    },
+    DrawElementsInstancedBaseVertexBaseInstance {
+        mode: u32,
+        count: i32,
+        type_: u32,
+        offset: u32,
+        primcount: i32,
+        base_vertex: i32,
+        base_instance: u32,
+    },
     VertexAttribDivisor {
         index: u32,
         divisor: u32,

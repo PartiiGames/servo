@@ -25,6 +25,7 @@ use {
     crate::dom::webgl::extensions::extshadertexturelod::EXTShaderTextureLod,
     crate::dom::webgl::extensions::oesstandardderivatives::OESStandardDerivatives,
     crate::dom::webgl::extensions::webglmultidraw::WEBGLMultiDraw,
+    crate::dom::webgl::extensions::webglmultidrawinstancedbasevertexbaseinstance::WEBGLMultiDrawInstancedBaseVertexBaseInstance,
     crate::dom::webgl::webglobject::WebGLObject,
     crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext},
     crate::dom::webglrenderingcontext::capture_webgl_backtrace,
@@ -295,7 +296,9 @@ impl WebGLShader {
             EXT_shader_texture_lod: ext.is_enabled::<EXTShaderTextureLod>() as c_int,
             EXT_frag_depth: ext.is_enabled::<EXTFragDepth>() as c_int,
             // gl_DrawID; the translator turns it into the uniform angle_DrawID (emulateGLDrawID).
-            ANGLE_multi_draw: ext.is_enabled::<WEBGLMultiDraw>() as c_int,
+            ANGLE_multi_draw: (ext.is_enabled::<WEBGLMultiDraw>() ||
+                ext.is_enabled::<WEBGLMultiDrawInstancedBaseVertexBaseInstance>())
+                as c_int,
 
             FragmentPrecisionHigh: 1,
             ..Default::default()
