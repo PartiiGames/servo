@@ -509,12 +509,8 @@ impl WebGLProgram {
                     }
                 }
             }
-            for active_uniform in &*link_info.active_uniforms {
-                // https://www.khronos.org/registry/webgl/specs/latest/1.0/#6.41
-                if !used_names.insert(&*active_uniform.base_name) {
-                    return;
-                }
-            }
+            // An attribute and a uniform may share a name: the stages have separate name
+            // spaces (KhronosGroup/WebGL#3201, conformance/glsl/misc/shaders-with-name-conflicts).
         }
 
         self.linked.set(link_info.linked);
