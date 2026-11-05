@@ -1107,6 +1107,18 @@ impl WebGL2RenderingContext {
             Ok(result) => result,
             Err(_) => return, // NB: The validator sets the correct error for us.
         };
+        // A compressed format on TEXTURE_3D only where compressedTexImage3D takes it (ASTC with
+        // the HDR or sliced 3D extension); S3TC, RGTC, BPTC and ETC2 are 2D-array only.
+        if target == TexImageTarget::Texture3D && internal_format.is_compressed() {
+            let allowed = self
+                .base
+                .extension_manager()
+                .get_tex_compression_format(internal_format.as_gl_constant())
+                .is_some_and(|compression| self.compression_allows_texture_3d(&compression));
+            if !allowed {
+                return self.base.webgl_error(InvalidOperation);
+            }
+        }
 
         handle_potential_webgl_error!(
             self.base,
@@ -5846,6 +5858,16 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if image_info.internal_format().is_compressed() {
             return self.base.webgl_error(InvalidOperation);
         }
+        // Copying from the layer the read buffer is into itself is a feedback loop.
+        if self.base.copy_reads_layer(&texture, level as u32, zoffset) {
+            return self.base.webgl_error(InvalidOperation);
+        }
+        if !self
+            .base
+            .copy_format_compatible(image_info.internal_format(), true)
+        {
+            return self.base.webgl_error(InvalidOperation);
+        }
         let Some((xoffset, yoffset, x, y, width, height)) = clip_copy_to_read_framebuffer(
             self.base.read_framebuffer_size(),
             xoffset,
@@ -5933,6 +5955,16 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         if self.forbid_pixel_unpack_buffer() {
             return Ok(());
         }
+        // A DOM source converts only to colour formats and types (an integer format such as
+        // RGB10_A2UI can't take it); the WebGL 1 path below doesn't know the WebGL 2 ones.
+        if let (Some(format), Some(data_type)) = (
+            TexFormat::from_gl_constant(internal_format as u32),
+            TexDataType::from_webgl_constant(data_type, WebGLVersion::WebGL2),
+        ) && !Self::can_convert_image_source(format, data_type)
+        {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        }
         self.base.TexImage2D_(
             no_gc,
             target,
@@ -5994,6 +6026,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         else {
             return Ok(());
         };
+        // WebGL 2.0 5.35: FLIP_Y / PREMULTIPLY_ALPHA can't apply to a PIXEL_UNPACK_BUFFER upload.
+        if self.unpack_flip_or_premultiply() {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        }
         if !self.validate_pixel_unpack_buffer(pbo_offset, layout.end) {
             return Ok(());
         }
@@ -6253,6 +6290,11 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         else {
             return Ok(());
         };
+        // WebGL 2.0 5.35: FLIP_Y / PREMULTIPLY_ALPHA can't apply to a PIXEL_UNPACK_BUFFER upload.
+        if self.unpack_flip_or_premultiply() {
+            self.base.webgl_error(InvalidOperation);
+            return Ok(());
+        }
         if !self.validate_pixel_unpack_buffer(pbo_offset, layout.end) {
             return Ok(());
         }

@@ -5,7 +5,7 @@
 use std::{self, fmt};
 
 use servo_canvas_traits::webgl::WebGLError::*;
-use servo_canvas_traits::webgl::{TexDataType, TexFormat, WebGLVersion};
+use servo_canvas_traits::webgl::{TexDataType, TexFormat, WebGLError, WebGLVersion};
 
 use super::WebGLValidator;
 use super::types::TexImageTarget;
@@ -93,6 +93,9 @@ pub(crate) struct CommonTexImage2DValidator<'a> {
     /// texSubImage2D / copyTexSubImage2D: width and height are a sub-rectangle, so the
     /// square-cube-face and WebGL 1 power-of-two image rules do not apply to them.
     sub_image: bool,
+    /// The error for an internal format that isn't one: INVALID_ENUM, but INVALID_VALUE for a
+    /// WebGL 2 texImage2D (GL ES 3.0 3.8.3, as ANGLE reports it).
+    bad_internal_format: WebGLError,
 }
 
 pub(crate) struct CommonTexImage2DValidatorResult {
@@ -153,7 +156,7 @@ impl WebGLValidator for CommonTexImage2DValidator<'_> {
                 format
             },
             _ => {
-                self.context.webgl_error(InvalidEnum);
+                self.context.webgl_error(self.bad_internal_format);
                 return Err(TexImageValidationError::InvalidTextureFormat);
             },
         };
@@ -246,12 +249,14 @@ impl<'a> CommonTexImage2DValidator<'a> {
             height,
             border,
             sub_image: false,
+            bad_internal_format: InvalidEnum,
         }
     }
 
     /// Validates a sub-rectangle upload or copy instead of a whole image.
     pub(crate) fn sub_image(mut self) -> Self {
         self.sub_image = true;
+        self.bad_internal_format = InvalidEnum;
         self
     }
 }
@@ -276,16 +281,20 @@ impl<'a> TexImage2DValidator<'a> {
         format: u32,
         data_type: u32,
     ) -> Self {
+        let mut common_validator = CommonTexImage2DValidator::new(
+            context,
+            target,
+            level,
+            internal_format,
+            width,
+            height,
+            border,
+        );
+        if context.webgl_version() == WebGLVersion::WebGL2 {
+            common_validator.bad_internal_format = InvalidValue;
+        }
         TexImage2DValidator {
-            common_validator: CommonTexImage2DValidator::new(
-                context,
-                target,
-                level,
-                internal_format,
-                width,
-                height,
-                border,
-            ),
+            common_validator,
             format,
             data_type,
         }

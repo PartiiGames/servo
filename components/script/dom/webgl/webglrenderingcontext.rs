@@ -877,6 +877,55 @@ impl WebGLRenderingContext {
     /// read framebuffer's read buffer): a feedback loop, INVALID_OPERATION (WebGL 1.0 6.26,
     /// GL ES 3.0 4.4.3).
     fn copy_reads_image(&self, texture: &WebGLTexture, target: TexImageTarget, level: u32) -> bool {
+        let face = match target {
+            TexImageTarget::Texture2D => 0,
+            target => target.as_gl_constant() as i32,
+        };
+        self.copy_reads_layer(texture, level, face)
+    }
+
+    /// Copies (GL ES 3.0 3.8.5, GL ES 2.0 3.7.2): whether the read framebuffer's read buffer can
+    /// be copied into an image of `destination` format. `sub_image` (copyTexSub*) checks
+    /// component types and presence only, not sized bit counts, in WebGL 1 and 2; a WebGL 1
+    /// copyTexImage2D has its own rule and always passes here.
+    pub(crate) fn copy_format_compatible(&self, destination: TexFormat, sub_image: bool) -> bool {
+        let webgl1 = self.webgl_version() == WebGLVersion::WebGL1;
+        if webgl1 && !sub_image {
+            return true;
+        }
+        // WebGL 1 keeps its one framebuffer binding in the draw slot.
+        let read_framebuffer = if webgl1 {
+            self.bound_draw_framebuffer.get()
+        } else {
+            self.bound_read_framebuffer.get()
+        };
+        let source = match read_framebuffer {
+            Some(fb) => fb
+                .attachment_internal_format(fb.read_buffer())
+                .and_then(TexFormat::from_gl_constant),
+            None => Some(if self.GetContextAttributes().unwrap().alpha {
+                TexFormat::RGBA8
+            } else {
+                TexFormat::RGB8
+            }),
+        };
+        source.is_some_and(|source| {
+            if sub_image {
+                copy_tex_sub_image_compatible(source, destination)
+            } else {
+                copy_tex_image_compatible(source, destination)
+            }
+        })
+    }
+
+    /// `copy_reads_image` for a cube face target or a 3D / array layer (`face_or_layer`, as
+    /// framebuffer attachments record it).
+    pub(crate) fn copy_reads_layer(
+        &self,
+        texture: &WebGLTexture,
+        level: u32,
+        face_or_layer: i32,
+    ) -> bool {
         // WebGL 1 has one framebuffer binding, kept in the draw slot.
         let fb = match self.webgl_version() {
             WebGLVersion::WebGL1 => self.bound_draw_framebuffer.get(),
@@ -885,12 +934,12 @@ impl WebGLRenderingContext {
         let Some(fb) = fb else {
             return false;
         };
-        let face = match target {
-            TexImageTarget::Texture2D => 0,
-            target => target.as_gl_constant() as i32,
-        };
         fb.attached_image(fb.read_buffer()) ==
-            Some(AttachedImage::Texture(texture.id(), level as i32, face))
+            Some(AttachedImage::Texture(
+                texture.id(),
+                level as i32,
+                face_or_layer,
+            ))
     }
 
     /// The size of the framebuffer copies and readPixels read from.
@@ -3513,20 +3562,8 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         }
 
         // WebGL 2: the GL ES 3.0 rules, against the read framebuffer's read buffer.
-        if self.webgl_version() == WebGLVersion::WebGL2 {
-            let source = match self.bound_read_framebuffer.get() {
-                Some(fb) => fb
-                    .attachment_internal_format(fb.read_buffer())
-                    .and_then(TexFormat::from_gl_constant),
-                None => Some(if self.GetContextAttributes().unwrap().alpha {
-                    TexFormat::RGBA8
-                } else {
-                    TexFormat::RGB8
-                }),
-            };
-            if !source.is_some_and(|source| copy_tex_image_compatible(source, internal_format)) {
-                return self.webgl_error(InvalidOperation);
-            }
+        if !self.copy_format_compatible(internal_format, false) {
+            return self.webgl_error(InvalidOperation);
         }
 
         // (WebGL 2 was checked above; the comparison below is WebGL 1's.)
@@ -3658,6 +3695,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             return;
         }
         if self.copy_reads_image(&texture, target, level) {
+            return self.webgl_error(InvalidOperation);
+        }
+        if !self.copy_format_compatible(image_info.internal_format(), true) {
             return self.webgl_error(InvalidOperation);
         }
 
@@ -6136,6 +6176,13 @@ fn copy_format_info(format: TexFormat) -> Option<(u8, [u8; 4])> {
         RG32ui => (U, [32, 32, 0, 0]),
         RGBA32ui => (U, [32, 32, 32, 32]),
         RGB10A2ui => (U, [10, 10, 10, 2]),
+        // RGB integer formats aren't colour-renderable, so only ever a copy destination.
+        RGB8i => (I, [8, 8, 8, 0]),
+        RGB16i => (I, [16, 16, 16, 0]),
+        RGB32i => (I, [32, 32, 32, 0]),
+        RGB8ui => (U, [8, 8, 8, 0]),
+        RGB16ui => (U, [16, 16, 16, 0]),
+        RGB32ui => (U, [32, 32, 32, 0]),
         _ => return None,
     })
 }
@@ -6158,6 +6205,18 @@ fn copy_tex_image_compatible(source: TexFormat, destination: TexFormat) -> bool 
             (source_bits[c] != 0 &&
                 (unsized_destination || source_bits[c] == destination_bits[c]))
     })
+}
+
+/// copyTexSubImage*: the destination image's components must exist in the source, of the same
+/// component type (bit counts may differ). Formats this doesn't know are left to GL.
+fn copy_tex_sub_image_compatible(source: TexFormat, destination: TexFormat) -> bool {
+    let (Some((source_type, source_bits)), Some((destination_type, destination_bits))) =
+        (copy_format_info(source), copy_format_info(destination))
+    else {
+        return true;
+    };
+    source_type == destination_type &&
+        (0..4).all(|c| destination_bits[c] == 0 || source_bits[c] != 0)
 }
 
 /// Whether a uniform type is a sampler (set with uniform1i / uniform1iv, read back as an int):

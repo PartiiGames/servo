@@ -77,6 +77,12 @@ impl WebGLValidator for CommonTexImage3DValidator<'_> {
             {
                 format
             },
+            // A format enum that isn't an internal format (unsized RG, RED, ...): INVALID_VALUE,
+            // as GL ES 3.0 and other browsers report it for texImage3D.
+            Some(format) if format.required_webgl_version() <= self.context.webgl_version() => {
+                self.context.webgl_error(InvalidValue);
+                return Err(TexImageValidationError::InvalidTextureFormat);
+            },
             _ => {
                 self.context.webgl_error(InvalidEnum);
                 return Err(TexImageValidationError::InvalidTextureFormat);
@@ -242,8 +248,14 @@ impl WebGLValidator for TexImage3DValidator<'_> {
                 return Err(TexImageValidationError::InvalidDataType);
             },
         };
+        // A sized internal format (RG8) is not a format: INVALID_ENUM.
         let format = match TexFormat::from_gl_constant(self.format) {
-            Some(format) if format.required_webgl_version() <= context.webgl_version() => format,
+            Some(format)
+                if format.required_webgl_version() <= context.webgl_version() &&
+                    format.to_unsized() == format =>
+            {
+                format
+            },
             _ => {
                 context.webgl_error(InvalidEnum);
                 return Err(TexImageValidationError::InvalidTextureFormat);
