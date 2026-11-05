@@ -87,7 +87,144 @@ pub(crate) struct WebGLShader {
     /// A compiled fragment shader's outputs by location (None where nothing is declared), for
     /// the WebGL 2 draw check against the draw buffers. None when they couldn't be read.
     fragment_outputs: DomRefCell<Option<Box<[Option<FragOutputKind>]>>>,
+    /// A compiled ESSL 3.00 vertex shader's declared inputs, active or not (see
+    /// `parse_vertex_inputs`), for the link-time aliasing check. None when unknown.
+    vertex_inputs: DomRefCell<Option<Box<[VertexInput]>>>,
     droppable: DroppableWebGLShader,
+}
+
+/// A vertex shader input as declared in the source.
+#[derive(Clone, Debug, JSTraceable, MallocSizeOf)]
+pub(crate) struct VertexInput {
+    pub(crate) name: String,
+    /// `layout(location = N)`, which overrides bindAttribLocation.
+    pub(crate) location: Option<u32>,
+    /// Locations it occupies (a matCxR takes C).
+    pub(crate) slots: u32,
+}
+
+/// The inputs an ESSL 3.00 vertex shader declares at global scope, from its source (inactive
+/// ones included: they still can't share a location, GLSL ES 3.00.6 12.46). None when the
+/// source has preprocessor conditionals or macros, or a declaration isn't understood.
+fn parse_vertex_inputs(source: &str) -> Option<Box<[VertexInput]>> {
+    // Strip comments.
+    let mut code = String::with_capacity(source.len());
+    let mut rest = source;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = after.split_once('\n').map_or("", |(_, after)| after);
+            code.push('\n');
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.split_once("*/").map_or("", |(_, after)| after);
+            code.push(' ');
+        } else {
+            let c = rest.chars().next()?;
+            code.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    let mut body = String::with_capacity(code.len());
+    for line in code.lines() {
+        let trimmed = line.trim_start();
+        if let Some(directive) = trimmed.strip_prefix('#') {
+            match directive.split_whitespace().next() {
+                Some("version" | "extension" | "pragma") | None => continue,
+                _ => return None,
+            }
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    // Global statements: text at brace depth 0 up to a ';'. A '{' at depth 0 starts a
+    // function body, struct or block, which drops what came before it.
+    let mut statements = vec![];
+    let mut current = String::new();
+    let mut depth = 0u32;
+    for c in body.chars() {
+        match c {
+            '{' => {
+                if depth == 0 {
+                    current.clear();
+                }
+                depth += 1;
+            },
+            '}' => depth = depth.checked_sub(1)?,
+            ';' if depth == 0 => statements.push(std::mem::take(&mut current)),
+            _ if depth == 0 => current.push(c),
+            _ => {},
+        }
+    }
+    let mut inputs = vec![];
+    for statement in statements {
+        let spaced = statement
+            .replace('(', " ( ")
+            .replace(')', " ) ")
+            .replace(',', " , ")
+            .replace('=', " = ")
+            .replace('[', " [ ");
+        let mut tokens = spaced.split_whitespace().peekable();
+        let mut location = None;
+        if tokens.peek() == Some(&"layout") {
+            tokens.next();
+            if tokens.next()? != "(" {
+                return None;
+            }
+            loop {
+                match tokens.next()? {
+                    ")" => break,
+                    "location" => {
+                        if tokens.next()? != "=" {
+                            return None;
+                        }
+                        location = Some(tokens.next()?.parse::<u32>().ok()?);
+                    },
+                    _ => {},
+                }
+            }
+        }
+        let mut is_input = false;
+        let mut type_name = None;
+        for token in tokens.by_ref() {
+            match token {
+                "in" => is_input = true,
+                "highp" | "mediump" | "lowp" | "flat" | "smooth" | "centroid" | "invariant" => {},
+                _ => {
+                    type_name = Some(token);
+                    break;
+                },
+            }
+        }
+        if !is_input {
+            continue;
+        }
+        let slots = match type_name? {
+            "float" | "int" | "uint" | "bool" | "vec2" | "vec3" | "vec4" | "ivec2" | "ivec3" |
+            "ivec4" | "uvec2" | "uvec3" | "uvec4" | "bvec2" | "bvec3" | "bvec4" => 1,
+            "mat2" | "mat2x2" | "mat2x3" | "mat2x4" => 2,
+            "mat3" | "mat3x2" | "mat3x3" | "mat3x4" => 3,
+            "mat4" | "mat4x2" | "mat4x3" | "mat4x4" => 4,
+            _ => return None,
+        };
+        let mut declarator_count = 0;
+        loop {
+            let name = tokens.next()?;
+            if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return None;
+            }
+            declarator_count += 1;
+            inputs.push(VertexInput {
+                name: name.to_owned(),
+                location: location.filter(|_| declarator_count == 1),
+                slots,
+            });
+            match tokens.next() {
+                None => break,
+                Some(",") => continue,
+                Some(_) => return None,
+            }
+        }
+    }
+    Some(inputs.into())
 }
 
 /// What a fragment shader output holds, which WebGL 2 requires the colour buffer it writes
@@ -218,6 +355,7 @@ impl WebGLShader {
             attached_counter: Cell::new(0),
             compilation_status: Cell::new(ShaderCompilationStatus::NotCompiled),
             fragment_outputs: Default::default(),
+            vertex_inputs: Default::default(),
             droppable: DroppableWebGLShader {
                 context: WeakRef::new(context),
                 id,
@@ -385,6 +523,12 @@ impl WebGLShader {
                 } else {
                     None
                 };
+                *self.vertex_inputs.borrow_mut() =
+                    if self.gl_type == constants::VERTEX_SHADER && is_essl3(&source.str()) {
+                        parse_vertex_inputs(&source.str())
+                    } else {
+                        None
+                    };
                 // NOTE: At this point we should be pretty sure that the compilation in the paint thread
                 // will succeed.
                 // It could be interesting to retrieve the info log from the paint thread though
@@ -395,6 +539,7 @@ impl WebGLShader {
             },
             Err(error) => {
                 *self.fragment_outputs.borrow_mut() = None;
+                *self.vertex_inputs.borrow_mut() = None;
                 self.compilation_status.set(ShaderCompilationStatus::Failed);
                 debug!("Shader {} compilation failed: {}", self.id(), error);
             },
@@ -454,6 +599,10 @@ impl WebGLShader {
 
     /// The last successful compile's fragment outputs by location (see
     /// `parse_fragment_outputs`); None for vertex shaders or when they couldn't be read.
+    pub(crate) fn vertex_inputs(&self) -> Option<Box<[VertexInput]>> {
+        self.vertex_inputs.borrow().clone()
+    }
+
     pub(crate) fn fragment_outputs(&self) -> Option<Box<[Option<FragOutputKind>]>> {
         self.fragment_outputs.borrow().clone()
     }

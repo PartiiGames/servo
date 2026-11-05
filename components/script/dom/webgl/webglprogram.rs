@@ -203,6 +203,8 @@ pub(crate) struct WebGLProgram {
     /// Texture units set on sampler uniforms (uniform location -> unit), for the WebGL 2
     /// draw-time sampler type check. Unset samplers use unit 0.
     sampler_units: DomRefCell<HashMap<i32, i32>>,
+    /// bindAttribLocation calls so far (name -> index), for the link-time aliasing check.
+    attrib_bindings: DomRefCell<HashMap<String, u32>>,
     /// The fragment shader's outputs by location at the last link (see
     /// `WebGLShader::fragment_outputs`), for the WebGL 2 draw buffer check.
     fragment_outputs: DomRefCell<Option<Box<[Option<FragOutputKind>]>>>,
@@ -232,6 +234,7 @@ impl WebGLProgram {
             transform_feedback_varying_bytes: DomRefCell::new(vec![].into()),
             pending_link: RefCell::new(None),
             sampler_units: Default::default(),
+            attrib_bindings: Default::default(),
             fragment_outputs: Default::default(),
             emulated_builtins: Default::default(),
             hidden_uniform_indices: DomRefCell::new(vec![].into()),
@@ -344,7 +347,11 @@ impl WebGLProgram {
         }
 
         match self.vertex_shader.get() {
-            Some(ref shader) if shader.successfully_compiled() => {},
+            Some(ref shader) if shader.successfully_compiled() => {
+                if self.inputs_alias(shader) {
+                    return Ok(());
+                }
+            },
             _ => return Ok(()), // callers use gl.LINK_STATUS to check link errors
         }
 
@@ -353,6 +360,31 @@ impl WebGLProgram {
             .send_command(WebGLCommand::LinkProgram(self.id(), sender));
         *self.pending_link.borrow_mut() = Some(receiver);
         Ok(())
+    }
+
+    /// Whether two declared vertex inputs (active or not) would share a location with the
+    /// current bindAttribLocation calls, which fails the link (GLSL ES 3.00.6 12.46). Only
+    /// known for ESSL 3.00 shaders whose inputs could be read; otherwise GL decides.
+    fn inputs_alias(&self, vertex_shader: &WebGLShader) -> bool {
+        let Some(inputs) = vertex_shader.vertex_inputs() else {
+            return false;
+        };
+        let bindings = self.attrib_bindings.borrow();
+        let mut used: Vec<(u32, u32)> = vec![];
+        for input in inputs.iter() {
+            let Some(start) = input
+                .location
+                .or_else(|| bindings.get(&input.name).copied())
+            else {
+                continue;
+            };
+            let end = start.saturating_add(input.slots);
+            if used.iter().any(|&(s, e)| start < e && s < end) {
+                return true;
+            }
+            used.push((start, end));
+        }
+        false
     }
 
     /// Records the units given to a sampler uniform (array elements at consecutive locations).
@@ -572,6 +604,9 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidOperation);
         }
 
+        self.attrib_bindings
+            .borrow_mut()
+            .insert(name.to_string(), index);
         self.upcast().send_command(WebGLCommand::BindAttribLocation(
             self.id(),
             index,
