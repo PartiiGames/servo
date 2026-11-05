@@ -3521,11 +3521,19 @@ impl WebGLImpl {
 /// API to look up the `x.name` and `x.mappedName` members.
 const ANGLE_NAME_PREFIX: &str = "_u";
 
+/// ESSL 3.00's identifier length limit, which ANGLE's name prefixing respects.
+const ANGLE_MAX_IDENTIFIER_LENGTH: usize = 1024;
+
 /// Adds `_u` prefix to variable names. Built-ins (`gl_Position`, `gl_PointSize`, which transform
 /// feedback may record) keep their names.
 fn to_name_in_compiled_shader(s: &str) -> String {
     map_dot_separated(s, |s, mapped| {
-        if !s.starts_with("gl_") {
+        // ANGLE leaves a name unprefixed when the prefix would take it past ESSL's
+        // 1024-character identifier limit (HashNames.cpp).
+        let base_len = s.find('[').unwrap_or(s.len());
+        if !s.starts_with("gl_") &&
+            base_len + ANGLE_NAME_PREFIX.len() <= ANGLE_MAX_IDENTIFIER_LENGTH
+        {
             mapped.push_str(ANGLE_NAME_PREFIX);
         }
         mapped.push_str(s);

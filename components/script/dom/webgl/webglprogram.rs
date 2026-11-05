@@ -17,7 +17,7 @@ use servo_base::text::Utf8CodeUnits;
 use servo_canvas_traits::webgl::{
     ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, EmulatedBuiltinUniforms,
     ProgramLinkInfo, WebGLCommand,
-    WebGLError, WebGLProgramId, WebGLResult, webgl_channel,
+    WebGLError, WebGLProgramId, WebGLResult, WebGLVersion, webgl_channel,
 };
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
@@ -639,13 +639,27 @@ impl WebGLProgram {
         }
     }
 
+    /// Validates an attribute or uniform name against this context's length limit.
+    fn validate_glsl_name(&self, name: &DOMString) -> WebGLResult<bool> {
+        let webgl2 = self
+            .upcast()
+            .context()
+            .is_some_and(|context| context.webgl_version() == WebGLVersion::WebGL2);
+        let max_len = if webgl2 {
+            MAX_UNIFORM_AND_ATTRIBUTE_LEN_WEBGL2
+        } else {
+            MAX_UNIFORM_AND_ATTRIBUTE_LEN
+        };
+        validate_glsl_name(name, max_len)
+    }
+
     /// glBindAttribLocation
     pub(crate) fn bind_attrib_location(&self, index: u32, name: DOMString) -> WebGLResult<()> {
         if self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
         }
 
-        if !validate_glsl_name(&name)? {
+        if !self.validate_glsl_name(&name)? {
             return Ok(());
         }
         if name.starts_with_str("gl_") {
@@ -715,7 +729,7 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidOperation);
         }
 
-        if !validate_glsl_name(&name)? {
+        if !self.validate_glsl_name(&name)? {
             return Ok(-1);
         }
         if name.starts_with_str("gl_") {
@@ -739,7 +753,7 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidOperation);
         }
 
-        if !validate_glsl_name(&name)? {
+        if !self.validate_glsl_name(&name)? {
             return Ok(-1);
         }
         if name.starts_with_str("gl_") {
@@ -767,7 +781,7 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidOperation);
         }
 
-        if !validate_glsl_name(&name)? {
+        if !self.validate_glsl_name(&name)? {
             return Ok(None);
         }
         if name.starts_with_str("gl_") {
@@ -822,7 +836,7 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidOperation);
         }
 
-        if !validate_glsl_name(&name)? {
+        if !self.validate_glsl_name(&name)? {
             return Ok(constants2::INVALID_INDEX);
         }
 
@@ -842,7 +856,10 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidOperation);
         }
 
-        let validation_errors = names.iter().map(validate_glsl_name).collect::<Vec<_>>();
+        let validation_errors = names
+            .iter()
+            .map(|name| self.validate_glsl_name(name))
+            .collect::<Vec<_>>();
         let first_validation_error = validation_errors.iter().find(|result| result.is_err());
         if let Some(error) = first_validation_error {
             return Err(error.unwrap_err());
@@ -1093,11 +1110,11 @@ impl WebGLProgram {
     }
 }
 
-fn validate_glsl_name(name: &DOMString) -> WebGLResult<bool> {
+fn validate_glsl_name(name: &DOMString, max_len: Utf8CodeUnits) -> WebGLResult<bool> {
     if name.is_empty() {
         return Ok(false);
     }
-    if name.len_utf8() > MAX_UNIFORM_AND_ATTRIBUTE_LEN {
+    if name.len_utf8() > max_len {
         return Err(WebGLError::InvalidValue);
     }
     for c in name.str().chars() {
@@ -1167,3 +1184,6 @@ fn parse_uniform_name(name: &DOMString) -> Option<(String, Option<i32>)> {
 ///
 /// FIXME: how is "character" defined here? Should this be `Utf32CodeUnits` instead?
 pub(crate) const MAX_UNIFORM_AND_ATTRIBUTE_LEN: Utf8CodeUnits = Utf8CodeUnits(256);
+
+/// WebGL 2.0 5.26: the limit is 1024 characters (ESSL 3.00's identifier limit).
+pub(crate) const MAX_UNIFORM_AND_ATTRIBUTE_LEN_WEBGL2: Utf8CodeUnits = Utf8CodeUnits(1024);
