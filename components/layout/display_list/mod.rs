@@ -839,7 +839,10 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             .clip
             .translate(containing_block.origin.to_vector())
             .to_webrender();
-        let common = self.common_properties(state, clip, &style);
+        let mut common = self.common_properties(state, clip, &style);
+        if fragment.prefer_compositor_surface {
+            common.flags |= wr::PrimitiveFlags::PREFER_COMPOSITOR_SURFACE;
+        }
 
         if let Some(image_key) = fragment.image_key {
             self.wr().push_image(

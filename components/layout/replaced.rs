@@ -563,6 +563,7 @@ impl ReplacedContents {
                         natural_width: self.natural_size.width,
                         natural_height: self.natural_size.height,
                         selected: self.selected.clone(),
+                        prefer_compositor_surface: false,
                     }))
                 })
                 .into_iter()
@@ -579,6 +580,7 @@ impl ReplacedContents {
                     natural_width: self.natural_size.width,
                     natural_height: self.natural_size.height,
                     selected: self.selected.clone(),
+                    prefer_compositor_surface: false,
                 }))]
             },
             ReplacedContentKind::IFrame(iframe) => {
@@ -625,6 +627,7 @@ impl ReplacedContents {
                     natural_width: self.natural_size.width,
                     natural_height: self.natural_size.height,
                     selected: self.selected.clone(),
+                    prefer_compositor_surface: canvas_compositor_surface(),
                 }))]
             },
             ReplacedContentKind::SVGElement {
@@ -682,6 +685,7 @@ impl ReplacedContents {
                             natural_width: self.natural_size.width,
                             natural_height: self.natural_size.height,
                             selected: self.selected.clone(),
+                            prefer_compositor_surface: false,
                         }))
                     })
                     .into_iter()
@@ -847,4 +851,13 @@ fn try_to_parse_image_data_url(string: &str) -> Option<Url> {
     }
 
     Url::parse(string).ok()
+}
+
+/// Partii (perf): canvases ask WebRender for a compositor surface (`PREFER_COMPOSITOR_SURFACE`), so a canvas
+/// that changes every frame is composited from its own texture instead of being copied into the picture cache
+/// tiles under it first (a full-canvas pass per frame, several ms at 1280x720 on software GL).
+/// PARTII_CANVAS_SURFACE=0 turns it off (for A/B measurements).
+fn canvas_compositor_surface() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("PARTII_CANVAS_SURFACE").as_deref(), Ok("0")))
 }
