@@ -14,7 +14,7 @@ use script_bindings::reflector::reflect_dom_object;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     TexDataType, WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
-    WebGLRenderbufferId, WebGLResult, WebGLTextureId, WebGLVersion, webgl_channel,
+    WebGLObjectNameKind, WebGLRenderbufferId, WebGLResult, WebGLTextureId, WebGLVersion,
 };
 #[cfg(feature = "webxr")]
 use webxr_api::Viewport;
@@ -203,9 +203,8 @@ impl WebGLFramebuffer {
         cx: &mut JSContext,
         context: &WebGLRenderingContext,
     ) -> Option<DomRoot<Self>> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        context.send_command(WebGLCommand::CreateFramebuffer(sender));
-        let id = receiver.recv().unwrap()?;
+        let id =
+            WebGLFramebufferId::new(context.take_object_name(WebGLObjectNameKind::Framebuffer)?);
         let framebuffer = WebGLFramebuffer::new(cx, context, id);
         Some(framebuffer)
     }

@@ -11,7 +11,7 @@ use script_bindings::reflector::{DomObject, reflect_dom_object};
 use script_bindings::weakref::WeakRef;
 use servo_base::generic_channel;
 use servo_canvas_traits::webgl::{
-    WebGLBufferId, WebGLCommand, WebGLError, WebGLResult, webgl_channel,
+    WebGLBufferId, WebGLCommand, WebGLError, WebGLObjectNameKind, WebGLResult,
 };
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants;
@@ -140,12 +140,8 @@ impl WebGLBuffer {
         cx: &mut JSContext,
         context: &WebGLRenderingContext,
     ) -> Option<DomRoot<Self>> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        context.send_command(WebGLCommand::CreateBuffer(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLBuffer::new(cx, context, id))
+        let id = context.take_object_name(WebGLObjectNameKind::Buffer)?;
+        Some(WebGLBuffer::new(cx, context, WebGLBufferId::new(id)))
     }
 
     pub(crate) fn new(

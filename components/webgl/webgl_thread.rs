@@ -42,7 +42,8 @@ use servo_canvas_traits::webgl::{
     GLContextAttributes, GLLimits, GlType, InternalFormatIntVec, ProgramLinkInfo, TexDataType,
     TexFormat, WebGLBufferId, WebGLChan, WebGLCommand, WebGLCommandBacktrace, WebGLContextId,
     WebGLCreateContextResult, WebGLFramebufferBindingRequest, WebGLFramebufferId, WebGLMsg,
-    WebGLMsgSender, WebGLProgramId, WebGLQueryId, WebGLRenderbufferId, WebGLSLVersion,
+    WebGLMsgSender, WebGLObjectNameKind, WebGLProgramId, WebGLQueryId, WebGLRenderbufferId,
+    WebGLSLVersion,
     WebGLSamplerId, WebGLShaderId, WebGLSyncId, WebGLTextureId, WebGLVersion, WebGLVertexArrayId,
     YAxisTreatment,
 };
@@ -1523,6 +1524,28 @@ impl WebGLImpl {
             WebGLCommand::CreateFramebuffer(ref chan) => Self::create_framebuffer(gl, chan),
             WebGLCommand::CreateRenderbuffer(ref chan) => Self::create_renderbuffer(gl, chan),
             WebGLCommand::CreateTexture(ref chan) => Self::create_texture(gl, chan),
+            WebGLCommand::GenObjectNames(kind, count, ref chan) => {
+                // The same glGen* calls the Create* commands make, `count` at a time; a name that fails
+                // ends the batch (the script thread falls back to Create* when it gets none).
+                let mut names = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    let name = unsafe {
+                        match kind {
+                            WebGLObjectNameKind::Buffer => gl.create_buffer().map(|n| n.0.get()),
+                            WebGLObjectNameKind::Framebuffer => gl.create_framebuffer().map(|n| n.0.get()),
+                            WebGLObjectNameKind::Renderbuffer => {
+                                gl.create_renderbuffer().map(|n| n.0.get())
+                            },
+                            WebGLObjectNameKind::Texture => gl.create_texture().map(|n| n.0.get()),
+                        }
+                    };
+                    match name {
+                        Ok(name) => names.push(name),
+                        Err(_) => break,
+                    }
+                }
+                let _ = chan.send(names);
+            },
             WebGLCommand::CreateProgram(ref chan) => Self::create_program(gl, chan),
             WebGLCommand::CreateShader(shader_type, ref chan) => {
                 Self::create_shader(gl, shader_type, chan)
