@@ -3487,7 +3487,10 @@ impl WebGLImpl {
 
         let object_code = match validator.compile(&[source], options) {
             Ok(()) => {
-                let object_code = validator.object_code();
+                let mut object_code = validator.object_code();
+                if t.shader_type == glow::FRAGMENT_SHADER {
+                    object_code = strip_fragment_output_invariance(object_code);
+                }
                 debug!("Shader translated: {}", object_code);
                 Some(object_code)
             },
@@ -4368,4 +4371,33 @@ unsafe fn copy_tex_image_2d(
 fn webgl_stats_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("PARTII_WEBGL_STATS").is_some())
+}
+
+/// A fragment shader's `#pragma STDGL invariant(all)` and `invariant gl_FragColor;` /
+/// `invariant gl_FragData;` only concern its outputs, where invariance changes nothing GL can
+/// observe. Desktop GL drivers (Mesa) apply the pragma to the varyings read too, failing links
+/// GLSL ES allows (a variant vertex output; shaders-with-invariance), and reject the two
+/// declarations together (fragcolor-fragdata-invariant), so they are dropped from the
+/// translation.
+fn strip_fragment_output_invariance(object_code: String) -> String {
+    let drop = |line: &str| {
+        matches!(
+            line.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .as_str(),
+            "#pragma STDGL invariant(all)" | "invariant gl_FragColor;" | "invariant gl_FragData;"
+        )
+    };
+    if !object_code.lines().any(drop) {
+        return object_code;
+    }
+    let mut stripped = String::with_capacity(object_code.len());
+    for line in object_code.lines() {
+        if !drop(line) {
+            stripped.push_str(line);
+        }
+        stripped.push('\n');
+    }
+    stripped
 }
