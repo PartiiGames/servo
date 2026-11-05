@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
 use paint_api::{CrossProcessPaintApi, WebRenderExternalImageIdManager, WebRenderImageHandlerType};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use servo_base::generic_channel::{GenericReceiver, GenericSender, GenericSharedMemory};
 use servo_base::id::PipelineId;
 use servo_config::pref;
@@ -80,6 +80,10 @@ pub(crate) struct WGPU {
     /// Render bundle encoders that script invalidated, with the validation error to report
     /// when they are finished. Their later commands are dropped.
     invalid_render_bundle_encoders: FxHashMap<id::RenderBundleEncoderId, String>,
+    /// Render bundle encoders that were finished. Every later command on one is a
+    /// validation error, including the ones script turns into `Invalidate` (an invalid
+    /// indirect draw), which would otherwise be dropped silently.
+    finished_render_bundle_encoders: FxHashSet<id::RenderBundleEncoderId>,
 }
 
 impl WGPU {
@@ -141,6 +145,7 @@ impl WGPU {
             webrender_external_image_id_manager,
             wgpu_image_map,
             invalid_render_bundle_encoders: FxHashMap::default(),
+            finished_render_bundle_encoders: FxHashSet::default(),
         }
     }
 
@@ -981,6 +986,7 @@ impl WGPU {
                     },
                     WebGPURequest::DropRenderBundleEncoder(id) => {
                         self.invalid_render_bundle_encoders.remove(&id);
+                        self.finished_render_bundle_encoders.remove(&id);
                         let global = &self.global;
                         global.render_bundle_encoder_drop(id);
                         if let Err(e) = self
@@ -1258,6 +1264,20 @@ impl WGPU {
                         render_bundle_id,
                         device_id,
                     } => {
+                        let already_finished = !self
+                            .finished_render_bundle_encoders
+                            .insert(render_bundle_encoder_id);
+                        if already_finished {
+                            self.global
+                                .create_render_bundle_error(Some(render_bundle_id), &descriptor);
+                            self.dispatch_error(
+                                device_id,
+                                Error::Validation(
+                                    "The render bundle encoder is already finished".to_owned(),
+                                ),
+                            );
+                            continue;
+                        }
                         if let Some(message) = self
                             .invalid_render_bundle_encoders
                             .remove(&render_bundle_encoder_id)
@@ -1293,6 +1313,19 @@ impl WGPU {
                         render_command,
                         device_id,
                     } => {
+                        if self
+                            .finished_render_bundle_encoders
+                            .contains(&render_bundle_encoder_id)
+                        {
+                            // <https://gpuweb.github.io/gpuweb/#abstract-opdef-validate-the-encoder-state>
+                            self.dispatch_error(
+                                device_id,
+                                Error::Validation(
+                                    "The render bundle encoder is already finished".to_owned(),
+                                ),
+                            );
+                            continue;
+                        }
                         if let RenderBundleEncoderCommand::Invalidate(message) = render_command {
                             self.invalid_render_bundle_encoders
                                 .entry(render_bundle_encoder_id)
