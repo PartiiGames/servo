@@ -528,6 +528,8 @@ impl WebGLFramebuffer {
             constants::RGBA,
             constants::RGBA4,
         ][..];
+        // ES 3.0 table 3.13: the snorm, shared-exponent, sRGB8 and three-channel float and
+        // integer formats are not colour-renderable.
         let webgl2_color_constraints = &[
             constants::ALPHA,
             constants::LUMINANCE,
@@ -540,7 +542,6 @@ impl WebGLFramebuffer {
             constants::R32I,
             constants::R32UI,
             constants::R8,
-            constants::R8_SNORM,
             constants::R8I,
             constants::R8UI,
             constants::RG16F,
@@ -550,22 +551,11 @@ impl WebGLFramebuffer {
             constants::RG32I,
             constants::RG32UI,
             constants::RG8,
-            constants::RG8_SNORM,
             constants::RG8I,
             constants::RG8UI,
             constants::RGB10_A2,
             constants::RGB10_A2UI,
-            constants::RGB16F,
-            constants::RGB16I,
-            constants::RGB16UI,
-            constants::RGB32F,
-            constants::RGB32I,
-            constants::RGB32UI,
             constants::RGB8,
-            constants::RGB8_SNORM,
-            constants::RGB8I,
-            constants::RGB8UI,
-            constants::RGB9_E5,
             constants::RGBA16F,
             constants::RGBA16I,
             constants::RGBA16UI,
@@ -573,10 +563,8 @@ impl WebGLFramebuffer {
             constants::RGBA32I,
             constants::RGBA32UI,
             constants::RGBA8,
-            constants::RGBA8_SNORM,
             constants::RGBA8I,
             constants::RGBA8UI,
-            constants::SRGB8,
             constants::SRGB8_ALPHA8,
         ][..];
         let empty_color_constrains = &[][..];
