@@ -605,7 +605,9 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
                 .get_or_init_webgl_context(cx, options)
                 .map(RootedRenderingContext::WebGLRenderingContext),
             #[cfg(feature = "webgl")]
-            "webgl2" | "experimental-webgl2" => self
+            // No "experimental-webgl2": WebGL 2 shipped without a prefixed name
+            // (conformance2/context/no-experimental-webgl2).
+            "webgl2" => self
                 .get_or_init_webgl2_context(cx, options)
                 .map(RootedRenderingContext::WebGL2RenderingContext),
             #[cfg(feature = "webgpu")]

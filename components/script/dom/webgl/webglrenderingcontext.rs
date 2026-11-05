@@ -1575,11 +1575,10 @@ impl WebGLRenderingContext {
             return Err(InvalidOperation);
         }
 
+        // first + count can pass i32::MAX (vertex-id draws at first = INT32_MAX): count in u32,
+        // where two non-negative i32s always fit; attribute arrays still bound it below.
         let required_len = if count > 0 {
-            first
-                .checked_add(count)
-                .map(|len| len as u32)
-                .ok_or(InvalidOperation)?
+            first as u32 + count as u32
         } else {
             0
         };
@@ -2650,6 +2649,11 @@ impl CanvasContext for WebGLRenderingContext {
 
     fn resize(&self) {
         let size = self.size().cast();
+        // Setting width or height to the size the drawing buffer already has changes nothing:
+        // contents, depth and stencil stay (render-after-resize-test's no-op resizes).
+        if self.size.get() == size {
+            return;
+        }
         let (sender, receiver) = webgl_channel().unwrap();
         self.droppable
             .webgl_sender
