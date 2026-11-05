@@ -113,9 +113,11 @@ pub(crate) struct WebGLTexture {
     webgl_object: WebGLObject,
     /// The target to which this texture was bound the first time
     target: Cell<Option<u32>>,
-    /// Stores information about mipmap levels and cubemap faces.
+    /// Stores information about mipmap levels and cubemap faces, at `level * face_count + face`.
+    /// Partii (perf): grown as images are defined, rather than an inline array of every possible
+    /// level and face (31 x 6, ~4.5 KB built and copied per createTexture).
     #[ignore_malloc_size_of = "Arrays are cumbersome"]
-    image_info_array: DomRefCell<[Option<ImageInfo>; MAX_LEVEL_COUNT * MAX_FACE_COUNT]>,
+    image_info_array: DomRefCell<Vec<Option<ImageInfo>>>,
     /// Face count can only be 1 or 6
     face_count: Cell<u8>,
     // Store information for min and mag filters
@@ -149,7 +151,7 @@ impl WebGLTexture {
             face_count: Cell::new(0),
             min_filter: Cell::new(constants::NEAREST_MIPMAP_LINEAR),
             mag_filter: Cell::new(constants::LINEAR),
-            image_info_array: DomRefCell::new([None; MAX_LEVEL_COUNT * MAX_FACE_COUNT]),
+            image_info_array: DomRefCell::new(Vec::new()),
             attached_framebuffer: Default::default(),
             droppable: DroppableWebGLTexture {
                 context: WeakRef::new(context),
@@ -710,8 +712,13 @@ impl WebGLTexture {
 
     fn set_image_infos_at_level_and_face(&self, level: u32, face: u8, image_info: ImageInfo) {
         debug_assert!(face < self.face_count.get());
-        let pos = (level * self.face_count.get() as u32) + face as u32;
-        self.image_info_array.borrow_mut()[pos as usize] = Some(image_info);
+        let pos = ((level * self.face_count.get() as u32) + face as u32) as usize;
+        debug_assert!(pos < MAX_LEVEL_COUNT * MAX_FACE_COUNT);
+        let mut infos = self.image_info_array.borrow_mut();
+        if infos.len() <= pos {
+            infos.resize(pos + 1, None);
+        }
+        infos[pos] = Some(image_info);
     }
 
     fn update_size(&self) {
