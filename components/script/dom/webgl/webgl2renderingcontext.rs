@@ -206,8 +206,11 @@ impl WebGL2RenderingContext {
         size: Size2D<u32>,
         attrs: GLContextAttributes,
     ) -> Option<DomRoot<WebGL2RenderingContext>> {
-        WebGL2RenderingContext::new_inherited(cx, global, canvas, size, attrs)
-            .map(|ctx| reflect_dom_object_with_cx(Box::new(ctx), global, cx))
+        WebGL2RenderingContext::new_inherited(cx, global, canvas, size, attrs).map(|ctx| {
+            let ctx = reflect_dom_object_with_cx(Box::new(ctx), global, cx);
+            ctx.base.set_webgl2(&ctx);
+            ctx
+        })
     }
 
     pub(crate) fn set_image_key(&self, image_key: ImageKey) {
@@ -1946,21 +1949,48 @@ impl WebGL2RenderingContext {
         primcount: i32,
         indexed: bool,
         draw: impl FnOnce(&mut JSContext) -> WebGLResult<()>,
-    ) {
-        handle_potential_webgl_error!(
-            self.base,
-            self.validate_transform_feedback_buffers_for_draw(cx),
-            return
-        );
-        let recorded = handle_potential_webgl_error!(
-            self.base,
-            self.validate_transform_feedback_for_draw(mode, count, primcount, indexed),
-            return
-        );
-        handle_potential_webgl_error!(self.base, draw(cx), return);
+    ) -> WebGLResult<()> {
+        self.validate_transform_feedback_buffers_for_draw(cx)?;
+        let recorded =
+            self.validate_transform_feedback_for_draw(mode, count, primcount, indexed)?;
+        draw(cx)?;
         if let Some(vertices) = recorded {
             self.with_current_transform_feedback(|tf| tf.add_vertices_recorded(vertices));
         }
+        Ok(())
+    }
+
+    /// drawArrays(Instanced) with every WebGL 2 check; also each WEBGL_multi_draw entry.
+    pub(crate) fn draw_arrays_checked(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        first: i32,
+        count: i32,
+        primcount: i32,
+    ) -> WebGLResult<()> {
+        self.validate_draw_state(cx, mode, first as i64, count, primcount)?;
+        self.draw_with_transform_feedback(cx, mode, count, primcount, false, |cx| {
+            self.base
+                .draw_arrays_instanced(cx, mode, first, count, primcount)
+        })
+    }
+
+    /// drawElements(Instanced) with every WebGL 2 check; also each WEBGL_multi_draw entry.
+    pub(crate) fn draw_elements_checked(
+        &self,
+        cx: &mut JSContext,
+        mode: u32,
+        count: i32,
+        type_: u32,
+        offset: i64,
+        primcount: i32,
+    ) -> WebGLResult<()> {
+        self.validate_draw_state(cx, mode, offset, count, primcount)?;
+        self.draw_with_transform_feedback(cx, mode, count, primcount, true, |cx| {
+            self.base
+                .draw_elements_instanced(cx, mode, count, type_, offset, primcount)
+        })
     }
 
     /// WebGL 2.0, 5.22 / GL ES 3.0, 2.11.2: each active sampler must sample a texture of its own
@@ -3799,25 +3829,16 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     fn DrawArrays(&self, cx: &mut JSContext, mode: u32, first: i32, count: i32) {
         handle_potential_webgl_error!(
             self.base,
-            self.validate_draw_state(cx, mode, first as i64, count, 1),
-            return
-        );
-        self.draw_with_transform_feedback(cx, mode, count, 1, false, |cx| {
-            self.base.draw_arrays_instanced(cx, mode, first, count, 1)
-        })
+            self.draw_arrays_checked(cx, mode, first, count, 1)
+        )
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.11>
     fn DrawElements(&self, cx: &mut JSContext, mode: u32, count: i32, type_: u32, offset: i64) {
         handle_potential_webgl_error!(
             self.base,
-            self.validate_draw_state(cx, mode, offset, count, 1),
-            return
-        );
-        self.draw_with_transform_feedback(cx, mode, count, 1, true, |cx| {
-            self.base
-                .draw_elements_instanced(cx, mode, count, type_, offset, 1)
-        })
+            self.draw_elements_checked(cx, mode, count, type_, offset, 1)
+        )
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
@@ -6473,13 +6494,8 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     ) {
         handle_potential_webgl_error!(
             self.base,
-            self.validate_draw_state(cx, mode, first as i64, count, primcount),
-            return
-        );
-        self.draw_with_transform_feedback(cx, mode, count, primcount, false, |cx| {
-            self.base
-                .draw_arrays_instanced(cx, mode, first, count, primcount)
-        })
+            self.draw_arrays_checked(cx, mode, first, count, primcount)
+        )
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.9>
@@ -6494,13 +6510,8 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     ) {
         handle_potential_webgl_error!(
             self.base,
-            self.validate_draw_state(cx, mode, offset, count, primcount),
-            return
-        );
-        self.draw_with_transform_feedback(cx, mode, count, primcount, true, |cx| {
-            self.base
-                .draw_elements_instanced(cx, mode, count, type_, offset, primcount)
-        })
+            self.draw_elements_checked(cx, mode, count, type_, offset, primcount)
+        )
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.9>
@@ -6520,13 +6531,8 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         }
         handle_potential_webgl_error!(
             self.base,
-            self.validate_draw_state(cx, mode, offset, count, 1),
-            return
-        );
-        self.draw_with_transform_feedback(cx, mode, count, 1, true, |cx| {
-            self.base
-                .draw_elements_instanced(cx, mode, count, type_, offset, 1)
-        })
+            self.draw_elements_checked(cx, mode, count, type_, offset, 1)
+        )
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.9>

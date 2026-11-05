@@ -443,6 +443,7 @@ impl WebGLExtensions {
         self.register::<ext::webglcompressedtextureastc::WEBGLCompressedTextureASTC>();
         self.register::<ext::webglcompressedtextureetc1::WEBGLCompressedTextureETC1>();
         self.register::<ext::webglcompressedtextures3tc::WEBGLCompressedTextureS3TC>();
+        self.register::<ext::webglmultidraw::WEBGLMultiDraw>();
     }
 
     pub(crate) fn enable_element_index_uint(&self) {

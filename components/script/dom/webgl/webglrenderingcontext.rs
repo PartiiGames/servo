@@ -79,6 +79,7 @@ use crate::dom::webgl::validations::tex_image_2d::{
 };
 use crate::dom::webgl::validations::types::TexImageTarget;
 use crate::dom::webgl::vertexarrayobject::VertexAttribData;
+use crate::dom::webgl::webgl2renderingcontext::WebGL2RenderingContext;
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglbuffer::WebGLBuffer;
 use crate::dom::webgl::webglcontextevent::WebGLContextEvent;
@@ -190,6 +191,9 @@ pub(crate) struct WebGLRenderingContext {
     bound_renderbuffer: MutNullableDom<WebGLRenderbuffer>,
     bound_buffer_array: MutNullableDom<WebGLBuffer>,
     current_program: MutNullableDom<WebGLProgram>,
+    /// The WebGL 2 context wrapping this one, for extensions whose draws need the WebGL 2
+    /// checks (WEBGL_multi_draw). None for WebGL 1.
+    webgl2: MutNullableDom<WebGL2RenderingContext>,
     current_vertex_attribs: DomRefCell<Box<[VertexAttrib]>>,
     #[ignore_malloc_size_of = "Because it's small"]
     current_scissor: Cell<(i32, i32, u32, u32)>,
@@ -265,6 +269,7 @@ impl WebGLRenderingContext {
                 bound_buffer_array: MutNullableDom::new(None),
                 bound_renderbuffer: MutNullableDom::new(None),
                 current_program: MutNullableDom::new(None),
+                webgl2: MutNullableDom::new(None),
                 current_vertex_attribs: DomRefCell::new(
                     vec![VertexAttrib::Float(0f32, 0f32, 0f32, 1f32); max_vertex_attribs].into(),
                 ),
@@ -500,6 +505,14 @@ impl WebGLRenderingContext {
     //
     // The WebGL spec mentions a couple more operations that trigger
     // this: clear() and getParameter(IMPLEMENTATION_COLOR_READ_*).
+    pub(crate) fn set_webgl2(&self, webgl2: &WebGL2RenderingContext) {
+        self.webgl2.set(Some(webgl2));
+    }
+
+    pub(crate) fn webgl2(&self) -> Option<DomRoot<WebGL2RenderingContext>> {
+        self.webgl2.get()
+    }
+
     pub(crate) fn validate_framebuffer(&self) -> WebGLResult<()> {
         match self.bound_draw_framebuffer.get() {
             Some(fb) => match fb.check_status_for_rendering() {
