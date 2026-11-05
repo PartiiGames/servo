@@ -597,6 +597,8 @@ pub(crate) struct JsTimerTask {
     nesting_level: u32,
     duration: Duration,
     is_user_interacting: bool,
+    /// When this timer was last due (an interval's next run is due one period after it).
+    due: Option<Instant>,
 }
 
 // Enum allowing more descriptive values for the is_interval field
@@ -724,6 +726,7 @@ impl JsTimers {
             is_user_interacting: ScriptThread::is_user_interacting(),
             nesting_level: 0,
             duration: Duration::ZERO,
+            due: None,
         };
 
         // Step 4. If timeout is less than 0, then set timeout to 0.
@@ -770,6 +773,25 @@ impl JsTimers {
         let nesting_level = self.nesting_level.get();
 
         let duration = self.user_agent_pad(clamp_duration(nesting_level, task.duration));
+        // An interval's next run is due one period after the previous one was due, not one period
+        // after its callback returned: re-arming from the end of the callback (the steps as written)
+        // made every period the interval plus the callback's run time plus the wake-up latency, so a
+        // game server's 33 ms setInterval ticked ~22 times a second instead of 30. Gecko and WebKit
+        // keep intervals on their schedule the same way. More than a period behind (a long callback,
+        // a suspended page): start over from now rather than run a burst to catch up.
+        let now = Instant::now();
+        let delay = match (task.is_interval, task.due) {
+            (IsInterval::Interval, Some(previous)) => {
+                let next = previous + duration;
+                if next + duration < now {
+                    duration
+                } else {
+                    next.saturating_duration_since(now)
+                }
+            },
+            _ => duration,
+        };
+        task.due = Some(now + delay);
         // Step 10. Increment nesting level by one.
         // Step 11. Set task's timer nesting level to nesting level.
         task.nesting_level = nesting_level + 1;
@@ -777,7 +799,7 @@ impl JsTimers {
         // Step 13. Set uniqueHandle to the result of running steps after a timeout given global,
         // "setTimeout/setInterval", timeout, and completionStep.
         let callback = OneshotTimerCallback::JsTimer(task);
-        let oneshot_handle = global.schedule_callback(callback, duration);
+        let oneshot_handle = global.schedule_callback(callback, delay);
 
         // Step 14. Set global's map of setTimeout and setInterval IDs[id] to uniqueHandle.
         let entry = active_timers
