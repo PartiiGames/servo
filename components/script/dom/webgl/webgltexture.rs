@@ -22,6 +22,7 @@ use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebG
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::webgl::extensions::oestexturefloatlinear::OESTextureFloatLinear;
 use crate::dom::webgl::validations::types::TexImageTarget;
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
 use crate::dom::webgl::webglobject::WebGLObject;
@@ -293,6 +294,8 @@ impl WebGLTexture {
             },
             // WebGL 2: any size, but the base level must be colour-renderable and filterable
             // (GL ES 3.0, glGenerateMipmap): no integer, depth or unfilterable 32-bit float formats.
+            // 32-bit float is filterable only once content has enabled OES_texture_float_linear
+            // (being supported is not enough).
             WebGLVersion::WebGL2 => {
                 let format = base_image_info.internal_format;
                 let unsized_format = format.to_unsized();
@@ -308,7 +311,10 @@ impl WebGLTexture {
                         TexFormat::RGBAInteger |
                         TexFormat::DepthComponent |
                         TexFormat::DepthStencil
-                ) || (is_float32 && !context.extension_manager().is_filterable(constants::FLOAT))
+                ) || (is_float32 &&
+                    !context
+                        .extension_manager()
+                        .is_enabled::<OESTextureFloatLinear>())
                 {
                     return Err(WebGLError::InvalidOperation);
                 }
