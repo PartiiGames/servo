@@ -15,8 +15,8 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_weak_referenceable_dom_object;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
-    GLLimits, GlType, WebGLCommand, WebGLError, WebGLResult, WebGLSLVersion, WebGLShaderId,
-    WebGLVersion, webgl_channel,
+    GLLimits, GlType, WebGLCommand, WebGLError, WebGLObjectNameKind, WebGLResult, WebGLSLVersion,
+    WebGLShaderId, WebGLVersion, webgl_channel,
 };
 #[cfg(feature = "webgl")]
 use {
@@ -229,6 +229,15 @@ impl WebGLShader {
         context: &WebGLRenderingContext,
         shader_type: u32,
     ) -> Option<DomRoot<Self>> {
+        let kind = match shader_type {
+            constants::VERTEX_SHADER => Some(WebGLObjectNameKind::VertexShader),
+            constants::FRAGMENT_SHADER => Some(WebGLObjectNameKind::FragmentShader),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let id = context.take_object_name(kind)?;
+            return Some(WebGLShader::new(cx, context, WebGLShaderId::new(id), shader_type));
+        }
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateShader(shader_type, sender));
         receiver

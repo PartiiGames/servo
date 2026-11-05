@@ -15,7 +15,7 @@ use servo_base::generic_channel::{GenericReceiver, TryReceiveError};
 use servo_base::text::Utf8CodeUnits;
 use servo_canvas_traits::webgl::{
     ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, ProgramLinkInfo, WebGLCommand,
-    WebGLError, WebGLProgramId, WebGLResult, webgl_channel,
+    WebGLError, WebGLObjectNameKind, WebGLProgramId, WebGLResult, webgl_channel,
 };
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
@@ -235,12 +235,8 @@ impl WebGLProgram {
         cx: &mut JSContext,
         context: &WebGLRenderingContext,
     ) -> Option<DomRoot<Self>> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        context.send_command(WebGLCommand::CreateProgram(sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLProgram::new(cx, context, id))
+        let id = context.take_object_name(WebGLObjectNameKind::Program)?;
+        Some(WebGLProgram::new(cx, context, WebGLProgramId::new(id)))
     }
 
     pub(crate) fn new(
