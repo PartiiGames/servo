@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dom_struct::dom_struct;
-use euclid::default::Point2D;
+use euclid::default::{Point2D, Size2D};
 use html5ever::{LocalName, Prefix, QualName, local_name, ns};
 use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
@@ -165,6 +165,19 @@ impl HTMLImageElement {
 
     /// Gets the copy of the raster image data. A vector (SVG) image is rasterized at its natural
     /// size on this thread, as other engines do for WebGL/WebGPU uploads from an SVG `<img>`.
+    /// Straight-alpha RGBA8 pixels of a static raster image with transparency, decoded
+    /// again from its encoded bytes. `None` when the premultiplied snapshot holds every
+    /// colour (opaque, animated or vector images).
+    pub(crate) fn get_unpremultiplied_raster_image_data(&self) -> Option<(Vec<u8>, Size2D<u32>)> {
+        match self.image_data()? {
+            Image::Raster(raster_image) => {
+                let size = Size2D::new(raster_image.metadata.width, raster_image.metadata.height);
+                Some((raster_image.decode_unpremultiplied()?, size))
+            },
+            Image::Vector(_) => None,
+        }
+    }
+
     pub(crate) fn get_raster_image_data(&self) -> Option<Snapshot> {
         match self.image_data()? {
             Image::Raster(raster_image) => Some(raster_image.as_snapshot()),

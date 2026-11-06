@@ -298,6 +298,7 @@ fn render_svg(
             id: None,
             cors_status: vector_image.cors_status,
             is_opaque: false,
+            encoded: None,
             loop_count: None,
         }
     }));

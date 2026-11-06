@@ -1089,6 +1089,7 @@ mod test {
             cors_status: CorsStatus::Unsafe,
             loop_count: Some(Repeat::Infinite),
             is_opaque: false,
+            encoded: None,
         };
         let mut image_animation_state = ImageAnimationState::new(Arc::new(image), 0.0);
 
@@ -1130,6 +1131,7 @@ mod test {
             cors_status: CorsStatus::Unsafe,
             loop_count: Some(Repeat::Finite(NonZeroU32::new(1).unwrap())),
             is_opaque: false,
+            encoded: None,
         };
         let mut image_animation_state = ImageAnimationState::new(Arc::new(image), 0.0);
 

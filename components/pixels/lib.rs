@@ -311,6 +311,11 @@ pub struct RasterImage {
     /// has a default value of `Repeat::Infinite` (if no loop count is specified in
     /// the image).  For images that do not animate, this will be `None`.
     pub loop_count: Option<Repeat>,
+    /// The encoded bytes of a static image with transparency. The decoded `bytes` are
+    /// premultiplied, which loses the colour under zero alpha; WebGL uploads with
+    /// UNPACK_PREMULTIPLY_ALPHA false decode these again to straight alpha.
+    #[ignore_malloc_size_of = "Shared with the image cache's encoded response"]
+    pub encoded: Option<Arc<Vec<u8>>>,
 }
 
 fn sensible_delay(delay: Duration) -> Duration {
@@ -400,6 +405,23 @@ impl RasterImage {
             self.bytes.clone(),
             self.frames[0].byte_range.clone(),
         )
+    }
+
+    /// Decodes a static image with transparency again, to straight (not premultiplied)
+    /// RGBA8. Returns `None` for opaque, animated or vector-rasterized images, whose
+    /// premultiplied `bytes` already hold every colour.
+    pub fn decode_unpremultiplied(&self) -> Option<Vec<u8>> {
+        let encoded = self.encoded.as_ref()?;
+        let format = detect_image_format(encoded).ok()?;
+        let image_decoder = decoding::DefaultImageDecoder::make_decoder(format, encoded).ok()?;
+        if image_decoder.is_animated() {
+            return None;
+        }
+        let rgba = decoding::decode_to_rgba8(image_decoder.decoder())?;
+        if rgba.width() != self.metadata.width || rgba.height() != self.metadata.height {
+            return None;
+        }
+        Some(rgba.into_vec())
     }
 
     pub fn frame_data(&self, index: usize) -> Option<&ImageFrame> {
@@ -547,7 +569,12 @@ pub fn load_from_memory(buffer: &[u8], cors_status: CorsStatus) -> Option<Raster
             if image_decoder.is_animated() {
                 decoding::decode_animated_image(cors_status, image_decoder.animated_decoder())
             } else {
-                decoding::decode_static_image(cors_status, image_decoder.decoder())
+                let mut image =
+                    decoding::decode_static_image(cors_status, image_decoder.decoder())?;
+                if !image.is_opaque {
+                    image.encoded = Some(Arc::new(buffer.to_vec()));
+                }
+                Some(image)
             }
         },
     }

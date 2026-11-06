@@ -253,10 +253,8 @@ impl<'a> ServoImageDecoder<'a> for DefaultImageDecoder<'a> {
     }
 }
 
-pub(crate) fn decode_static_image(
-    cors_status: CorsStatus,
-    mut image_decoder: impl ImageDecoder,
-) -> Option<RasterImage> {
+/// Decodes a static image to straight (not premultiplied) RGBA8, oriented.
+pub(crate) fn decode_to_rgba8(mut image_decoder: impl ImageDecoder) -> Option<image::RgbaImage> {
     let orientation = image_decoder.orientation();
 
     let Ok(mut dynamic_image) = DynamicImage::from_decoder(image_decoder) else {
@@ -268,7 +266,14 @@ pub(crate) fn decode_static_image(
         dynamic_image.apply_orientation(orientation);
     }
 
-    let mut rgba = dynamic_image.into_rgba8();
+    Some(dynamic_image.into_rgba8())
+}
+
+pub(crate) fn decode_static_image(
+    cors_status: CorsStatus,
+    image_decoder: impl ImageDecoder,
+) -> Option<RasterImage> {
+    let mut rgba = decode_to_rgba8(image_decoder)?;
 
     // Store pre-multiplied data as that prevents having to do conversions of the data at later
     // times. This does cause an issue with some canvas APIs. See:
@@ -293,6 +298,7 @@ pub(crate) fn decode_static_image(
         cors_status,
         is_opaque,
         loop_count: None,
+        encoded: None,
     })
 }
 
@@ -374,5 +380,6 @@ where
         bytes: Arc::new(bytes),
         is_opaque,
         loop_count: Some(loop_count),
+        encoded: None,
     })
 }

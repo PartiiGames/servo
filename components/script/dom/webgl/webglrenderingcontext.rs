@@ -1125,6 +1125,27 @@ impl WebGLRenderingContext {
                     return Err(Error::Security(None));
                 }
 
+                // Decoded images are stored premultiplied, which loses the colour under
+                // zero alpha. Without UNPACK_PREMULTIPLY_ALPHA, upload a straight-alpha
+                // decode instead.
+                if !self
+                    .texture_unpacking_settings
+                    .get()
+                    .contains(TextureUnpacking::PREMULTIPLY_ALPHA)
+                {
+                    if let Some((bytes, size)) = image.get_unpremultiplied_raster_image_data() {
+                        let (alpha_treatment, y_axis_treatment) =
+                            self.get_current_unpack_state(Alpha::NotPremultiplied);
+                        return Ok(Some(TexPixels::new(
+                            GenericSharedMemory::from_vec(bytes),
+                            size,
+                            PixelFormat::RGBA8,
+                            alpha_treatment,
+                            y_axis_treatment,
+                        )));
+                    }
+                }
+
                 // Vector (SVG) images are rasterized at their natural size, as in other
                 // engines (see https://github.com/KhronosGroup/WebGL/issues/1503).
                 let Some(snapshot) = image.get_raster_image_data() else {
