@@ -185,6 +185,20 @@ fn build_incremental_gc_shim() {
         })
         .collect();
     found.sort();
+    // PARTII_MOZJS_HEADERS: a headers bundle (`dist/include` and `js/src/js-confdefs.h`, as a
+    // mozjs_sys build lays them out) from a from-source build of the same mozjs_sys version and
+    // features, for builds that link the prebuilt archive. It wins over sibling builds.
+    println!("cargo::rerun-if-env-changed=PARTII_MOZJS_HEADERS");
+    if let Some(dir) = env::var_os("PARTII_MOZJS_HEADERS").map(PathBuf::from) {
+        if dir.join("dist/include/jsapi.h").exists() && dir.join("js/src/js-confdefs.h").exists() {
+            found.push((std::time::SystemTime::now(), dir));
+        } else {
+            println!(
+                "cargo::warning=incremental_gc_shim: PARTII_MOZJS_HEADERS={} has no dist/include/jsapi.h or js/src/js-confdefs.h",
+                dir.display()
+            );
+        }
+    }
     let Some((_, build_dir)) = found.pop() else {
         println!(
             "cargo::warning=incremental_gc_shim: no SpiderMonkey headers under {} (prebuilt mozjs archive?); \
