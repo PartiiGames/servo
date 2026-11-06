@@ -44,7 +44,7 @@
 //! budget is unlimited). The DOM's Rust edges have no write barriers, so `script_bindings::
 //! incremental_gc` shades every reflector Rust hands out while marking, and re-traces the Rust roots
 //! and every marked reflector's Rust fields when marking ends (SpiderMonkey's gray-roots hook).
-//! The slices use a work budget, calibrated to the slice time from the last slices' speed.
+//! The slices have a wall-clock budget, so a preempted slice still ends near its deadline.
 
 #![allow(unsafe_code)]
 
@@ -156,8 +156,6 @@ struct State {
     nursery_pause: Cell<Duration>,
     /// The incremental GC in progress (ours), if any.
     incremental: Cell<Option<IncrementalGc>>,
-    /// Work units per ms that marking slices managed lately (to size the work budget).
-    units_per_ms: Cell<f64>,
 }
 
 /// An incremental GC the scheduler started.
@@ -183,7 +181,6 @@ thread_local! {
         nursery_at: Cell::new(None),
         nursery_pause: Cell::new(Duration::ZERO),
         incremental: Cell::new(None),
-        units_per_ms: Cell::new(20_000.),
     };
     /// Set from the gray-roots hook: sweeping began in the current GC.
     static SWEEP_STARTED: Cell<bool> = const { Cell::new(false) };
@@ -443,16 +440,27 @@ unsafe extern "C" {
         trace: Option<unsafe extern "C" fn(*mut JSTracer, *mut SliceBudget, *mut c_void) -> bool>,
         data: *mut c_void,
     );
-    /// `JS::SliceBudget::SliceBudget(JS::WorkBudget)` (complete-object constructor).
+    /// `JS::SliceBudget::SliceBudget(JS::TimeBudget, mozilla::Atomic<bool>*)` (complete-object
+    /// constructor; it sets the deadline from now).
     #[cfg_attr(
         target_vendor = "apple",
-        link_name = "\u{1}__ZN2JS11SliceBudgetC1ENS_10WorkBudgetE"
+        link_name = "\u{1}__ZN2JS11SliceBudgetC1ENS_10TimeBudgetEPN7mozilla6AtomicIbLNS2_14MemoryOrderingE0EvEE"
     )]
     #[cfg_attr(
         not(target_vendor = "apple"),
-        link_name = "\u{1}_ZN2JS11SliceBudgetC1ENS_10WorkBudgetE"
+        link_name = "\u{1}_ZN2JS11SliceBudgetC1ENS_10TimeBudgetEPN7mozilla6AtomicIbLNS2_14MemoryOrderingE0EvEE"
     )]
-    fn SliceBudgetFromWork(this: *mut SliceBudget, work: i64);
+    fn SliceBudgetFromTime(this: *mut SliceBudget, time: TimeBudget, interrupt: *mut c_void);
+    /// `mozilla::TimeStamp::Now(bool)`: SpiderMonkey's clock, in its own ticks.
+    #[cfg_attr(
+        target_vendor = "apple",
+        link_name = "\u{1}__ZN7mozilla9TimeStamp3NowEb"
+    )]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        link_name = "\u{1}_ZN7mozilla9TimeStamp3NowEb"
+    )]
+    fn TimeStampNow(high_resolution: bool) -> u64;
 }
 
 #[cfg(windows)]
@@ -464,15 +472,51 @@ unsafe fn SetGrayGCRootsTracer(
 }
 
 #[cfg(windows)]
-unsafe fn SliceBudgetFromWork(_: *mut SliceBudget, _: i64) {
+unsafe fn SliceBudgetFromTime(_: *mut SliceBudget, _: TimeBudget, _: *mut c_void) {
     unreachable!()
 }
 
-/// A work budget of `units` (marking steps, roughly cells).
-fn work_budget(units: i64) -> SliceBudget {
+#[cfg(windows)]
+unsafe fn TimeStampNow(_: bool) -> u64 {
+    unreachable!()
+}
+
+/// `JS::TimeBudget` as passed by value: a `mozilla::TimeDuration` (ticks) and a `TimeStamp`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TimeBudget {
+    budget_ticks: i64,
+    deadline: u64,
+}
+
+/// SpiderMonkey clock ticks per ms (ns on Linux; mach ticks on macOS), measured once against
+/// `Instant` over a 2 ms spin.
+fn ticks_per_ms() -> f64 {
+    static TICKS: OnceLock<f64> = OnceLock::new();
+    *TICKS.get_or_init(|| {
+        let (t0, i0) = (unsafe { TimeStampNow(true) }, Instant::now());
+        while i0.elapsed() < Duration::from_millis(2) {
+            std::hint::spin_loop();
+        }
+        let (t1, i1) = (unsafe { TimeStampNow(true) }, Instant::now());
+        (t1.wrapping_sub(t0)) as f64 / ((i1 - i0).as_secs_f64() * 1000.)
+    })
+}
+
+/// A wall-clock budget: SpiderMonkey checks the clock every so many steps and yields when it's
+/// over, so a slice ends near its deadline even when the thread was preempted.
+fn time_budget(time: Duration) -> SliceBudget {
+    let ticks = (time.as_secs_f64() * 1000. * ticks_per_ms()) as i64;
     let mut budget = std::mem::MaybeUninit::<SliceBudget>::uninit();
     unsafe {
-        SliceBudgetFromWork(budget.as_mut_ptr(), units.max(1000));
+        SliceBudgetFromTime(
+            budget.as_mut_ptr(),
+            TimeBudget {
+                budget_ticks: ticks.max(1),
+                deadline: 0,
+            },
+            std::ptr::null_mut(),
+        );
         budget.assume_init()
     }
 }
@@ -554,7 +598,7 @@ fn start_incremental(cx: &mut JSContext, state: &State, kind: Kind) {
     let started = Instant::now();
     IN_INCREMENTAL.with(|i| i.set(true));
     SWEEP_STARTED.with(|s| s.set(false));
-    let budget = work_budget(slice_units(state));
+    let budget = time_budget(config().slice);
     unsafe {
         PrepareForFullGC(cx);
         StartIncrementalGC(cx, GCOptions::Normal, GCReason::FULL_GC_TIMER, &budget);
@@ -568,11 +612,6 @@ fn start_incremental(cx: &mut JSContext, state: &State, kind: Kind) {
         total: Duration::ZERO,
     };
     after_slice(cx, state, kind, gc, started);
-}
-
-/// Work units for one slice of the configured length.
-fn slice_units(state: &State) -> i64 {
-    (state.units_per_ms.get() * config().slice.as_secs_f64() * 1000.) as i64
 }
 
 /// Runs the next slice of our incremental GC if one is due. Returns whether a GC is in progress
@@ -600,17 +639,8 @@ fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant)
         finish_log(cx, state, kind, gc, "over its time limit, finished");
         return true;
     }
-    let units = slice_units(state);
-    let budget = work_budget(units);
+    let budget = time_budget(config().slice);
     unsafe { IncrementalGCSlice(cx, GCReason::FULL_GC_TIMER, &budget) };
-    // Calibrate: units per ms in this slice (marking slices only; sweeping isn't budgeted here).
-    let ms = (Instant::now() - started).as_secs_f64() * 1000.;
-    if ms > 0.5 && !SWEEP_STARTED.with(Cell::get) {
-        let speed = units as f64 / ms;
-        state
-            .units_per_ms
-            .set((state.units_per_ms.get() * 0.7 + speed * 0.3).clamp(1000., 1_000_000.));
-    }
     after_slice(cx, state, kind, gc, started);
     true
 }
@@ -661,7 +691,7 @@ fn finish_log(cx: &JSContext, state: &State, kind: Kind, gc: IncrementalGc, how:
             String::new()
         };
         eprintln!(
-            "[gc-sched] {} incremental GC {}: {} slices, max {:.2} ms, total {:.2} ms over {} ms, {} -> {} KB, {:.0} units/ms{}{}",
+            "[gc-sched] {} incremental GC {}: {} slices, max {:.2} ms, total {:.2} ms over {} ms, {} -> {} KB{}{}",
             if kind == Kind::Worker {
                 "worker"
             } else {
@@ -674,7 +704,6 @@ fn finish_log(cx: &JSContext, state: &State, kind: Kind, gc: IncrementalGc, how:
             (now - gc.started).as_millis(),
             gc.before / 1024,
             after / 1024,
-            state.units_per_ms.get(),
             nursery
                 .map(|at| format!(
                     ", nursery {:.2} ms",
