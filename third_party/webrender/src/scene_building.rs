@@ -2135,6 +2135,15 @@ impl<'a> SceneBuilder<'a> {
         if !backdrop_underlay_enabled() {
             return false;
         }
+        // Partii (measurement): PARTII_WR_UNDERLAY_LOG=1 logs each backdrop's inputs.
+        if std::env::var_os("PARTII_WR_UNDERLAY_LOG").is_some() {
+            let scs: Vec<String> = self.sc_stack.iter().map(|sc| format!("{:?}", sc.flags)).collect();
+            let cands: Vec<String> = self.partii_surface_candidates.iter().map(|c| format!(
+                "#{} sn{:?} slice{:?} rect{:?} clip{:?}", c.prim_index, c.spatial_node_index, c.primary_slice, c.info.rect, c.info.clip_rect)).collect();
+            eprintln!("partii-underlay backdrop sn{:?} rect{:?} clip{:?} slice{:?} scs[{}] filters{} cands[{}]",
+                spatial_node_index, info.rect, info.clip_rect, self.tile_cache_builder.partii_slice_position(),
+                scs.join(","), filters.len(), cands.join("; "));
+        }
         let into_tile_cache = !self.sc_stack.iter().any(|sc| {
             !sc.flags.contains(StackingContextFlags::WRAPS_BACKDROP_FILTER)
         });
