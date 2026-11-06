@@ -45,6 +45,9 @@ impl TryFrom<u8> for KeyType {
 /// (-to64bitInt(value)) :
 /// (to64bitInt(value) | 0x8000000000000000)
 pub fn serialize_number(n: f64) -> [u8; 8] {
+    // Partii: -0 and +0 are the same key (https://w3c.github.io/IndexedDB/#compare-two-keys
+    // compares the values as numbers), so both encode as +0.
+    let n = if n == 0.0 { 0.0 } else { n };
     let bits = n.to_bits();
     let signbit = 1u64 << 63;
     let number = if (bits & signbit) != 0 {
@@ -264,6 +267,34 @@ mod tests {
                 assert_eq!(number, deserialized);
             }
         }
+    }
+
+    /// Partii: -0 and +0 are one key, in numbers, dates and inside arrays.
+    #[test]
+    fn test_negative_zero_is_zero() {
+        assert_eq!(serialize_number(-0.0), serialize_number(0.0));
+        assert_eq!(
+            serialize(&IndexedDBKeyType::Number(-0.0)),
+            serialize(&IndexedDBKeyType::Number(0.0))
+        );
+        assert_eq!(
+            serialize(&IndexedDBKeyType::Date(-0.0)),
+            serialize(&IndexedDBKeyType::Date(0.0))
+        );
+        assert_eq!(
+            serialize(&IndexedDBKeyType::Array(vec![IndexedDBKeyType::Number(
+                -0.0
+            )])),
+            serialize(&IndexedDBKeyType::Array(vec![IndexedDBKeyType::Number(
+                0.0
+            )]))
+        );
+        let IndexedDBKeyType::Number(n) =
+            deserialize(&serialize(&IndexedDBKeyType::Number(-0.0))).unwrap()
+        else {
+            panic!("not a number key");
+        };
+        assert!(n == 0.0 && n.is_sign_positive());
     }
 
     #[test]
