@@ -127,6 +127,16 @@ impl From<u64> for IdbResult {
     }
 }
 
+/// Partii: tell the backend and the transaction that script handled the result of a request
+/// made without an IDBRequest (populating an index).
+pub(crate) fn notify_request_handled(
+    cx: &mut JSContext,
+    transaction: &IDBTransaction,
+    request_id: u64,
+) {
+    RequestListener::send_request_handled(cx, transaction, request_id);
+}
+
 impl RequestListener {
     fn send_request_handled(cx: &mut JSContext, transaction: &IDBTransaction, request_id: u64) {
         let global = transaction.global();
@@ -602,10 +612,9 @@ impl IDBRequest {
 
         // Start is a backend database task (spec). Script does not model it with a
         // separate queued task, backend scheduling decides when requests begin.
+        // Partii: through the transaction, which holds requests back while it populates an index.
         transaction
-            .global()
-            .storage_threads()
-            .send(IndexedDBThreadMsg::Async(
+            .send_to_backend(IndexedDBThreadMsg::Async(
                 global.origin().immutable().clone(),
                 String::from(transaction.get_db_name()),
                 String::from(source.get_name()),

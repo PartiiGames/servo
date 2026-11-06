@@ -265,6 +265,9 @@ pub struct IndexedDBIndex {
     pub key_path: KeyPath,
     pub multi_entry: bool,
     pub unique: bool,
+    /// Partii: false for an index whose records were never written (created by an older build
+    /// before index records existed). A read-write transaction populates it on first use.
+    pub populated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
@@ -404,6 +407,18 @@ pub enum AsyncReadWriteOperation {
     },
     /// Clears all key/value pairs in the associated idb data
     Clear(GenericCallback<BackendResult<()>>),
+    /// Partii: populate indexes (<https://w3c.github.io/IndexedDB/#dom-idbobjectstore-createindex>
+    /// step 11, and indexes of databases written before index records existed). Replaces all
+    /// records of `index_names` with `entries` and marks the indexes populated. The callback
+    /// gets `false` when `fail_on_clash` is set and a unique index would hold a key twice; then
+    /// nothing is written. Without `fail_on_clash` such a record is left out of that index.
+    SetIndexEntries {
+        callback: GenericCallback<BackendResult<bool>>,
+        index_names: Vec<String>,
+        /// Each record's primary key and its keys in the indexes.
+        entries: Vec<(IndexedDBKeyType, IndexKeys)>,
+        fail_on_clash: bool,
+    },
 }
 
 impl AsyncReadWriteOperation {
@@ -412,6 +427,7 @@ impl AsyncReadWriteOperation {
             Self::PutItem { callback, .. } => callback.send(Err(error)),
             Self::RemoveItem { callback, .. } => callback.send(Err(error)),
             Self::Clear(callback) => callback.send(Err(error)),
+            Self::SetIndexEntries { callback, .. } => callback.send(Err(error)),
         };
     }
 }

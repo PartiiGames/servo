@@ -3,20 +3,22 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use js::jsval::UndefinedValue;
 use profile_traits::generic_callback::GenericCallback;
 use profile_traits::generic_channel::channel;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericUnionTypes::StringOrStringSequence;
 use script_bindings::reflector::reflect_dom_object;
-use servo_base::generic_channel::{GenericSend, GenericSender, SendError};
+use servo_base::generic_channel::{GenericSend, GenericSender, SendError, SendResult};
 use servo_base::id::ScriptEventLoopId;
 use storage_traits::indexeddb::{
-    BackendError, IndexedDBIndex, IndexedDBThreadMsg, IndexedDBTxnMode, KeyPath, SyncOperation,
-    TxnCompleteMsg,
+    AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, BackendError, BackendResult,
+    IndexKeys, IndexedDBDirection, IndexedDBIndex, IndexedDBRecord, IndexedDBThreadMsg,
+    IndexedDBTxnMode, KeyPath, SyncOperation, TxnCompleteMsg,
 };
 use stylo_atoms::Atom;
 
@@ -34,15 +36,36 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::structuredclone;
 use crate::dom::domexception::DOMException;
 use crate::dom::domstringlist::DOMStringList;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbdatabase::IDBDatabase;
-use crate::dom::indexeddb::idbobjectstore::{IDBObjectStore, IDBObjectStoreAbortState};
-use crate::dom::indexeddb::idbrequest::IDBRequest;
-use crate::dom::indexeddb::key::map_backend_error_to_dom_error;
+use crate::dom::indexeddb::idbobjectstore::{
+    IDBObjectStore, IDBObjectStoreAbortState, KeyPath as ScriptKeyPath,
+};
+use crate::dom::indexeddb::idbrequest::{IDBRequest, notify_request_handled};
+use crate::dom::indexeddb::key::{index_keys_for_value, map_backend_error_to_dom_error};
+use crate::realms::enter_auto_realm;
+
+/// Partii: indexes of one object store whose records script must compute and write: their name,
+/// key path and multiEntry flag.
+#[derive(Clone)]
+pub(crate) struct PopulateIndexes {
+    pub(crate) store_name: String,
+    pub(crate) indexes: Vec<(String, KeyPath, bool)>,
+    /// Abort the transaction with a ConstraintError when a unique index would hold a key twice
+    /// (createIndex); otherwise leave such records out of the index.
+    pub(crate) fail_on_clash: bool,
+}
+
+/// Partii: a message held back while an index is being populated.
+enum HeldMessage {
+    Message(IndexedDBThreadMsg),
+    Populate(PopulateIndexes),
+}
 
 #[dom_struct]
 pub struct IDBTransaction {
@@ -82,6 +105,13 @@ pub struct IDBTransaction {
     // Smallest request_id that has not yet been marked handled (all < this are handled).
     next_unhandled_request_id: Cell<u64>,
     handled_pending: DomRefCell<HashSet<u64>>,
+    /// Partii: set while an index is being populated (see `populate_indexes`).
+    populating_index: Cell<bool>,
+    /// Partii: the requests and schema changes placed while an index is being populated, and
+    /// further indexes to populate. They go to the backend in order once it is done.
+    #[no_trace]
+    #[ignore_malloc_size_of = "messages to the storage thread"]
+    held_messages: DomRefCell<VecDeque<HeldMessage>>,
 
     // An unique identifier, used to commit and revert this transaction
     // FIXME:(rasviitanen) Replace this with a channel
@@ -123,6 +153,8 @@ impl IDBTransaction {
             next_request_id: Cell::new(0),
             next_unhandled_request_id: Cell::new(0),
             handled_pending: Default::default(),
+            populating_index: Cell::new(false),
+            held_messages: Default::default(),
             serial_number,
         }
     }
@@ -473,6 +505,221 @@ impl IDBTransaction {
         self.pending_request_count.set(remaining);
     }
 
+    /// Partii: send a request or schema change of this transaction to the backend. While an
+    /// index is being populated it waits, so that it runs after the index records are written.
+    pub(crate) fn send_to_backend(&self, message: IndexedDBThreadMsg) -> SendResult {
+        if self.populating_index.get() {
+            self.held_messages
+                .borrow_mut()
+                .push_back(HeldMessage::Message(message));
+            return Ok(());
+        }
+        self.get_idb_thread().send(message)
+    }
+
+    fn backend_mode(&self) -> IndexedDBTxnMode {
+        match self.mode {
+            IDBTransactionMode::Readonly => IndexedDBTxnMode::Readonly,
+            IDBTransactionMode::Readwrite => IndexedDBTxnMode::Readwrite,
+            IDBTransactionMode::Versionchange => IndexedDBTxnMode::Versionchange,
+        }
+    }
+
+    /// Partii: write the records of indexes that have none yet: a new index (createIndex step
+    /// 11, "populate the index with the records of the store"), or one of a database written
+    /// before index records existed. Keys come from key paths evaluated on the stored values,
+    /// which only script can do, so:
+    /// 1. read all records of the store, in this transaction's request order;
+    /// 2. hold back every request placed after this point (`send_to_backend`);
+    /// 3. in a task, deserialize the values and compute their index keys;
+    /// 4. send the index records (SetIndexEntries), then the held requests.
+    ///
+    /// Two internal request ids keep the transaction from committing meanwhile.
+    pub(crate) fn populate_indexes(&self, job: PopulateIndexes) {
+        if self.finished.get() || self.abort_initiated.get() {
+            return;
+        }
+        if self.populating_index.get() {
+            self.held_messages
+                .borrow_mut()
+                .push_back(HeldMessage::Populate(job));
+            return;
+        }
+        self.populating_index.set(true);
+        let scan_id = self.allocate_request_id();
+        let write_id = self.allocate_request_id();
+        self.pending_request_count
+            .set(self.pending_request_count.get() + 1);
+
+        let global = self.global();
+        let this = Trusted::new(self);
+        let task_source = global
+            .task_manager()
+            .database_access_task_source()
+            .to_sendable();
+        let store_name = job.store_name.clone();
+        let callback = GenericCallback::new(
+            move |message: Result<BackendResult<Vec<IndexedDBRecord>>, SendError>| {
+                let this = this.clone();
+                let job = job.clone();
+                task_source.queue(task!(populate_index_records: move |cx| {
+                    let this = this.root();
+                    let records = match message {
+                        Ok(Ok(records)) => Some(records),
+                        _ => None,
+                    };
+                    this.write_index_records(cx, job, records, scan_id, write_id);
+                }));
+            },
+        )
+        .expect("Could not create callback");
+        let operation = AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords {
+            callback,
+            key_range: Default::default(),
+            count: None,
+            index_name: None,
+            direction: IndexedDBDirection::Next,
+        });
+        let _ = self.get_idb_thread().send(IndexedDBThreadMsg::Async(
+            global.origin().immutable().clone(),
+            String::from(self.db.get_name()),
+            store_name,
+            self.serial_number,
+            scan_id,
+            self.backend_mode(),
+            operation,
+        ));
+    }
+
+    /// Partii: step 3 and 4 of `populate_indexes`.
+    fn write_index_records(
+        &self,
+        cx: &mut JSContext,
+        job: PopulateIndexes,
+        records: Option<Vec<IndexedDBRecord>>,
+        scan_id: u64,
+        write_id: u64,
+    ) {
+        if self.finished.get() || self.abort_initiated.get() {
+            self.finish_populating_indexes(cx, false, scan_id, write_id);
+            return;
+        }
+        let Some(records) = records else {
+            self.initiate_abort(cx, Error::Operation(None));
+            self.request_backend_abort();
+            self.finish_populating_indexes(cx, false, scan_id, write_id);
+            return;
+        };
+        let global = self.global();
+        let mut realm = enter_auto_realm(cx, self);
+        let cx: &mut JSContext = &mut realm;
+        let indexes: Vec<(String, ScriptKeyPath, bool)> = job
+            .indexes
+            .iter()
+            .map(|(name, key_path, multi_entry)| {
+                (name.clone(), key_path.clone().into(), *multi_entry)
+            })
+            .collect();
+        let mut entries = Vec::with_capacity(records.len());
+        for record in records {
+            rooted!(&in(cx) let mut value = UndefinedValue());
+            let read = postcard::from_bytes(&record.value)
+                .map_err(|_| Error::Data(None))
+                .and_then(|data| structuredclone::read(cx, &global, data, value.handle_mut()));
+            if read.is_err() {
+                warn!("Could not read an IndexedDB record to populate an index");
+                continue;
+            }
+            let index_keys: IndexKeys = indexes
+                .iter()
+                .filter_map(|(name, key_path, multi_entry)| {
+                    let keys = index_keys_for_value(cx, value.handle(), key_path, *multi_entry);
+                    (!keys.is_empty()).then(|| (name.clone(), keys))
+                })
+                .collect();
+            if !index_keys.is_empty() {
+                entries.push((record.key, index_keys));
+            }
+        }
+
+        let this = Trusted::new(self);
+        let task_source = global
+            .task_manager()
+            .database_access_task_source()
+            .to_sendable();
+        let callback =
+            GenericCallback::new(move |message: Result<BackendResult<bool>, SendError>| {
+                let this = this.clone();
+                task_source.queue(task!(populated_index: move |cx| {
+                    let this = this.root();
+                    match message {
+                        Ok(Ok(true)) => {},
+                        Ok(Ok(false)) => {
+                            // A unique index would hold a key twice: createIndex aborts the
+                            // upgrade transaction with a ConstraintError.
+                            this.initiate_abort(cx, Error::Constraint(None));
+                            this.request_backend_abort();
+                        },
+                        _ => {
+                            this.initiate_abort(cx, Error::Operation(None));
+                            this.request_backend_abort();
+                        },
+                    }
+                    let flush = !this.abort_initiated.get();
+                    this.finish_populating_indexes(cx, flush, scan_id, write_id);
+                }));
+            })
+            .expect("Could not create callback");
+        let operation = AsyncOperation::ReadWrite(AsyncReadWriteOperation::SetIndexEntries {
+            callback,
+            index_names: job.indexes.into_iter().map(|(name, _, _)| name).collect(),
+            entries,
+            fail_on_clash: job.fail_on_clash,
+        });
+        let _ = self.get_idb_thread().send(IndexedDBThreadMsg::Async(
+            global.origin().immutable().clone(),
+            String::from(self.db.get_name()),
+            job.store_name,
+            self.serial_number,
+            write_id,
+            self.backend_mode(),
+            operation,
+        ));
+    }
+
+    /// Partii: end `populate_indexes`: send the held messages (or drop them when the transaction
+    /// aborted), then let the transaction commit once everything is handled.
+    fn finish_populating_indexes(
+        &self,
+        cx: &mut JSContext,
+        flush: bool,
+        scan_id: u64,
+        write_id: u64,
+    ) {
+        self.populating_index.set(false);
+        self.request_finished();
+        if flush && !self.finished.get() {
+            loop {
+                let next = self.held_messages.borrow_mut().pop_front();
+                match next {
+                    None => break,
+                    Some(HeldMessage::Message(message)) => {
+                        let _ = self.get_idb_thread().send(message);
+                    },
+                    Some(HeldMessage::Populate(job)) => {
+                        self.populate_indexes(job);
+                        break;
+                    },
+                }
+            }
+        } else {
+            // The backend dropped this transaction's queued requests too.
+            self.held_messages.borrow_mut().clear();
+        }
+        notify_request_handled(cx, self, scan_id);
+        notify_request_handled(cx, self, write_id);
+    }
+
     pub(crate) fn initiate_abort(&self, cx: &mut JSContext, error: Error) {
         // https://w3c.github.io/IndexedDB/#transaction-lifetime
         // Step 4: An abort will also be initiated following a failed request that is not handled by script.
@@ -800,6 +1047,27 @@ impl IDBTransactionMethods<crate::DomTypeHolder> for IDBTransaction {
             self,
         );
         if let Some(indexes) = parameters.map(|(_, indexes, _)| indexes) {
+            // Partii: indexes written by an older build have no records yet; a transaction that
+            // can write populates them before its own requests run. Read-only transactions see
+            // only the records written since.
+            let unpopulated: Vec<(String, KeyPath, bool)> = indexes
+                .iter()
+                .filter(|index| !index.populated)
+                .map(|index| {
+                    (
+                        index.name.clone(),
+                        index.key_path.clone(),
+                        index.multi_entry,
+                    )
+                })
+                .collect();
+            if !unpopulated.is_empty() && self.mode != IDBTransactionMode::Readonly {
+                self.populate_indexes(PopulateIndexes {
+                    store_name: name.to_string(),
+                    indexes: unpopulated,
+                    fail_on_clash: false,
+                });
+            }
             for index in indexes {
                 store.add_index(
                     cx,

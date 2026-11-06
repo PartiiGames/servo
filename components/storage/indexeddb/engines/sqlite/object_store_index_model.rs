@@ -14,6 +14,7 @@ pub enum Column {
     KeyPath,
     UniqueIndex,
     MultiEntryIndex,
+    Populated,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,6 +25,8 @@ pub struct Model {
     pub key_path: Vec<u8>,
     pub unique_index: bool,
     pub multi_entry_index: bool,
+    /// Partii: whether the index's records have been written; see `create::upgrade_tables`.
+    pub populated: bool,
 }
 
 impl TryFrom<&Row<'_>> for Model {
@@ -37,6 +40,7 @@ impl TryFrom<&Row<'_>> for Model {
             key_path: value.get(3)?,
             unique_index: value.get(4)?,
             multi_entry_index: value.get(5)?,
+            populated: value.get(6)?,
         })
     }
 }

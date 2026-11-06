@@ -530,6 +530,58 @@ impl SqliteEngine {
     }
 
     /// Partii: remove the index records of the record with (encoded) primary key `primary_key`.
+    /// Partii: see `AsyncReadWriteOperation::SetIndexEntries`.
+    fn set_index_entries(
+        connection: &Connection,
+        store: &object_store_model::Model,
+        index_names: &[String],
+        entries: &[(IndexedDBKeyType, IndexKeys)],
+        fail_on_clash: bool,
+    ) -> Result<bool, Error> {
+        in_savepoint(
+            connection,
+            || {
+                let mut indexes = Vec::with_capacity(index_names.len());
+                for name in index_names {
+                    // The index may have been deleted since script asked for it.
+                    if let Some(index) = Self::index_by_name(connection, store.id, name)? {
+                        connection.execute(
+                            &format!("DELETE FROM {} WHERE index_id = ?", index_table(&index)),
+                            params![index.id],
+                        )?;
+                        indexes.push(index);
+                    }
+                }
+                for (primary_key, index_keys) in entries {
+                    let primary_key = encoding::serialize(primary_key);
+                    for (name, keys) in index_keys {
+                        if !indexes.iter().any(|index| &index.name == name) {
+                            continue;
+                        }
+                        let one_index = vec![(name.clone(), keys.clone())];
+                        if !Self::write_index_records(
+                            connection,
+                            store.id,
+                            &primary_key,
+                            &one_index,
+                        )? && fail_on_clash
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+                for index in &indexes {
+                    connection.execute(
+                        "UPDATE object_store_index SET populated = 1 WHERE id = ?",
+                        params![index.id],
+                    )?;
+                }
+                Ok(true)
+            },
+            |populated| *populated,
+        )
+    }
+
     fn delete_index_records(
         connection: &Connection,
         store_id: i32,
@@ -924,8 +976,9 @@ impl SqliteEngine {
         }
 
         connection.execute(
-            "INSERT INTO object_store_index (object_store_id, name, key_path, unique_index, multi_entry_index)\
-            VALUES (?, ?, ?, ?, ?)",
+            // Partii: the transaction that creates the index also populates it.
+            "INSERT INTO object_store_index (object_store_id, name, key_path, unique_index, multi_entry_index, populated)\
+            VALUES (?, ?, ?, ?, ?, 1)",
             params![
                 object_store.id,
                 index_name,
@@ -1097,6 +1150,23 @@ impl SqliteEngine {
                 let _ = sender.send(
                     Self::clear(connection, object_store)
                         .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
+                );
+            },
+            AsyncOperation::ReadWrite(AsyncReadWriteOperation::SetIndexEntries {
+                callback,
+                index_names,
+                entries,
+                fail_on_clash,
+            }) => {
+                let _ = callback.send(
+                    Self::set_index_entries(
+                        connection,
+                        &object_store,
+                        &index_names,
+                        &entries,
+                        fail_on_clash,
+                    )
+                    .map_err(backend_error),
                 );
             },
             AsyncOperation::Schema(AsyncSchemaOperation::CreateIndex {
@@ -1324,6 +1394,7 @@ impl KvsEngine for SqliteEngine {
                     key_path: postcard::from_bytes(&model.key_path).unwrap(),
                     unique: model.unique_index,
                     multi_entry: model.multi_entry_index,
+                    populated: model.populated,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2311,5 +2382,107 @@ mod tests {
             SqliteEngine::count_records(&connection, store.id, None, &all).unwrap(),
             5
         );
+    }
+
+    fn index_populated(db: &SqliteEngine, store: &str, index: &str) -> bool {
+        db.indexes(store)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.name == index)
+            .unwrap()
+            .populated
+    }
+
+    /// Partii: a database written before index records existed gets a `populated` column on
+    /// open; its indexes over stores with records start unpopulated, and SetIndexEntries fills
+    /// them. A unique clash with `fail_on_clash` writes nothing; without it the record is left
+    /// out.
+    #[test]
+    fn test_populate_index_of_old_database() {
+        let (_temp_dir, _proxy_map, _handle, db) = open_engine();
+        db.create_store("store", None, false).unwrap();
+        db.create_store("empty", None, false).unwrap();
+        for (store, index, unique) in [
+            ("store", "by_name", false),
+            ("store", "by_tag", true),
+            ("empty", "by_name", false),
+        ] {
+            db.create_index(
+                store,
+                index.to_owned(),
+                KeyPath::String(index.to_owned()),
+                unique,
+                false,
+            )
+            .unwrap();
+        }
+        assert!(index_populated(&db, "store", "by_name"));
+        // Records written by a build that did not write index records.
+        for key in [1.0, 2.0] {
+            assert!(matches!(
+                put_with_index_keys(&db, key, vec![], true),
+                PutItemResult::Key(_)
+            ));
+        }
+        assert_eq!(index_row_count(&db), 0);
+
+        // Open it as an old database: no populated column yet.
+        {
+            let connection = db.connection();
+            connection
+                .execute_batch("ALTER TABLE object_store_index DROP COLUMN populated")
+                .unwrap();
+            super::create::upgrade_tables(&connection).unwrap();
+            // Upgrading again is a no-op.
+            super::create::upgrade_tables(&connection).unwrap();
+        }
+        assert!(!index_populated(&db, "store", "by_name"));
+        assert!(!index_populated(&db, "store", "by_tag"));
+        assert!(index_populated(&db, "empty", "by_name"));
+
+        let store = SqliteEngine::object_store_by_name(&db.connection(), "store").unwrap();
+        let entries = |tag_of_two: &str| {
+            vec![
+                (
+                    IndexedDBKeyType::Number(1.0),
+                    vec![
+                        ("by_name".to_owned(), vec![string_key("a")]),
+                        ("by_tag".to_owned(), vec![string_key("x")]),
+                    ],
+                ),
+                (
+                    IndexedDBKeyType::Number(2.0),
+                    vec![
+                        ("by_name".to_owned(), vec![string_key("b")]),
+                        ("by_tag".to_owned(), vec![string_key(tag_of_two)]),
+                    ],
+                ),
+            ]
+        };
+        let names = vec!["by_name".to_owned(), "by_tag".to_owned()];
+
+        // createIndex: a clash fails and leaves nothing behind.
+        assert!(
+            !SqliteEngine::set_index_entries(&db.connection(), &store, &names, &entries("x"), true)
+                .unwrap()
+        );
+        assert_eq!(index_row_count(&db), 0);
+        assert!(!index_populated(&db, "store", "by_name"));
+
+        // Lazy population skips the clashing record in the unique index only.
+        assert!(
+            SqliteEngine::set_index_entries(&db.connection(), &store, &names, &entries("x"), false)
+                .unwrap()
+        );
+        assert_eq!(index_row_count(&db), 3);
+        assert!(index_populated(&db, "store", "by_name"));
+        assert!(index_populated(&db, "store", "by_tag"));
+
+        // Populating again replaces the index records instead of adding to them.
+        assert!(
+            SqliteEngine::set_index_entries(&db.connection(), &store, &names, &entries("y"), true)
+                .unwrap()
+        );
+        assert_eq!(index_row_count(&db), 4);
     }
 }

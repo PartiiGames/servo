@@ -95,5 +95,26 @@ pub(crate) fn upgrade_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite
          ON unique_index_data (object_store_id, object_data_key)",
         [],
     )?;
+    // Whether an index's records have been written. Indexes created before index records
+    // existed have none: they start unpopulated unless their object store is empty, and script
+    // populates them in the next read-write transaction that uses the store.
+    let has_populated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('object_store_index') \
+         WHERE name = 'populated')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_populated {
+        conn.execute(
+            "ALTER TABLE object_store_index ADD COLUMN populated boolean not null default 0",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE object_store_index SET populated = 1 WHERE NOT EXISTS \
+             (SELECT 1 FROM object_data WHERE object_data.object_store_id = \
+              object_store_index.object_store_id)",
+            [],
+        )?;
+    }
     Ok(())
 }

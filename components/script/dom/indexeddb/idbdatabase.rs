@@ -353,8 +353,9 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
             auto_increment,
         };
 
-        self.get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+        // Partii: through the transaction, which holds requests back while it populates an index.
+        transaction
+            .send_to_backend(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.name.to_string(),
                 store_name: name.to_string(),
@@ -401,8 +402,9 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
         let operation = AsyncSchemaOperation::DeleteObjectStore {
             callback: transaction.create_abort_callback(),
         };
-        self.get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+        // Partii: through the transaction, which holds requests back while it populates an index.
+        transaction
+            .send_to_backend(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.name.to_string(),
                 store_name: name.to_string(),

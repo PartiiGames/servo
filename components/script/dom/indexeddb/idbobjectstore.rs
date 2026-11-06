@@ -15,7 +15,6 @@ use script_bindings::codegen::GenericBindings::IDBObjectStoreBinding::IDBIndexPa
 use script_bindings::codegen::GenericUnionTypes::StringOrStringSequence;
 use script_bindings::error::ErrorResult;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
-use servo_base::generic_channel::{GenericSend, GenericSender};
 use storage_traits::indexeddb::{
     self, AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
     IndexKeys, IndexedDBKeyType, IndexedDBThreadMsg,
@@ -43,7 +42,7 @@ use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrI
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
-use crate::dom::indexeddb::idbtransaction::IDBTransaction;
+use crate::dom::indexeddb::idbtransaction::{IDBTransaction, PopulateIndexes};
 use crate::dom::indexeddb::key::{
     ExtractionResult, GetAllArguments, can_inject_key_into_value, convert_value_to_key,
     convert_value_to_key_range, extract_key, get_all_arguments, get_all_options_arguments,
@@ -236,10 +235,6 @@ impl IDBObjectStore {
 
     pub(crate) fn transaction(&self) -> DomRoot<IDBTransaction> {
         self.transaction.as_rooted()
-    }
-
-    fn get_idb_thread(&self) -> GenericSender<IndexedDBThreadMsg> {
-        self.global().storage_threads().sender()
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#clone>
@@ -718,9 +713,10 @@ impl IDBObjectStore {
             new_name: new_name.to_string(),
         };
 
+        // Partii: through the transaction, which holds requests back while it populates an index.
         if self
-            .get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+            .transaction
+            .send_to_backend(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
                 store_name: self.name.borrow().clone().into(),
@@ -1109,9 +1105,10 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
             multi_entry: options.multiEntry,
         };
 
+        // Partii: through the transaction, which holds requests back while it populates an index.
         if self
-            .get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+            .transaction
+            .send_to_backend(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
                 store_name: self.name.borrow().clone().into(),
@@ -1122,6 +1119,18 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         {
             return Err(Error::Operation(None));
         }
+
+        // Partii: populate the index with the store's records (unique clashes abort the upgrade
+        // transaction with a ConstraintError).
+        self.transaction.populate_indexes(PopulateIndexes {
+            store_name: self.name.borrow().to_string(),
+            indexes: vec![(
+                name.to_string(),
+                key_path.clone().into(),
+                options.multiEntry,
+            )],
+            fail_on_clash: true,
+        });
 
         // Step 12. Add index to this object store handle's index set.
         let index = self.add_index(cx, name, options, key_path);
@@ -1152,9 +1161,10 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
             callback: self.transaction.create_abort_callback(),
             index_name: name.to_string(),
         };
+        // Partii: through the transaction, which holds requests back while it populates an index.
         if self
-            .get_idb_thread()
-            .send(IndexedDBThreadMsg::AsyncSchemaOperation {
+            .transaction
+            .send_to_backend(IndexedDBThreadMsg::AsyncSchemaOperation {
                 origin: self.global().origin().immutable().clone(),
                 database_name: self.db_name.to_string(),
                 store_name: self.name.borrow().clone().into(),
