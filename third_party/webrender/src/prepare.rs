@@ -1513,8 +1513,9 @@ fn prepare_interned_prim_for_render(
         PrimitiveKind::BackdropRender { pic_index, .. } => {
             match frame_state.surface_builder.sub_graph_output_map.get(pic_index).cloned() {
                 Some(sub_graph_output_id) => {
-                    frame_state.surface_builder.add_child_render_task(
+                    frame_state.surface_builder.add_sub_graph_output_task(
                         sub_graph_output_id,
+                        *pic_index,
                         frame_state.rg_builder,
                     );
                     let backdrop_handle = scratch.frame.backdrop_render.push(BackdropRenderScratch {

@@ -15,6 +15,7 @@ use crate::invalidation::{InvalidationReason, PrimitiveCompareResult, quadtree::
 use crate::invalidation::vert_buffer::{CornersCache, VertRange};
 use crate::intern::ItemUid;
 use crate::picture::{PictureCompositeMode, SurfaceIndex, clampf};
+use crate::prim_store::PictureIndex;
 use crate::print_tree::PrintTreePrinter;
 use crate::resource_cache::ResourceCache;
 use crate::space::SpaceMapper;
@@ -33,6 +34,8 @@ pub struct CachedSurface {
     pub background_color: Option<ColorF>,
     pub invalidation_reason: Option<InvalidationReason>,
     pub sub_graphs: Vec<(PictureRect, Vec<(PictureCompositeMode, SurfaceIndex)>)>,
+    /// Partii: the pictures of `sub_graphs` (the backdrop-filter sub-graphs drawn on this tile).
+    pub sub_graph_pics: Vec<PictureIndex>,
 }
 
 impl CachedSurface {
@@ -48,6 +51,7 @@ impl CachedSurface {
             background_color: None,
             invalidation_reason: None,
             sub_graphs: Vec::new(),
+            sub_graph_pics: Vec::new(),
         }
     }
 
@@ -74,6 +78,7 @@ impl CachedSurface {
         );
         self.invalidation_reason  = None;
         self.sub_graphs.clear();
+        self.sub_graph_pics.clear();
 
         // If the tile isn't visible, early exit, skipping the normal set up to
         // validate dependencies. Instead, we will only compare the current tile

@@ -2009,6 +2009,7 @@ fn prepare_tiled_picture_surface(
                                 current_task_id: render_task_id,
                                 composite_task_id: Some(composite_task_id),
                                 dirty_rect: tile.cached_surface.local_dirty_rect,
+                                sub_graph_pics: tile.cached_surface.sub_graph_pics.clone(),
                             },
                         );
                     } else {
@@ -2044,6 +2045,7 @@ fn prepare_tiled_picture_surface(
                                 current_task_id: render_task_id,
                                 composite_task_id: None,
                                 dirty_rect: tile.cached_surface.local_dirty_rect,
+                                sub_graph_pics: Vec::new(),
                             },
                         );
                     }

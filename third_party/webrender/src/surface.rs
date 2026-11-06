@@ -305,6 +305,20 @@ pub struct SurfaceTileDescriptor {
     pub composite_task_id: Option<RenderTaskId>,
     /// Dirty rect for this tile
     pub dirty_rect: PictureRect,
+    /// Partii: the backdrop-filter sub-graphs drawn on this tile (`CachedSurface::sub_graph_pics`).
+    pub sub_graph_pics: Vec<PictureIndex>,
+}
+
+/// Partii: backdrop-filter sub-graphs split, and are dependencies of, only the picture-cache
+/// tiles they are drawn on (the tiles they read) (`PARTII_WR_BACKDROP_LOCAL=0`: every tile with a
+/// sub-graph, as upstream). Upstream, each backdrop on a slice re-splits every such tile
+/// and waits for all earlier backdrops, so N backdrops on different tiles take N rounds of
+/// render passes instead of one.
+fn backdrop_local() -> bool {
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("PARTII_WR_BACKDROP_LOCAL").map_or(true, |v| v != "0")
+    });
+    *ON
 }
 
 // Details of how a surface is rendered
@@ -557,6 +571,33 @@ impl SurfaceBuilder {
         }
     }
 
+    // Partii: as `add_child_render_task` for the output of the backdrop-filter sub-graph
+    // `pic_index`: on a tiled surface only the tiles it is drawn on depend on it.
+    pub fn add_sub_graph_output_task(
+        &mut self,
+        child_task_id: RenderTaskId,
+        pic_index: PictureIndex,
+        rg_builder: &mut RenderTaskGraphBuilder,
+    ) {
+        if !backdrop_local() {
+            return self.add_child_render_task(child_task_id, rg_builder);
+        }
+        let builder = self.builder_stack.last().unwrap();
+        match builder.kind {
+            CommandBufferBuilderKind::Tiled { ref tiles } => {
+                for (_, descriptor) in tiles {
+                    if descriptor.sub_graph_pics.contains(&pic_index) {
+                        rg_builder.add_dependency(
+                            descriptor.current_task_id,
+                            child_task_id,
+                        );
+                    }
+                }
+            }
+            _ => self.add_child_render_task(child_task_id, rg_builder),
+        }
+    }
+
     // Add a picture render task as a dependency of the parent surface. This is a
     // special case with extra complexity as the root of the surface may change
     // when inside a sub-graph. It's currently only needed for drop-shadow effects.
@@ -621,6 +662,10 @@ impl SurfaceBuilder {
                     unreachable!("bug: sub-graphs can only be simple surfaces");
                 }
                 CommandBufferBuilderKind::Simple { render_task_id: child_render_task_id, root_task_id: child_root_task_id, .. } => {
+                    // Partii: the tiles this sub-graph reads from (see `backdrop_local`).
+                    let reads_tile = |descriptor: &SurfaceTileDescriptor| {
+                        !backdrop_local() || descriptor.sub_graph_pics.contains(&pic_index)
+                    };
                     // Get info about the resolve operation to copy from parent surface or tiles to the picture cache task
                     if let Some(resolve_task_id) = builder.resolve_source {
                         let mut src_task_ids = Vec::new();
@@ -646,6 +691,10 @@ impl SurfaceBuilder {
                                 // For each tile in parent surface
                                 for key in keys {
                                     let descriptor = tiles.remove(&key).unwrap();
+                                    if !reads_tile(&descriptor) {
+                                        tiles.insert(key, descriptor);
+                                        continue;
+                                    }
                                     let parent_task_id = descriptor.current_task_id;
                                     let parent_task = rg_builder.get_task_mut(parent_task_id);
 
@@ -803,8 +852,12 @@ impl SurfaceBuilder {
                     // as early as possible.
                     match self.builder_stack.last().unwrap().kind {
                         CommandBufferBuilderKind::Tiled { ref tiles } => {
-                            // For a tiled render task, add as a dependency to every tile.
+                            // For a tiled render task, add as a dependency to every tile
+                            // (Partii: that the sub-graph reads from).
                             for (_, descriptor) in tiles {
+                                if !reads_tile(descriptor) {
+                                    continue;
+                                }
                                 rg_builder.add_dependency(
                                     descriptor.current_task_id,
                                     child_root_task_id.unwrap_or(child_render_task_id),

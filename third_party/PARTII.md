@@ -23,4 +23,8 @@ patched in the same way. The vendoring commit copies the published crate unchang
 shows every Partii patch. `webrender_api` and `webrender_build` stay on crates.io.
 
 Patches on top of webrender 0.70.0:
-- none yet.
+- `PARTII_WR_BACKDROP_LOCAL` (on by default; `=0` is upstream): a backdrop-filter sub-graph
+  splits and is a dependency of only the picture-cache tiles it is drawn on, so backdrops on
+  different tiles render in the same passes instead of one chain after another
+  (src/surface.rs, src/invalidation/cached_surface.rs, src/tile_cache/mod.rs, src/picture.rs,
+  src/prepare.rs).

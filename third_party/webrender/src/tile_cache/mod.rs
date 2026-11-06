@@ -2640,6 +2640,7 @@ impl TileCacheInstance {
                             let key = TileOffset::new(x, y);
                             let tile = sub_slice.tiles.get_mut(&key).expect("bug: no tile");
                             tile.cached_surface.sub_graphs.push((pic_coverage_rect, surface_info.clone()));
+                            tile.cached_surface.sub_graph_pics.push(pic_index);
                         }
                     }
 
