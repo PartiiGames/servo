@@ -123,6 +123,20 @@ pub struct GLState {
     transform_feedback_active: bool,
     /// Opaque black 1x1 textures (2D, cube map) that stand in for incomplete ones.
     incomplete_textures: (Option<gl::NativeTexture>, Option<gl::NativeTexture>),
+    /// Partii (perf): the 2D texture whose level 0 the last texImage2D(null) made, still all zeros
+    /// (only texture parameter, binding and pixel store commands since). generateMipmap on it
+    /// allocates zeroed levels instead of running the GL's downsampling (see zero_mipmaps).
+    zero_level0: Option<ZeroLevel0>,
+}
+
+/// Partii (perf): see GLState::zero_level0.
+#[derive(Clone, Copy)]
+struct ZeroLevel0 {
+    texture: gl::NativeTexture,
+    size: Size2D<u32>,
+    internal_format: u32,
+    format: u32,
+    data_type: u32,
 }
 
 impl GLState {
@@ -236,6 +250,7 @@ impl Default for GLState {
             active_occlusion_queries: 0,
             transform_feedback_active: false,
             incomplete_textures: (None, None),
+            zero_level0: None,
             color_write_mask: [true, true, true, true],
             clear_color: (0., 0., 0., 0.),
             scissor_test_enabled: false,
@@ -1172,6 +1187,23 @@ impl WebGLImpl {
             return;
         }
 
+        // Partii (perf): any command but these may write the texture state.zero_level0 names.
+        if state.zero_level0.is_some() &&
+            !matches!(
+                command,
+                WebGLCommand::TexParameteri(..) |
+                    WebGLCommand::TexParameterf(..) |
+                    WebGLCommand::TexParameter { .. } |
+                    WebGLCommand::BindTexture(..) |
+                    WebGLCommand::ActiveTexture(..) |
+                    WebGLCommand::PixelStorei(..) |
+                    WebGLCommand::Hint(..) |
+                    WebGLCommand::GenerateMipmap(..)
+            )
+        {
+            state.zero_level0 = None;
+        }
+
         match command {
             WebGLCommand::GetContextAttributes(ref sender) => sender.send(*attributes).unwrap(),
             WebGLCommand::ActiveTexture(target) => unsafe { gl.active_texture(target) },
@@ -1917,6 +1949,16 @@ impl WebGLImpl {
                         format,
                         effective_data_type,
                     ) {
+                        Self::note_zero_level0(
+                            gl,
+                            state,
+                            target,
+                            level,
+                            size,
+                            internal_format,
+                            format,
+                            effective_data_type,
+                        );
                         return;
                     }
                 }
@@ -1959,6 +2001,18 @@ impl WebGLImpl {
                         format,
                         effective_data_type,
                         PixelUnpackData::Slice(Some(&pixels)),
+                    );
+                }
+                if zero_fill {
+                    Self::note_zero_level0(
+                        gl,
+                        state,
+                        target,
+                        level,
+                        size,
+                        internal_format,
+                        format,
+                        effective_data_type,
                     );
                 }
             },
@@ -2309,7 +2363,11 @@ impl WebGLImpl {
             },
             WebGLCommand::Finish(ref sender) => Self::finish(gl, sender),
             WebGLCommand::Flush => unsafe { gl.flush() },
-            WebGLCommand::GenerateMipmap(target) => unsafe { gl.generate_mipmap(target) },
+            WebGLCommand::GenerateMipmap(target) => {
+                if !Self::zero_mipmaps(gl, state, target) {
+                    unsafe { gl.generate_mipmap(target) }
+                }
+            },
             WebGLCommand::CreateVertexArray(ref chan) => {
                 let id = Self::create_vertex_array(gl);
                 let _ = chan.send(id);
@@ -3179,6 +3237,73 @@ impl WebGLImpl {
             state.restore_alpha_invariant(gl);
             complete
         }
+    }
+
+    /// Partii (perf): remembers that the 2D texture bound now has an all-zero level 0 (see
+    /// GLState::zero_level0), unless `PARTII_WEBGL_ZERO_MIP=0`.
+    #[allow(clippy::too_many_arguments)]
+    fn note_zero_level0(
+        gl: &Gl,
+        state: &mut GLState,
+        target: u32,
+        level: u32,
+        size: Size2D<u32>,
+        internal_format: u32,
+        format: u32,
+        data_type: u32,
+    ) {
+        if target != gl::TEXTURE_2D || level != 0 || !zero_mip_enabled() {
+            return;
+        }
+        let texture = unsafe { gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) } as u32;
+        state.zero_level0 = NonZeroU32::new(texture).map(|texture| ZeroLevel0 {
+            texture: glow::NativeTexture(texture),
+            size,
+            internal_format,
+            format,
+            data_type,
+        });
+    }
+
+    /// Partii (perf): generateMipmap on a 2D texture whose level 0 is still all zeros (Phaser's boot
+    /// makes power-of-two render targets with texImage2D(null) + generateMipmap): the mipmaps of
+    /// zeros are zeros, so allocate the levels zeroed (cleared, as texImage2D(null) does) instead of
+    /// running the GL's downsampling. Same levels as generateMipmap: base level 0 up to
+    /// min(TEXTURE_MAX_LEVEL, log2 of the larger side). Returns false when this doesn't apply (the
+    /// caller generates the mipmaps as usual).
+    fn zero_mipmaps(gl: &Gl, state: &mut GLState, target: u32) -> bool {
+        let Some(zero) = state.zero_level0 else {
+            return false;
+        };
+        if target != gl::TEXTURE_2D {
+            return false;
+        }
+        unsafe {
+            if gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) as u32 != zero.texture.0.get() ||
+                gl.get_tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_BASE_LEVEL) != 0
+            {
+                return false;
+            }
+            let max_level = gl.get_tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_MAX_LEVEL).max(0) as u32;
+            let top = 31 - zero.size.width.max(zero.size.height).max(1).leading_zeros();
+            for level in 1..=top.min(max_level) {
+                let size = Size2D::new((zero.size.width >> level).max(1), (zero.size.height >> level).max(1));
+                if !Self::tex_image_2d_cleared(
+                    gl,
+                    state,
+                    gl::TEXTURE_2D,
+                    level as i32,
+                    zero.internal_format,
+                    size,
+                    zero.format,
+                    zero.data_type,
+                ) {
+                    // Levels made so far are regenerated by the GL; nothing is left half done.
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn initialize_framebuffer(gl: &Gl, state: &GLState, color: bool, depth: bool, stencil: bool) {
@@ -4519,6 +4644,13 @@ unsafe fn copy_tex_image_2d(
         gl.pixel_store_i32(gl::PACK_ALIGNMENT, pack_alignment);
         gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpack_alignment);
     }
+}
+
+/// Partii (perf): generateMipmap on a still-zero texImage2D(null) level allocates zeroed levels instead
+/// of downsampling, unless `PARTII_WEBGL_ZERO_MIP=0` (A/B switch).
+fn zero_mip_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_ZERO_MIP").map_or(true, |v| v != "0"))
 }
 
 /// Partii (perf): texImage2D(null) clears colour-renderable levels instead of uploading zeros, unless
