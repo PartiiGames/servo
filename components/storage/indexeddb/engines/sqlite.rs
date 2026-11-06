@@ -2221,6 +2221,80 @@ mod tests {
         assert_eq!(count, 1, "the records follow the store");
     }
 
+    fn schema_request(store_name: &str, operation: AsyncSchemaOperation) -> KvsOperation {
+        KvsOperation {
+            store_name: store_name.to_owned(),
+            operation: AsyncOperation::Schema(operation),
+        }
+    }
+
+    fn index_names(db: &SqliteEngine, store_name: &str) -> Vec<String> {
+        let mut names: Vec<String> = db
+            .indexes(store_name)
+            .unwrap()
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Partii: index and store metadata changed in an upgrade transaction (createIndex,
+    /// deleteIndex, deleteObjectStore) comes back when the transaction aborts.
+    #[test]
+    fn test_aborted_upgrade_rolls_back_index_metadata() {
+        let (_temp_dir, _proxy_map, _handle, db) = open_engine();
+        db.create_store("store", None, false).unwrap();
+        db.create_store("other", None, false).unwrap();
+        db.create_index(
+            "store",
+            "kept".to_owned(),
+            KeyPath::String("a".into()),
+            false,
+            false,
+        )
+        .unwrap();
+        let callback = || GenericCallback::new(|_| {}).unwrap();
+
+        run_batch(
+            &db,
+            1,
+            IndexedDBTxnMode::Versionchange,
+            vec![
+                schema_request(
+                    "store",
+                    AsyncSchemaOperation::CreateIndex {
+                        callback: callback(),
+                        index_name: "added".to_owned(),
+                        key_path: KeyPath::String("b".into()),
+                        unique: false,
+                        multi_entry: false,
+                    },
+                ),
+                schema_request(
+                    "store",
+                    AsyncSchemaOperation::DeleteIndex {
+                        callback: callback(),
+                        index_name: "kept".to_owned(),
+                    },
+                ),
+                schema_request(
+                    "other",
+                    AsyncSchemaOperation::DeleteObjectStore {
+                        callback: callback(),
+                    },
+                ),
+            ],
+        );
+        assert_eq!(index_names(&db, "store"), vec!["added".to_owned()]);
+        assert_eq!(db.object_store_names().unwrap(), vec!["store".to_owned()]);
+        db.rollback_transaction(1);
+        assert_eq!(index_names(&db, "store"), vec!["kept".to_owned()]);
+        let mut stores = db.object_store_names().unwrap();
+        stores.sort();
+        assert_eq!(stores, vec!["other".to_owned(), "store".to_owned()]);
+    }
+
     fn index_row_count(db: &SqliteEngine) -> i64 {
         db.connection()
             .query_row(

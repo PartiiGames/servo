@@ -401,8 +401,12 @@ impl IDBDatabaseMethods<crate::DomTypeHolder> for IDBDatabase {
             .borrow_mut()
             .retain(|store_name| *store_name != name);
 
-        // Step 6
-        // FIXME:(arihant2math) Remove from index set ...
+        // Step 6. If there is an object store handle associated with store and transaction,
+        // remove all entries from its index set.
+        // Partii: an aborted upgrade puts them back (IDBObjectStore::restore_metadata_after_abort).
+        if let Some(store) = transaction.object_store_handle(&name) {
+            store.clear_index_set();
+        }
 
         // Step 7
         let operation = AsyncSchemaOperation::DeleteObjectStore {
