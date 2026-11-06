@@ -638,7 +638,7 @@ pub(crate) unsafe fn init_runtime(
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, sm_budget);
         let raw = cx.raw_cx();
         SetGrayGCRootsTracer(raw, Some(gray_roots), roots_data);
-        if config().incremental_sweep && !incremental_gc::BLACK_REMARK {
+        if config.incremental_sweep && !incremental_gc::BLACK_REMARK {
             eprintln!(
                 "[gc-sched] PARTII_GC_INCREMENTAL_SWEEP=1 ignored: built without the barrier tracer shim (prebuilt mozjs)"
             );
