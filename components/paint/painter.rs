@@ -264,7 +264,13 @@ impl Painter {
                 // See: https://github.com/servo/servo/issues/31726
                 use_optimized_shaders: true,
                 resource_override_path: opts::get().shaders_path.clone(),
-                debug_flags: webrender::DebugFlags::empty(),
+                // Partii (perf, measurement builds): PARTII_WR_PROMO_LOG logs why WebRender declines a
+                // compositor surface (with RUST_LOG=webrender=warn).
+                debug_flags: if std::env::var_os("PARTII_WR_PROMO_LOG").is_some() {
+                    webrender::DebugFlags::SURFACE_PROMOTION_LOGGING
+                } else {
+                    webrender::DebugFlags::empty()
+                },
                 precache_flags: if pref!(gfx_precache_shaders) {
                     ShaderPrecacheFlags::FULL_COMPILE
                 } else {
