@@ -1681,12 +1681,17 @@ impl<'a> BuilderForBoxFragment<'a> {
             return;
         }
         let current_color = &style.get_inherited_text().color;
+        let blur = servo_config::prefs::backdrop_blur_enabled();
         let filters: Vec<_> = effects
             .backdrop_filter
             .0
             .iter()
             .map(|filter| FilterToWebRender::to_webrender(filter, current_color))
+            .filter(|filter| blur || !matches!(filter, wr::FilterOp::Blur(..)))
             .collect();
+        if filters.is_empty() {
+            return;
+        }
         let mut common = builder.common_properties(state, self.border_rect, style);
         if let Some(clip_chain_id) = self.border_edge_clip(builder, state, false) {
             common.clip_chain_id = clip_chain_id;

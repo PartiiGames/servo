@@ -279,6 +279,15 @@ impl Painter {
         let gl_renderer = webrender_gl.get_string(gleam::gl::RENDERER);
         let gl_version = webrender_gl.get_string(gleam::gl::VERSION);
         info!("Running on {gl_renderer} with OpenGL version {gl_version}");
+        // Partii: layout leaves out effects that a software rasterizer can't keep up with.
+        let renderer = gl_renderer.to_ascii_lowercase();
+        if ["llvmpipe", "softpipe", "swrast"]
+            .iter()
+            .any(|software| renderer.contains(software))
+        {
+            servo_config::prefs::SOFTWARE_RENDERER
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let painter = Painter {
             painter_id,

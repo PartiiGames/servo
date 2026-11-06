@@ -762,3 +762,23 @@ impl UserAgentPlatform {
         }
     }
 }
+
+/// Partii: set by the painter when WebRender runs on a software rasterizer (Mesa's llvmpipe,
+/// softpipe or swrast).
+pub static SOFTWARE_RENDERER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Partii: whether `backdrop-filter: blur()` is drawn. Each blurred backdrop costs WebRender about
+/// a dozen full-size render targets a frame; on llvmpipe that is ~70 ms per element, so a menu with
+/// a few `backdrop-blur` layers over a moving game drops to 2 fps and, windowed, froze the lx soaks
+/// for minutes. Off on software renderers unless `PARTII_BACKDROP_BLUR=1`; `0` turns it off
+/// everywhere. The rest of the filter list (brightness, saturate, ...) is still drawn.
+pub fn backdrop_blur_enabled() -> bool {
+    static MODE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let mode = *MODE.get_or_init(|| match std::env::var("PARTII_BACKDROP_BLUR").as_deref() {
+        Ok("0") => Some(false),
+        Ok("1") => Some(true),
+        _ => None,
+    });
+    mode.unwrap_or_else(|| !SOFTWARE_RENDERER.load(std::sync::atomic::Ordering::Relaxed))
+}
