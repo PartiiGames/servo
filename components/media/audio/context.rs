@@ -160,6 +160,9 @@ pub struct AudioContext {
     /// representing the final destination for all audio.
     dest_node: NodeId,
     listener: NodeId,
+    /// The last currentTime the render thread reported: what currentTime keeps returning once
+    /// the render thread is gone (after close()), instead of failing.
+    last_time: Cell<f64>,
     #[ignore_malloc_size_of = "Fn"]
     make_decoder: Arc<dyn Fn() -> Box<dyn AudioDecoder> + Sync + Send>,
 }
@@ -223,6 +226,7 @@ impl AudioContext {
             sample_rate,
             dest_node,
             listener,
+            last_time: Cell::new(0.),
             make_decoder: Arc::new(|| B::make_decoder()),
         })
     }
@@ -247,7 +251,14 @@ impl AudioContext {
     pub fn current_time(&self) -> f64 {
         let (tx, rx) = mpsc::channel();
         let _ = self.sender.send(AudioRenderThreadMsg::GetCurrentTime(tx));
-        rx.recv().unwrap()
+        // A closed context's render thread has exited; currentTime stays where it stopped.
+        match rx.recv() {
+            Ok(time) => {
+                self.last_time.set(time);
+                time
+            },
+            Err(_) => self.last_time.get(),
+        }
     }
 
     pub fn create_node(&self, node_type: AudioNodeInit, ch: ChannelInfo) -> Option<NodeId> {
