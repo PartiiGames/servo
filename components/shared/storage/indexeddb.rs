@@ -139,8 +139,11 @@ impl PartialOrd for IndexedDBKeyType {
             // Step 11 skipped
             // TODO: Likely a tiny bit wrong (use js number comparison)
             (IndexedDBKeyType::Number(a), IndexedDBKeyType::Number(b)) => a.partial_cmp(b),
-            // TODO: Likely a tiny bit wrong (use js string comparison)
-            (IndexedDBKeyType::String(a), IndexedDBKeyType::String(b)) => a.partial_cmp(b),
+            // Partii: strings compare by UTF-16 code units, as JS does and as the sqlite key
+            // encoding orders them (UTF-8 byte order differs above U+FFFF).
+            (IndexedDBKeyType::String(a), IndexedDBKeyType::String(b)) => {
+                Some(a.encode_utf16().cmp(b.encode_utf16()))
+            },
             // TODO: Likely a little wrong (use js binary comparison)
             (IndexedDBKeyType::Binary(a), IndexedDBKeyType::Binary(b)) => a.partial_cmp(b),
             (IndexedDBKeyType::Date(a), IndexedDBKeyType::Date(b)) => a.partial_cmp(b),
@@ -355,7 +358,25 @@ pub enum AsyncReadOnlyOperation {
         index_name: Option<String>,
         /// Partii: a key cursor; the records' values are left empty.
         key_only: bool,
+        /// Partii: where the cursor's step starts; the backend returns only the records the
+        /// step can reach.
+        seek: CursorSeek,
     },
+}
+
+/// Partii: the inputs of one step of <https://w3c.github.io/IndexedDB/#iterate-a-cursor>
+/// (direction, position, object store position, key, primaryKey and count). With them the
+/// backend seeks to the first record the step can reach and returns at most `count` records
+/// (`count` distinct keys for the unique directions), in ascending (key, primary key) order, so
+/// that walking a cursor over n records reads O(n) records instead of O(n²).
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
+pub struct CursorSeek {
+    pub direction: IndexedDBDirection,
+    pub position: Option<IndexedDBKeyType>,
+    pub object_store_position: Option<IndexedDBKeyType>,
+    pub key: Option<IndexedDBKeyType>,
+    pub primary_key: Option<IndexedDBKeyType>,
+    pub count: u32,
 }
 
 impl AsyncReadOnlyOperation {

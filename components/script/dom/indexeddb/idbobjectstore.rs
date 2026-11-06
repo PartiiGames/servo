@@ -720,6 +720,7 @@ impl IDBObjectStore {
             primary_key: None,
             count: None,
         };
+        let seek = cursor.seek(&iteration_param);
 
         IDBRequest::execute_async(
             cx,
@@ -730,6 +731,7 @@ impl IDBObjectStore {
                     key_range: range,
                     index_name: None,
                     key_only,
+                    seek,
                 })
             },
             None,

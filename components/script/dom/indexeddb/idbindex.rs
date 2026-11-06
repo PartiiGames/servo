@@ -210,6 +210,7 @@ impl IDBIndex {
             primary_key: None,
             count: None,
         };
+        let seek = cursor.seek(&iteration_param);
 
         IDBRequest::execute_async(
             cx,
@@ -220,6 +221,7 @@ impl IDBIndex {
                     key_range: range,
                     index_name: Some(index_name),
                     key_only,
+                    seek,
                 })
             },
             None,
