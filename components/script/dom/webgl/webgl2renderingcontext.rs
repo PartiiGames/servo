@@ -43,9 +43,10 @@ use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::{
     TexImageSource, WebGLContextAttributes, WebGLRenderingContextMethods,
 };
 use crate::dom::bindings::codegen::UnionTypes::{
-    ArrayBufferViewOrArrayBuffer, Float32ArrayOrUnrestrictedFloatSequence,
+    Float32ArrayOrUnrestrictedFloatSequence,
     HTMLCanvasElementOrOffscreenCanvas as RootedHTMLCanvasElementOrOffscreenCanvas,
-    Int32ArrayOrLongSequence, Uint32ArrayOrUnsignedLongSequence,
+    Int32ArrayOrLongSequence, MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer,
+    Uint32ArrayOrUnsignedLongSequence,
 };
 use crate::dom::bindings::error::{ErrorResult, Fallible};
 use crate::dom::bindings::reflector::DomGlobal;
@@ -3289,7 +3290,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         &self,
         cx: &mut JSContext,
         target: u32,
-        data: Option<ArrayBufferViewOrArrayBuffer>,
+        data: Option<MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer>,
         usage: u32,
     ) {
         let usage = handle_potential_webgl_error!(self.base, self.buffer_usage(usage), return);
@@ -3367,7 +3368,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         cx: &mut JSContext,
         target: u32,
         offset: i64,
-        data: ArrayBufferViewOrArrayBuffer,
+        data: MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer,
     ) {
         let bound_buffer = handle_potential_webgl_error!(
             self.base,

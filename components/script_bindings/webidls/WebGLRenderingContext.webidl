@@ -640,8 +640,8 @@ interface mixin WebGLRenderingContextBase
 interface mixin WebGLRenderingContextOverloads
 {
     undefined bufferData(GLenum target, GLsizeiptr size, GLenum usage);
-    undefined bufferData(GLenum target, /*[AllowShared]*/ BufferSource? data, GLenum usage);
-    undefined bufferSubData(GLenum target, GLintptr offset, /*[AllowShared]*/ BufferSource data);
+    undefined bufferData(GLenum target, [AllowShared] BufferSource? data, GLenum usage);
+    undefined bufferSubData(GLenum target, GLintptr offset, [AllowShared] BufferSource data);
 
     undefined compressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
                               GLsizei width, GLsizei height, GLint border,

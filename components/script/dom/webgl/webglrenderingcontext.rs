@@ -55,9 +55,9 @@ use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::{
     WebGLRenderingContextMethods,
 };
 use crate::dom::bindings::codegen::UnionTypes::{
-    ArrayBufferViewOrArrayBuffer, Float32ArrayOrUnrestrictedFloatSequence,
+    Float32ArrayOrUnrestrictedFloatSequence,
     HTMLCanvasElementOrOffscreenCanvas as RootedHTMLCanvasElementOrOffscreenCanvas,
-    Int32ArrayOrLongSequence,
+    Int32ArrayOrLongSequence, MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer,
 };
 use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
@@ -2024,7 +2024,7 @@ impl WebGLRenderingContext {
         &self,
         no_gc: &NoGC,
         target: u32,
-        data: Option<ArrayBufferViewOrArrayBuffer>,
+        data: Option<MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer>,
         usage: u32,
         bound_buffer: Option<DomRoot<WebGLBuffer>>,
     ) {
@@ -2061,7 +2061,7 @@ impl WebGLRenderingContext {
         no_gc: &NoGC,
         target: u32,
         offset: i64,
-        data: ArrayBufferViewOrArrayBuffer,
+        data: MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer,
         bound_buffer: Option<DomRoot<WebGLBuffer>>,
     ) {
         let bound_buffer =
@@ -3470,7 +3470,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         &self,
         cx: &mut JSContext,
         target: u32,
-        data: Option<ArrayBufferViewOrArrayBuffer>,
+        data: Option<MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer>,
         usage: u32,
     ) {
         let usage = handle_potential_webgl_error!(self, self.buffer_usage(usage), return);
@@ -3493,7 +3493,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         cx: &mut JSContext,
         target: u32,
         offset: i64,
-        data: ArrayBufferViewOrArrayBuffer,
+        data: MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer,
     ) {
         let bound_buffer =
             handle_potential_webgl_error!(self, self.bound_buffer(cx, target), return);

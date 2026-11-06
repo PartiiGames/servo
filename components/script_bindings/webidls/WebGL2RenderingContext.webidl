@@ -480,12 +480,12 @@ interface mixin WebGL2RenderingContextOverloads
 {
   // WebGL1:
   undefined bufferData(GLenum target, GLsizeiptr size, GLenum usage);
-  undefined bufferData(GLenum target, /*[AllowShared]*/ BufferSource? srcData, GLenum usage);
-  undefined bufferSubData(GLenum target, GLintptr dstByteOffset, /*[AllowShared]*/ BufferSource srcData);
+  undefined bufferData(GLenum target, [AllowShared] BufferSource? srcData, GLenum usage);
+  undefined bufferSubData(GLenum target, GLintptr dstByteOffset, [AllowShared] BufferSource srcData);
   // WebGL2:
-  undefined bufferData(GLenum target, /*[AllowShared]*/ ArrayBufferView srcData, GLenum usage, GLuint srcOffset,
+  undefined bufferData(GLenum target, [AllowShared] ArrayBufferView srcData, GLenum usage, GLuint srcOffset,
                   optional GLuint length = 0);
-  undefined bufferSubData(GLenum target, GLintptr dstByteOffset, /*[AllowShared]*/ ArrayBufferView srcData,
+  undefined bufferSubData(GLenum target, GLintptr dstByteOffset, [AllowShared] ArrayBufferView srcData,
                      GLuint srcOffset, optional GLuint length = 0);
 
   // WebGL1 legacy entrypoints:
