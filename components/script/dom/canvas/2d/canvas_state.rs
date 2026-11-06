@@ -42,7 +42,7 @@ use style::properties::longhands::font_variant_caps::computed_value::T as FontVa
 use style::properties::style_structs::Font;
 use style::stylesheets::{CssRuleType, UrlExtraData};
 use style::values::computed::color::Color as ComputedColor;
-use style::values::computed::font::FontStyle;
+use style::values::computed::font::{FontStyle, FontWeight};
 use style::values::computed::{
     FontFeatureSettings, FontVariantEastAsian, FontVariantLigatures, FontVariantNumeric,
 };
@@ -1749,12 +1749,12 @@ impl CanvasState {
         canvas: Option<&HTMLCanvasElement>,
         value: DOMString,
     ) {
+        let url: UrlExtraData = global.api_base_url().into_url().into();
         let canvas = match canvas {
             Some(element) => element,
             // Partii: an OffscreenCanvas with no placeholder: parse and compute the value with no
             // element (it used to be ignored).
             None => {
-                let url: UrlExtraData = global.api_base_url().into_url().into();
                 if let Some(font) =
                     super::offscreen_font::resolve_font_without_element(&value.str(), &url)
                 {
@@ -1763,6 +1763,11 @@ impl CanvasState {
                 return;
             },
         };
+        // Partii: the value must match the font shorthand grammar alone; the layout query below
+        // parses it as a declaration, which also accepts `inherit`, `var(--x)` and the like.
+        if super::offscreen_font::parse_canvas_font(&value.str(), &url).is_none() {
+            return;
+        }
         let node = canvas.upcast::<Node>();
         let window = canvas.owner_window();
 
@@ -2875,11 +2880,12 @@ where
     if style.font_style == FontStyle::ITALIC {
         write!(dest, "{} ", style.font_style.to_css_string())?;
     }
-    if style.font_weight.is_bold() {
-        write!(dest, "{} ", style.font_weight.to_css_string())?;
-    }
+    // Shorthand serialization order: style, variant-caps, weight; normal values are omitted.
     if style.font_variant_caps == FontVariantCaps::SmallCaps {
         write!(dest, "{} ", style.font_variant_caps.to_css_string())?;
+    }
+    if style.font_weight != FontWeight::NORMAL {
+        write!(dest, "{} ", style.font_weight.to_css_string())?;
     }
     write!(
         dest,

@@ -85,9 +85,11 @@ thread_local! {
     static DEVICE: OnceCell<Device> = const { OnceCell::new() };
 }
 
-/// Parses `value` as the CSS font shorthand and computes it with no element. None on a syntax
-/// error, a CSS-wide keyword or a system font (the caller then keeps the old value).
-pub(super) fn resolve_font_without_element(value: &str, url: &UrlExtraData) -> Option<ServoArc<Font>> {
+/// Parses `value` with the CSS font shorthand grammar alone, as the canvas `font` setter requires:
+/// CSS-wide keywords (`inherit`, ...), `var()`, extra declarations and system fonts are syntax
+/// errors here, so the setter keeps the old value. Used by element canvases too, whose layout
+/// query would otherwise accept any declaration value.
+pub(super) fn parse_canvas_font(value: &str, url: &UrlExtraData) -> Option<font::Longhands> {
     let context = parser_context_for_anonymous_content(CssRuleType::Style, ParsingMode::DEFAULT, url);
     let mut input = ParserInput::new(value);
     let mut parser = Parser::new(&mut input);
@@ -97,6 +99,13 @@ pub(super) fn resolve_font_without_element(value: &str, url: &UrlExtraData) -> O
     let specified_font::FontFamily::Values(_) = longhands.font_family else {
         return None;
     };
+    Some(longhands)
+}
+
+/// Parses `value` as the CSS font shorthand and computes it with no element. None on a syntax
+/// error (the caller then keeps the old value).
+pub(super) fn resolve_font_without_element(value: &str, url: &UrlExtraData) -> Option<ServoArc<Font>> {
+    let longhands = parse_canvas_font(value, url)?;
     DEVICE.with(|cell| {
         let device = cell.get_or_init(|| {
             Device::new(
