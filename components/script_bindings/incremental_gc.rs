@@ -365,7 +365,7 @@ mod tests {
             JS_SetGCParameter(cx, JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED, 1);
 
             rooted!(&in(cx) let live = JS_NewObject(cx, &LIVE_CLASS));
-            rooted!(&in(cx) let dead = JS_NewObject(cx, &DEAD_CLASS));
+            rooted!(&in(cx) let mut dead = JS_NewObject(cx, &DEAD_CLASS));
             // Tenure both (the roots are updated to where they moved).
             JS_GC(cx, GCReason::API);
             let dead_ptr = dead.get();
