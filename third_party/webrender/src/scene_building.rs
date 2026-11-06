@@ -3721,7 +3721,14 @@ impl<'a> SceneBuilder<'a> {
         // (which is the common case). It will get resolved later during `finalize_picture`.
         let filter_spatial_node_index = SpatialNodeIndex::UNKNOWN;
 
-        self.make_current_slice_atomic_if_required();
+        // Partii (measurement): PARTII_WR_BACKDROP_ATOMIC=0 leaves the slice non-atomic, so
+        // compositor surfaces under the backdrop stay promoted (and the blur doesn't see them).
+        static BACKDROP_ATOMIC: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var("PARTII_WR_BACKDROP_ATOMIC").map_or(true, |v| v != "0")
+        });
+        if *BACKDROP_ATOMIC {
+            self.make_current_slice_atomic_if_required();
+        }
 
         // Ensure we create a clip-chain for the capture primitive that matches
         // the render primitive, otherwise one might get culled while the other
