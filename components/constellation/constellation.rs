@@ -5274,6 +5274,34 @@ where
             .all_descendant_browsing_contexts_iter(browsing_context_id)
             .flat_map(|browsing_context| browsing_context.pipelines.iter().cloned())
             .collect();
+
+        // Partii: removing an iframe unloads its documents first (pagehide, unload), as in other
+        // browsers. A document in another event loop (a cross-site iframe) is otherwise just exited,
+        // so its unload handlers never run, and a `fetch(..., {keepalive: true})` or sendBeacon sent
+        // from them (analytics, save-on-exit) is never made. The script thread handles this before the
+        // exit message that close_browsing_context sends next. Documents in the remover's own event
+        // loop are left to script, which destroys them synchronously during the removal.
+        let remover_event_loop = self
+            .browsing_contexts
+            .get(&browsing_context_id)
+            .and_then(|browsing_context| browsing_context.parent_pipeline_id)
+            .and_then(|parent| self.pipelines.get(&parent))
+            .map(|pipeline| pipeline.event_loop.clone());
+        let to_unload: Vec<PipelineId> = self
+            .all_descendant_browsing_contexts_iter(browsing_context_id)
+            .map(|browsing_context| browsing_context.pipeline_id)
+            .filter(|pipeline_id| {
+                self.pipelines.get(pipeline_id).is_some_and(|pipeline| {
+                    remover_event_loop
+                        .as_ref()
+                        .is_none_or(|event_loop| !Rc::ptr_eq(event_loop, &pipeline.event_loop))
+                })
+            })
+            .collect();
+        for pipeline_id in to_unload {
+            self.unload_document(pipeline_id);
+        }
+
         self.close_browsing_context(webview_id, browsing_context_id, ExitPipelineMode::Normal);
         result
     }
