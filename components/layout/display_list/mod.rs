@@ -13,7 +13,7 @@ use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Ve
 use fonts::ShapedTextSlice;
 use gradient::WebRenderGradient;
 use layout_api::ReflowStatistics;
-use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
+use paint_api::display_list::{PaintDisplayListInfo, ScrollType, SpatialTreeNodeInfo};
 use servo_arc::Arc as ServoArc;
 use servo_base::id::{PipelineId, ScrollTreeNodeId};
 use servo_config::opts::{DiagnosticsLogging, DiagnosticsLoggingOption};
@@ -92,6 +92,10 @@ const INSERTION_POINT_LOGICAL_WIDTH: Au = Au(AU_PER_PX);
 /// TODO: This should eventually come from the system theme.
 static UNFOCUSED_SELECTION_COLOR: LazyLock<AbsoluteColor> =
     LazyLock::new(|| AbsoluteColor::srgb_legacy(200, 200, 200, 1.0));
+
+/// Partii (perf): see `add_all_spatial_nodes`. PARTII_WR_HIDDEN_SLICE=0 turns it off.
+static HIDDEN_FRAMES_SLICED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("PARTII_WR_HIDDEN_SLICE").map_or(true, |v| v != "0"));
 
 pub(crate) struct DisplayListBuilder<'a> {
     /// The [`FragmentTree`] that we are building a display list for.
@@ -332,10 +336,32 @@ impl DisplayListBuilder<'_> {
                     spatial_id
                 },
                 SpatialTreeNodeInfo::Scroll(info) => {
+                    // Partii (perf): WebRender reads a scroll frame's content size only to choose
+                    // picture-cache scroll roots (Servo keeps scroll offsets itself): a frame with
+                    // something to scroll gets its own slice, one with nothing shares the slice of the
+                    // content around it. For a frame no user input can scroll (`overflow: hidden`)
+                    // whether it overflows is incidental and changes as its children animate, so the
+                    // slices flip from frame to frame. Such a frame is reported with at least a pixel
+                    // to scroll, so it always keeps its own slice: hexii's menu hexagons float in an
+                    // `overflow: hidden` layer, and when that layer shared the title's slice every
+                    // hexagon's move repainted the drop-shadowed title (17-18 colour targets, 40-90 ms
+                    // renders on llvmpipe) instead of only the hexagons (4-6 targets, 5-10 ms).
+                    // PARTII_WR_HIDDEN_SLICE=0 reports the real content size (Servo's behaviour).
+                    let user_scrollable = ScrollType::InputEvents | ScrollType::Touch;
+                    let content_rect = if *HIDDEN_FRAMES_SLICED &&
+                        !info.scroll_sensitivity.x.intersects(user_scrollable) &&
+                        !info.scroll_sensitivity.y.intersects(user_scrollable)
+                    {
+                        let size = info.content_rect.size();
+                        let min = info.clip_rect.size() + LayoutSize::new(1.0, 1.0);
+                        LayoutRect::from_origin_and_size(info.content_rect.min, size.max(min))
+                    } else {
+                        info.content_rect
+                    };
                     self.wr().define_scroll_frame(
                         *parent_spatial_node_id,
                         info.external_id,
-                        info.content_rect,
+                        content_rect,
                         info.clip_rect,
                         LayoutVector2D::zero(), /* external_scroll_offset */
                         0,                      /* scroll_offset_generation */
