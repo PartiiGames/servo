@@ -206,6 +206,9 @@ thread_local! {
     };
     /// Set from the gray-roots hook: sweeping began in the current GC.
     static SWEEP_STARTED: Cell<bool> = const { Cell::new(false) };
+    /// Between GC_CYCLE_BEGIN and GC_CYCLE_END. SpiderMonkey also calls the gray-roots hook outside a
+    /// GC, from `finishRoots` when a runtime is destroyed, with a tracer that crashes on any edge.
+    static IN_CYCLE: Cell<bool> = const { Cell::new(false) };
     /// This thread's context, for SpiderMonkey's slice-budget callback (which gets none).
     static RAW_CX: Cell<*mut RawJSContext> = const { Cell::new(std::ptr::null_mut()) };
     /// Black remarks in the current GC: count, edges shaded, longest, total.
@@ -693,6 +696,10 @@ unsafe extern "C" fn gray_roots(
     budget: *mut SliceBudget,
     _data: *mut c_void,
 ) -> bool {
+    if !IN_CYCLE.with(Cell::get) {
+        // Runtime teardown (`finishRoots`): no marking, and nothing may be traced.
+        return true;
+    }
     SWEEP_STARTED.with(|s| s.set(true));
     if !incremental_sweep() && sm_slices() && !budget.is_null() {
         unsafe { unlimit_budget(budget) };
@@ -716,6 +723,7 @@ unsafe extern "C" fn slice_callback(
 ) {
     match progress {
         GCProgress::GC_CYCLE_BEGIN => {
+            IN_CYCLE.with(|c| c.set(true));
             incremental_gc::set_marking(false);
             incremental_gc::set_sweeping(false);
             SWEEP_STARTED.with(|s| s.set(false));
@@ -744,6 +752,7 @@ unsafe extern "C" fn slice_callback(
             incremental_gc::set_sweeping(in_progress && sweeping);
         },
         GCProgress::GC_CYCLE_END => {
+            IN_CYCLE.with(|c| c.set(false));
             incremental_gc::set_marking(false);
             incremental_gc::set_sweeping(false);
             SWEEP_STARTED.with(|s| s.set(false));
