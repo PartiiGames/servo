@@ -1054,6 +1054,23 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
         }
 
         // Step 9. Set store’s name to name.
+        // Partii: in the backend too, as part of the upgrade transaction (an abort reverts it).
+        let operation = AsyncSchemaOperation::RenameObjectStore {
+            callback: transaction.create_abort_callback(),
+            new_name: name.to_string(),
+        };
+        if transaction
+            .send_to_backend(IndexedDBThreadMsg::AsyncSchemaOperation {
+                origin: self.global().origin().immutable().clone(),
+                database_name: self.db_name.to_string(),
+                store_name: old_name.to_string(),
+                operation,
+                transaction_serial_number: transaction.get_serial_number(),
+            })
+            .is_err()
+        {
+            warn!("Could not send AsyncSchemaOperation");
+        }
         transaction
             .Db()
             .rename_object_store_name(&old_name, name.clone());
