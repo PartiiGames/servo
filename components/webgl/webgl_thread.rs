@@ -4416,9 +4416,9 @@ unsafe fn copy_luminance_via_cpu(
 }
 
 /// copyTexImage2D. WebGL defines pixels outside the read framebuffer as zero where GL leaves
-/// them undefined, so a partly outside copy allocates a zeroed image and copies the inside
-/// part. Copies into emulated legacy formats (see `luminance_formats`) allocate the R / RG
-/// image and copy through `copy_luminance_via_cpu` when the channels need picking.
+/// them undefined, so a partly outside copy reads the inside part and uploads it inside a
+/// zeroed image. Copies into emulated legacy formats (see `luminance_formats`) go the same
+/// way, picking the channels for the R / RG image.
 unsafe fn copy_tex_image_2d(
     state: &GLState,
     gl: &Gl,
@@ -4451,21 +4451,58 @@ unsafe fn copy_tex_image_2d(
         unsafe { gl.copy_tex_image_2d(target, level, internal_format, x, y, width, height, 0) };
         return;
     }
-    let format = TexFormat::from_gl_constant(internal_format).unwrap_or(TexFormat::RGBA);
-    let (gl_internal_format, gl_format) =
-        luminance_formats(state, gl, target, format, format, gl::UNSIGNED_BYTE);
-    let bytes_per_pixel = match gl_format {
-        gl::RED | gl::ALPHA | gl::LUMINANCE => 1,
-        gl::RG | gl::LUMINANCE_ALPHA => 2,
-        gl::RGB => 3,
-        _ => 4,
+    // Read the part of the source inside the read framebuffer before defining the level: when
+    // the source is another level of the same texture, defining this one can leave the texture
+    // mipmap incomplete and so the read framebuffer incomplete.
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x as i64 + width as i64).min(read_width as i64) as i32;
+    let y1 = (y as i64 + height as i64).min(read_height as i64) as i32;
+    let (width_u, height_u) = (width.max(0) as usize, height.max(0) as usize);
+    // RGBA channels kept per destination pixel, in order.
+    let channels: &[usize] = match internal_format {
+        gl::ALPHA => &[3],
+        gl::LUMINANCE => &[0],
+        gl::LUMINANCE_ALPHA => &[0, 3],
+        gl::RGB => &[0, 1, 2],
+        _ => &[0, 1, 2, 3],
     };
-    let zeros = vec![0u8; width.max(0) as usize * height.max(0) as usize * bytes_per_pixel];
+    let mut image = vec![0u8; width_u * height_u * channels.len()];
     unsafe {
+        let pack_buffer = gl.get_parameter_buffer(gl::PIXEL_PACK_BUFFER_BINDING);
         let unpack_buffer = gl.get_parameter_buffer(gl::PIXEL_UNPACK_BUFFER_BINDING);
+        let pack_alignment = gl.get_parameter_i32(gl::PACK_ALIGNMENT);
         let unpack_alignment = gl.get_parameter_i32(gl::UNPACK_ALIGNMENT);
+        gl.bind_buffer(gl::PIXEL_PACK_BUFFER, None);
         gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, None);
+        gl.pixel_store_i32(gl::PACK_ALIGNMENT, 4);
         gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, 1);
+        if x1 > x0 && y1 > y0 {
+            let (inside_w, inside_h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+            let mut rgba = vec![0u8; inside_w * inside_h * 4];
+            gl.read_pixels(
+                x0,
+                y0,
+                x1 - x0,
+                y1 - y0,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut rgba)),
+            );
+            let (dest_x, dest_y) = ((x0 - x) as usize, (y0 - y) as usize);
+            for row in 0..inside_h {
+                for column in 0..inside_w {
+                    let source = &rgba[(row * inside_w + column) * 4..][..4];
+                    let dest = ((dest_y + row) * width_u + dest_x + column) * channels.len();
+                    for (offset, channel) in channels.iter().enumerate() {
+                        image[dest + offset] = source[*channel];
+                    }
+                }
+            }
+        }
+        let format = TexFormat::from_gl_constant(internal_format).unwrap_or(TexFormat::RGBA);
+        let (gl_internal_format, gl_format) =
+            luminance_formats(state, gl, target, format, format, gl::UNSIGNED_BYTE);
         gl.tex_image_2d(
             target,
             level,
@@ -4475,42 +4512,12 @@ unsafe fn copy_tex_image_2d(
             0,
             gl_format,
             gl::UNSIGNED_BYTE,
-            PixelUnpackData::Slice(Some(&zeros)),
+            PixelUnpackData::Slice(Some(&image)),
         );
+        gl.bind_buffer(gl::PIXEL_PACK_BUFFER, pack_buffer);
         gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, unpack_buffer);
+        gl.pixel_store_i32(gl::PACK_ALIGNMENT, pack_alignment);
         gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpack_alignment);
-    }
-    // The part of the source inside the read framebuffer.
-    let x0 = x.max(0);
-    let y0 = y.max(0);
-    let x1 = (x as i64 + width as i64).min(read_width as i64) as i32;
-    let y1 = (y as i64 + height as i64).min(read_height as i64) as i32;
-    if x1 <= x0 || y1 <= y0 {
-        return;
-    }
-    let destination = (x0 - x, y0 - y, None);
-    let source = (x0, y0, x1 - x0, y1 - y0);
-    let kind = match (emulated, internal_format) {
-        (true, gl::ALPHA) => Some(LuminanceCopy::Alpha),
-        (true, gl::LUMINANCE_ALPHA) => Some(LuminanceCopy::LuminanceAlpha),
-        _ => None,
-    };
-    match kind {
-        Some(kind) => unsafe {
-            copy_luminance_via_cpu(gl, target, level, destination, source, kind)
-        },
-        None => unsafe {
-            gl.copy_tex_sub_image_2d(
-                target,
-                level,
-                destination.0,
-                destination.1,
-                source.0,
-                source.1,
-                source.2,
-                source.3,
-            )
-        },
     }
 }
 
