@@ -373,10 +373,10 @@ impl GenericDrawTarget for VelloDrawTarget {
     }
 
     fn draw_surface_with_shadow(
-        &self,
+        &mut self,
         _surface: Vec<u8>,
         _dest: &Point2D<f32>,
-        _shadow_options: ShadowOptions,
+        _shadow_options: &ShadowOptions,
         _composition_options: CompositionOptions,
     ) {
         log::warn!("no support for drawing shadows");

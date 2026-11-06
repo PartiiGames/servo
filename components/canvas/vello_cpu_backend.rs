@@ -362,20 +362,80 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
         })
     }
 
+    /// Partii: <https://html.spec.whatwg.org/multipage/#shadows>. `surface` is image A (the shape,
+    /// drawn source-over with the global alpha) whose top-left lands at `dest` in device space.
+    /// The shadow is A's alpha in the shadow colour, blurred (Gaussian, sigma = shadowBlur / 2,
+    /// approximated by three box blurs) and offset by shadowOffsetX/Y (not transformed); it is
+    /// composited first, then A, both with the current operator and the clip.
     fn draw_surface_with_shadow(
-        &self,
-        _surface: Self::SourceSurface,
-        _dest: &Point2D<f32>,
-        _shadow_options: ShadowOptions,
-        _composition_options: CompositionOptions,
+        &mut self,
+        surface: Self::SourceSurface,
+        dest: &Point2D<f32>,
+        shadow_options: &ShadowOptions,
+        composition_options: CompositionOptions,
     ) {
-        log::warn!("no support for drawing shadows");
-        /*
-        We will need to do some changes to support drawing shadows with vello, as current abstraction is made for azure.
-        In vello we do not need new draw target (we will use layers) and we need to pass whole rect.
-        offsets will be applied to rect directly. shadow blur will be passed directly to let backend do transforms.
-        */
-        // self_.scene.draw_blurred_rounded_rect(self_.transform, rect, color, 0.0, sigma);
+        let (w, h) = (usize::from(surface.width()), usize::from(surface.height()));
+        if w == 0 || h == 0 {
+            return;
+        }
+        let pad = crate::canvas_data::shadow_blur_padding(shadow_options.blur) as usize;
+        let (sw, sh) = (w + 2 * pad, h + 2 * pad);
+        let options = CompositionOptions {
+            alpha: 1.0,
+            ..composition_options
+        };
+        let dest = Point2D::new(f64::from(dest.x), f64::from(dest.y));
+        if sw <= usize::from(u16::MAX) && sh <= usize::from(u16::MAX) {
+            let mut alpha = vec![0f32; sw * sh];
+            for (y, row) in surface.data().chunks_exact(w).enumerate() {
+                let out = &mut alpha[(y + pad) * sw + pad..(y + pad) * sw + pad + w];
+                for (o, p) in out.iter_mut().zip(row) {
+                    *o = f32::from(p.a) / 255.0;
+                }
+            }
+            if shadow_options.blur > 0.0 {
+                gaussian_blur(&mut alpha, sw, sh, shadow_options.blur / 2.0);
+            }
+            let color: peniko::Color = shadow_options.color.convert();
+            let [r, g, b, a] = color.components;
+            let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            let pixels: Vec<peniko::color::PremulRgba8> = alpha
+                .iter()
+                .map(|&v| {
+                    let ca = (v * a).clamp(0.0, 1.0);
+                    peniko::color::PremulRgba8 {
+                        r: to_u8(r * ca),
+                        g: to_u8(g * ca),
+                        b: to_u8(b * ca),
+                        a: to_u8(ca),
+                    }
+                })
+                .collect();
+            let shadow = Arc::new(vello_cpu::Pixmap::from_parts(pixels, sw as u16, sh as u16));
+            let shadow_dest = Rect::new(
+                Point2D::new(
+                    dest.x - pad as f64 + shadow_options.offset_x,
+                    dest.y - pad as f64 + shadow_options.offset_y,
+                ),
+                Size2D::new(sw as f64, sh as f64),
+            );
+            self.draw_surface(
+                shadow,
+                shadow_dest,
+                Rect::from_size(Size2D::new(sw as f64, sh as f64)),
+                Filter::Nearest,
+                options,
+                Transform2D::identity(),
+            );
+        }
+        self.draw_surface(
+            surface,
+            Rect::new(dest, Size2D::new(w as f64, h as f64)),
+            Rect::from_size(Size2D::new(w as f64, h as f64)),
+            Filter::Nearest,
+            options,
+            Transform2D::identity(),
+        );
     }
 
     fn fill(
@@ -695,6 +755,64 @@ fn paint(style: FillOrStrokeStyle, alpha: f64) -> vello_cpu::PaintType {
                 };
                 vello_cpu::PaintType::Image(image)
             },
+        }
+    }
+}
+
+/// Partii: an in-place Gaussian blur of a `w` x `h` coverage buffer, as three box blurs per axis
+/// (W3C filter-effects' approximation, also what browsers use for canvas shadows).
+fn gaussian_blur(buf: &mut [f32], w: usize, h: usize, sigma: f64) {
+    // Box sizes for three passes: https://www.w3.org/TR/filter-effects-1/#feGaussianBlurElement
+    let d = (sigma * 3.0 * (2.0 * std::f64::consts::PI).sqrt() / 4.0 + 0.5).floor() as usize;
+    if d == 0 {
+        return;
+    }
+    let mut tmp = vec![0f32; w.max(h)];
+    let mut line = vec![0f32; w.max(h)];
+    // Odd d: three centred boxes of size d. Even d: two boxes offset by half a pixel each way,
+    // then one of size d + 1 centred.
+    let passes: [(usize, usize); 3] = if d % 2 == 1 {
+        [(d / 2, d / 2); 3]
+    } else {
+        [(d / 2, d / 2 - 1), (d / 2 - 1, d / 2), (d / 2, d / 2)]
+    };
+    for y in 0..h {
+        line[..w].copy_from_slice(&buf[y * w..(y + 1) * w]);
+        for &(left, right) in &passes {
+            box_blur_line(&line[..w], &mut tmp[..w], left, right);
+            line[..w].copy_from_slice(&tmp[..w]);
+        }
+        buf[y * w..(y + 1) * w].copy_from_slice(&line[..w]);
+    }
+    for x in 0..w {
+        for y in 0..h {
+            line[y] = buf[y * w + x];
+        }
+        for &(left, right) in &passes {
+            box_blur_line(&line[..h], &mut tmp[..h], left, right);
+            line[..h].copy_from_slice(&tmp[..h]);
+        }
+        for y in 0..h {
+            buf[y * w + x] = line[y];
+        }
+    }
+}
+
+/// out[i] = mean of src[i - left ..= i + right] (zero outside), with a running sum.
+fn box_blur_line(src: &[f32], out: &mut [f32], left: usize, right: usize) {
+    let n = src.len();
+    let size = (left + right + 1) as f32;
+    let mut sum = 0f32;
+    for v in src.iter().take(right.min(n)) {
+        sum += v;
+    }
+    for i in 0..n {
+        if i + right < n {
+            sum += src[i + right];
+        }
+        out[i] = sum / size;
+        if i >= left {
+            sum -= src[i - left];
         }
     }
 }

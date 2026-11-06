@@ -95,7 +95,7 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             snapshot
         };
 
-        let writer = |draw_target: &mut DrawTarget, transform| {
+        let writer = |draw_target: &mut DrawTarget, transform, composition_options| {
             write_image::<DrawTarget>(
                 draw_target,
                 snapshot,
@@ -114,13 +114,14 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
 
             self.draw_with_shadow(
                 &rect,
-                shadow_options,
+                0.0,
+                &shadow_options,
                 composition_options,
                 transform,
                 writer,
             );
         } else {
-            writer(&mut self.draw_target, transform);
+            writer(&mut self.draw_target, transform, composition_options);
         }
     }
 
@@ -129,10 +130,24 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         text_bounds: Rect<f64>,
         text_runs: Vec<TextRun>,
         fill_or_stroke_style: FillOrStrokeStyle,
-        _shadow_options: ShadowOptions,
+        shadow_options: ShadowOptions,
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
+        // Partii: text shadows (shadowBlur/shadowOffset were ignored for text).
+        if shadow_options.need_to_draw_shadow() {
+            self.draw_with_shadow(
+                &text_bounds.cast(),
+                TEXT_SHADOW_MARGIN,
+                &shadow_options,
+                composition_options,
+                transform,
+                |target, transform, composition_options| {
+                    target.fill_text(text_runs, fill_or_stroke_style, composition_options, transform);
+                },
+            );
+            return;
+        }
         self.maybe_bound_shape_with_pattern(
             fill_or_stroke_style,
             composition_options,
@@ -152,10 +167,29 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         text_runs: Vec<TextRun>,
         fill_or_stroke_style: FillOrStrokeStyle,
         line_options: LineOptions,
-        _shadow_options: ShadowOptions,
+        shadow_options: ShadowOptions,
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
+        if shadow_options.need_to_draw_shadow() {
+            self.draw_with_shadow(
+                &text_bounds.cast(),
+                TEXT_SHADOW_MARGIN + stroke_margin(&line_options),
+                &shadow_options,
+                composition_options,
+                transform,
+                |target, transform, composition_options| {
+                    target.stroke_text(
+                        text_runs,
+                        fill_or_stroke_style,
+                        line_options,
+                        composition_options,
+                        transform,
+                    );
+                },
+            );
+            return;
+        }
         self.maybe_bound_shape_with_pattern(
             fill_or_stroke_style,
             composition_options,
@@ -188,10 +222,11 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         if shadow_options.need_to_draw_shadow() {
             self.draw_with_shadow(
                 rect,
-                shadow_options,
+                0.0,
+                &shadow_options,
                 composition_options,
                 transform,
-                |new_draw_target, transform| {
+                |new_draw_target, transform, composition_options| {
                     new_draw_target.fill_rect(rect, style, composition_options, transform);
                 },
             );
@@ -230,10 +265,11 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         if shadow_options.need_to_draw_shadow() {
             self.draw_with_shadow(
                 rect,
-                shadow_options,
+                stroke_margin(&line_options),
+                &shadow_options,
                 composition_options,
                 transform,
-                |new_draw_target, transform| {
+                |new_draw_target, transform, composition_options| {
                     new_draw_target.stroke_rect(
                         rect,
                         style,
@@ -267,12 +303,27 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         path: &Path,
         fill_rule: FillRule,
         style: FillOrStrokeStyle,
-        _shadow_options: ShadowOptions,
+        shadow_options: ShadowOptions,
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
         if style.is_zero_size_gradient() {
             return; // Paint nothing if gradient size is zero.
+        }
+
+        // Partii: shadows for fill() (they were ignored for paths).
+        if shadow_options.need_to_draw_shadow() {
+            self.draw_with_shadow(
+                &path.bounding_box().cast(),
+                0.0,
+                &shadow_options,
+                composition_options,
+                transform,
+                |target, transform, composition_options| {
+                    target.fill(path, fill_rule, style, composition_options, transform)
+                },
+            );
+            return;
         }
 
         self.maybe_bound_shape_with_pattern(
@@ -293,12 +344,27 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         path: &Path,
         style: FillOrStrokeStyle,
         line_options: LineOptions,
-        _shadow_options: ShadowOptions,
+        shadow_options: ShadowOptions,
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
         if style.is_zero_size_gradient() {
             return; // Paint nothing if gradient size is zero.
+        }
+
+        // Partii: shadows for stroke() (they were ignored for paths).
+        if shadow_options.need_to_draw_shadow() {
+            self.draw_with_shadow(
+                &path.bounding_box().cast(),
+                stroke_margin(&line_options),
+                &shadow_options,
+                composition_options,
+                transform,
+                |target, transform, composition_options| {
+                    target.stroke(path, style, line_options, composition_options, transform)
+                },
+            );
+            return;
         }
 
         self.maybe_bound_shape_with_pattern(
@@ -367,35 +433,68 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         );
     }
 
-    fn create_draw_target_for_shadow(&self, source_rect: &Rect<f32>) -> DrawTarget {
-        self.draw_target.create_similar_draw_target(&Size2D::new(
-            source_rect.size.width as i32,
-            source_rect.size.height as i32,
-        ))
-    }
-
+    /// <https://html.spec.whatwg.org/multipage/#shadows>
+    ///
+    /// Partii: draws the shape into a layer (image A) covering its device-space bounds, then lets the
+    /// backend composite A's shadow (A's alpha in the shadow colour, blurred, offset) and then A itself
+    /// onto the canvas with the current compositing operator. `rect` is the shape's bounds in user
+    /// space, grown by `margin` user units (stroke width, glyph overhang) before transforming.
+    /// The layer is clipped to what can reach the canvas: the shape itself, or its shadow.
     fn draw_with_shadow<F>(
-        &self,
+        &mut self,
         rect: &Rect<f32>,
-        shadow_options: ShadowOptions,
+        margin: f64,
+        shadow_options: &ShadowOptions,
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
         draw_shadow_source: F,
     ) where
-        F: FnOnce(&mut DrawTarget, Transform2D<f64>),
+        F: FnOnce(&mut DrawTarget, Transform2D<f64>, CompositionOptions),
     {
-        let shadow_src_rect = transform.outer_transformed_rect(&rect.cast());
-        // Because this comes from the rect on f32 precision, casting it down should be ok.
-        let mut new_draw_target = self.create_draw_target_for_shadow(&shadow_src_rect.cast());
-        let shadow_transform = transform
-            .then(&Transform2D::identity().pre_translate(-shadow_src_rect.origin.to_vector()));
-        draw_shadow_source(&mut new_draw_target, shadow_transform);
+        let canvas: Rect<f64> = Rect::from_size(self.draw_target.get_size().cast());
+        let bounds = transform
+            .outer_transformed_rect(&rect.cast::<f64>().inflate(margin, margin))
+            .inflate(1.0, 1.0);
+        let pad = shadow_blur_padding(shadow_options.blur);
+        let shadow_reach = canvas
+            .translate(euclid::default::Vector2D::new(
+                -shadow_options.offset_x,
+                -shadow_options.offset_y,
+            ))
+            .inflate(pad, pad);
+        let Some(layer) = bounds.intersection(&canvas.union(&shadow_reach)) else {
+            return;
+        };
+        let layer = layer.round_out();
+        if layer.is_empty() || !layer.size.width.is_finite() || !layer.size.height.is_finite() {
+            return;
+        }
+        // A far-away shadow would need a huge layer: draw the shape without it then.
+        if layer.area() > 4.0 * canvas.area().max(1.0) ||
+            layer.size.width > 16384.0 ||
+            layer.size.height > 16384.0
+        {
+            draw_shadow_source(&mut self.draw_target, transform, composition_options);
+            return;
+        }
+        let mut layer_target = self
+            .draw_target
+            .create_similar_draw_target(&layer.size.cast());
+        let layer_transform = transform.then_translate(-layer.origin.to_vector());
+        // A is drawn source-over with the global alpha; the real operator applies when compositing.
+        draw_shadow_source(
+            &mut layer_target,
+            layer_transform,
+            CompositionOptions {
+                alpha: composition_options.alpha,
+                composition_operation: CompositionOrBlending::Composition(
+                    CompositionStyle::SourceOver,
+                ),
+            },
+        );
         self.draw_target.draw_surface_with_shadow(
-            new_draw_target.surface(),
-            &Point2D::new(
-                shadow_src_rect.origin.x as f32,
-                shadow_src_rect.origin.y as f32,
-            ),
+            layer_target.surface(),
+            &layer.origin.cast(),
             shadow_options,
             composition_options,
         );
@@ -527,5 +626,23 @@ impl RectToi32 for Rect<f64> {
             Point2D::new(self.origin.x.ceil(), self.origin.y.ceil()),
             Size2D::new(self.size.width.ceil(), self.size.height.ceil()),
         )
+    }
+}
+
+/// Partii: extra user-space margin around text bounds for glyph overhang and antialiasing.
+const TEXT_SHADOW_MARGIN: f64 = 4.0;
+
+/// Partii: how far a stroke can reach outside the path's bounding box (miter joins, square caps).
+fn stroke_margin(line_options: &LineOptions) -> f64 {
+    line_options.width / 2.0 * line_options.miter_limit.max(std::f64::consts::SQRT_2) + 1.0
+}
+
+/// <https://html.spec.whatwg.org/multipage/#when-shadows-are-drawn>: a Gaussian blur with
+/// standard deviation shadowBlur / 2. Returns how far (device pixels) the blurred shadow reaches.
+pub(crate) fn shadow_blur_padding(blur: f64) -> f64 {
+    if blur > 0.0 && blur.is_finite() {
+        (blur / 2.0 * 3.0).ceil() + 1.0
+    } else {
+        0.0
     }
 }

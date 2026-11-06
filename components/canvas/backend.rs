@@ -49,10 +49,10 @@ pub(crate) trait GenericDrawTarget {
         transform: Transform2D<f64>,
     );
     fn draw_surface_with_shadow(
-        &self,
+        &mut self,
         surface: Self::SourceSurface,
         dest: &Point2D<f32>,
-        shadow_options: ShadowOptions,
+        shadow_options: &ShadowOptions,
         composition_options: CompositionOptions,
     );
     fn fill(
