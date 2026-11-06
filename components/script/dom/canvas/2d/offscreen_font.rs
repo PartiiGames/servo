@@ -13,7 +13,7 @@
 use std::cell::OnceCell;
 use std::fmt;
 
-use cssparser::{Parser, ParserInput};
+use cssparser::Parser;
 use euclid::{Scale, Size2D};
 use servo_arc::Arc as ServoArc;
 use style::context::QuirksMode;
@@ -91,8 +91,7 @@ thread_local! {
 /// query would otherwise accept any declaration value.
 pub(super) fn parse_canvas_font(value: &str, url: &UrlExtraData) -> Option<font::Longhands> {
     let context = parser_context_for_anonymous_content(CssRuleType::Style, ParsingMode::DEFAULT, url);
-    let mut input = ParserInput::new(value);
-    let mut parser = Parser::new(&mut input);
+    let mut parser = Parser::new(value);
     let longhands = parser
         .parse_entirely(|parser| font::parse_value(&context, parser))
         .ok()?;
