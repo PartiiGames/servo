@@ -792,6 +792,37 @@ impl IDBTransaction {
         }
     }
 
+    /// Partii: a forced <https://w3c.github.io/IndexedDB/#close-a-database-connection> step 2
+    /// while the global still runs script: abort the transaction with an "AbortError" (its
+    /// pending requests get error events, then it gets its abort event). The backend has
+    /// aborted it already.
+    pub(crate) fn abort_for_forced_close(&self, cx: &mut JSContext) {
+        if self.finished.get() {
+            return;
+        }
+        self.active.set(false);
+        self.initiate_abort(cx, Error::Abort(None));
+        self.finalize_abort();
+    }
+
+    /// Partii: a forced close when the global can no longer run script (its event loop is
+    /// gone or discards tasks): the backend has aborted the transaction and nothing can observe
+    /// its abort, so it finishes at once, drops its requests and leaves the global's list.
+    pub(crate) fn finish_after_forced_close(&self) {
+        if self.finished.get() {
+            return;
+        }
+        self.active.set(false);
+        self.abort_initiated.set(true);
+        self.finished.set(true);
+        self.requests.borrow_mut().clear();
+        if self.registered_in_global.get() &&
+            let Some(factory) = self.global().indexeddb_factory()
+        {
+            factory.unregister_indexeddb_transaction(self);
+        }
+    }
+
     /// Partii: whether the transaction was aborted or finished, after which the backend's
     /// answers to its requests are ignored.
     pub(crate) fn is_aborted_or_finished(&self) -> bool {
