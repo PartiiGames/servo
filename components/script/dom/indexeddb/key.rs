@@ -18,7 +18,8 @@ use js::rust::wrappers2::{
     JS_NewObject, NewDateObject, ObjectIsDate, SameValue,
 };
 use js::rust::{HandleValue, MutableHandleValue};
-use js::typedarray::{ArrayBuffer, ArrayBufferU8, ArrayBufferView};
+use js::jsapi::{GetArrayBufferViewLengthAndData, UnwrapArrayBufferView};
+use js::typedarray::{ArrayBuffer, ArrayBufferU8};
 use storage_traits::indexeddb::{BackendError, IndexedDBKeyRange, IndexedDBKeyType};
 
 use crate::dom::bindings::buffer_source::create_buffer_source;
@@ -307,9 +308,22 @@ pub fn convert_value_to_key(
                     let array_buffer = ArrayBuffer::from(*object).map_err(|()| Error::JSFailed)?;
                     array_buffer.to_vec()
                 } else {
-                    let array_buffer_view =
-                        ArrayBufferView::from(*object).map_err(|()| Error::JSFailed)?;
-                    array_buffer_view.to_vec()
+                    // Partii: copy through the raw JSAPI. mozjs's ArrayBufferView wrapper asserts the view
+                    // is not on shared memory, so a SharedArrayBuffer-backed view crashed the content
+                    // process here (IndexedDB/sharedarraybuffer-key.https.html); browsers copy its bytes.
+                    let view = UnwrapArrayBufferView(*object);
+                    if view.is_null() {
+                        return Err(Error::JSFailed);
+                    }
+                    let mut len = 0;
+                    let mut shared = false;
+                    let mut data: *mut u8 = std::ptr::null_mut();
+                    GetArrayBufferViewLengthAndData(view, &mut len, &mut shared, &mut data);
+                    Some(if data.is_null() || len == 0 {
+                        Vec::new()
+                    } else {
+                        std::slice::from_raw_parts(data, len).to_vec()
+                    })
                 }
                 .expect("Already checked for detached buffers");
                 // 3.3. Return a new key with type binary and value bytes.
