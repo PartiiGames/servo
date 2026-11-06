@@ -495,7 +495,15 @@ impl Event {
                         },
                         _ => false,
                     };
-                if parent.is::<Window>() || root_is_shadow_inclusive_ancestor {
+                // Partii: a parent that is not a node, reached from a target that is not a node
+                // either (IndexedDB's request -> transaction -> connection), needs no retargeting:
+                // the event's target stays the original target there, as in other browsers.
+                let non_node_parent_of_non_node =
+                    parent.downcast::<Node>().is_none() && target.downcast::<Node>().is_none();
+                if parent.is::<Window>() ||
+                    root_is_shadow_inclusive_ancestor ||
+                    non_node_parent_of_non_node
+                {
                     // Step 6.9.6.1. If isActivationEvent is true, event’s bubbles attribute is true, activationTarget
                     // is null, and parent has activation behavior, then set activationTarget to parent.
                     if is_activation_event &&
