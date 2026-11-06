@@ -86,7 +86,7 @@ impl PartiiHotMethods<crate::DomTypeHolder> for PartiiHot {
 
     #[expect(unsafe_code)]
     fn Call(_global: &GlobalScope, name: DOMString, args: Vec<HandleValue>) -> Fallible<f64> {
-        let name = name.str();
+        let name = String::from(&*name.str());
         let Some(f) = lookup(&name) else {
             return Err(type_error(format!("PartiiHot: no hot function {name}")));
         };
