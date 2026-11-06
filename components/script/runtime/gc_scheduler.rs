@@ -23,6 +23,7 @@
 //!
 //! `PARTII_GC_SCHED=0` turns all of it off (SpiderMonkey's triggers only, as before).
 //! `PARTII_GC_SCHED_LOG=1` prints one line per scheduled GC to stderr.
+//! `PARTII_GC_DECOMMIT_EVERY_GC=1`: decommit after every GC again (default: only the idle shrink).
 
 #![allow(unsafe_code)]
 
@@ -32,13 +33,17 @@ use std::time::{Duration, Instant};
 
 use js::context::JSContext;
 use js::jsapi::{GCOptions, GCReason, JSGCParamKey};
-use js::rust::wrappers2::{JS_GetGCParameter, NonIncrementalGC, PrepareForFullGC};
+use js::rust::wrappers2::{
+    JS_GetGCParameter, JS_SetGCParameter, NonIncrementalGC, PrepareForFullGC,
+};
 
 struct Config {
     enabled: bool,
     period: Duration,
     idle: Duration,
     log: bool,
+    /// Decommit free arenas only in the idle shrinking GC, not after every periodic GC.
+    decommit_idle_only: bool,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -57,6 +62,10 @@ fn config() -> &'static Config {
         period: env_ms("PARTII_GC_PERIOD_MS", 5000),
         idle: env_ms("PARTII_GC_IDLE_MS", 2000),
         log: matches!(std::env::var("PARTII_GC_SCHED_LOG").as_deref(), Ok("1")),
+        decommit_idle_only: !matches!(
+            std::env::var("PARTII_GC_DECOMMIT_EVERY_GC").as_deref(),
+            Ok("1")
+        ),
     })
 }
 
@@ -82,6 +91,8 @@ struct State {
     last_task: Cell<Instant>,
     /// Whether anything ran since the last shrinking GC.
     dirty_since_shrink: Cell<bool>,
+    /// Whether this runtime's GC parameters were adjusted for the schedule.
+    tuned: Cell<bool>,
 }
 
 thread_local! {
@@ -92,6 +103,7 @@ thread_local! {
         last_pause: Cell::new(Duration::ZERO),
         last_task: Cell::new(Instant::now()),
         dirty_since_shrink: Cell::new(false),
+        tuned: Cell::new(false),
     };
 }
 
@@ -169,6 +181,18 @@ pub(crate) fn after_tasks(cx: &mut JSContext, kind: Kind) {
         let now = Instant::now();
         state.last_task.set(now);
         state.dirty_since_shrink.set(true);
+        if !state.tuned.replace(true) && config.decommit_idle_only {
+            // A normal GC decommits free arenas unless GCs are "high frequency" (closer together than
+            // this limit). At one GC every few seconds that was ~2 ms of every pause (and the arenas
+            // were committed again right after); count our period as high frequency, so only the idle
+            // shrinking GC decommits. PARTII_GC_DECOMMIT_EVERY_GC=1 keeps SpiderMonkey's default.
+            let limit_ms = (config.period.as_millis() as u32)
+                .saturating_mul(2)
+                .max(1000);
+            unsafe {
+                JS_SetGCParameter(cx, JSGCParamKey::JSGC_HIGH_FREQUENCY_TIME_LIMIT, limit_ms);
+            }
+        }
         sync_major(cx, state, now);
         let period = config.period.max(state.last_pause.get() * 50);
         if now - state.last_major.get() < period {
