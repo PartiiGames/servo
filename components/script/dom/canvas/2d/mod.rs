@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 mod canvas_state;
+mod offscreen_font;
 pub(crate) mod canvasgradient;
 pub(crate) mod canvaspattern;
 pub(crate) mod canvasrenderingcontext2d;

@@ -40,7 +40,7 @@ use style::color::{AbsoluteColor, ColorFlags, ColorSpace};
 use style::computed_values::font_variant_position::T as FontVariantPosition;
 use style::properties::longhands::font_variant_caps::computed_value::T as FontVariantCaps;
 use style::properties::style_structs::Font;
-use style::stylesheets::CssRuleType;
+use style::stylesheets::{CssRuleType, UrlExtraData};
 use style::values::computed::color::Color as ComputedColor;
 use style::values::computed::font::FontStyle;
 use style::values::computed::{
@@ -1583,7 +1583,7 @@ impl CanvasState {
         }
 
         if self.state.borrow().font_style.is_none() {
-            self.set_font(canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
+            self.set_font(global_scope, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
         }
         // This may be `None` if if this is offscreen canvas, in which case just use
         // the initial values for the text style.
@@ -1627,7 +1627,7 @@ impl CanvasState {
         }
 
         if self.state.borrow().font_style.is_none() {
-            self.set_font(canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
+            self.set_font(global_scope, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
         }
         // This may be `None` if if this is offscreen canvas, in which case just use
         // the initial values for the text style.
@@ -1672,7 +1672,7 @@ impl CanvasState {
         // > Step 3: Let font be the current font of target, as given by that object's font
         // > attribute.
         if self.state.borrow().font_style.is_none() {
-            self.set_font(canvas, CanvasContextState::DEFAULT_FONT_STYLE.into());
+            self.set_font(global, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into());
         }
 
         let font_context = &global.font_context();
@@ -1743,10 +1743,25 @@ impl CanvasState {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-font>
-    pub(super) fn set_font(&self, canvas: Option<&HTMLCanvasElement>, value: DOMString) {
+    pub(super) fn set_font(
+        &self,
+        global: &GlobalScope,
+        canvas: Option<&HTMLCanvasElement>,
+        value: DOMString,
+    ) {
         let canvas = match canvas {
             Some(element) => element,
-            None => return, // offscreen canvas doesn't have a placeholder canvas
+            // Partii: an OffscreenCanvas with no placeholder: parse and compute the value with no
+            // element (it used to be ignored).
+            None => {
+                let url: UrlExtraData = global.api_base_url().into_url().into();
+                if let Some(font) =
+                    super::offscreen_font::resolve_font_without_element(&value.str(), &url)
+                {
+                    self.state.borrow_mut().font_style = Some(font);
+                }
+                return;
+            },
         };
         let node = canvas.upcast::<Node>();
         let window = canvas.owner_window();
