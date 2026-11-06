@@ -1894,7 +1894,33 @@ impl WebGLImpl {
                 // instead of a zero-filled copy). Zeros need no premultiply or flip, so upload a fresh
                 // zeroed buffer (calloc: untouched pages) instead of copying and converting one.
                 // Phaser's boot makes ~80 full-canvas render targets this way (hexii's start frame).
-                let pixels = if data.is_empty() && size.width > 0 && size.height > 0 {
+                // A colour-renderable level is instead allocated with no data and cleared to zero
+                // through a temporary framebuffer (tex_image_2d_cleared): no upload at all on a GPU,
+                // and llvmpipe's threads do the clear. `PARTII_WEBGL_TEX_CLEAR=0` keeps the upload.
+                let zero_fill = data.is_empty() && size.width > 0 && size.height > 0;
+                if zero_fill && tex_clear_enabled() {
+                    let (internal_format, format) = luminance_formats(
+                        state,
+                        gl,
+                        target,
+                        internal_format,
+                        format,
+                        effective_data_type,
+                    );
+                    if Self::tex_image_2d_cleared(
+                        gl,
+                        state,
+                        target,
+                        level as i32,
+                        internal_format,
+                        size,
+                        format,
+                        effective_data_type,
+                    ) {
+                        return;
+                    }
+                }
+                let pixels = if zero_fill {
                     let cpp = data_type.element_size() * format.components() /
                         data_type.components_per_element();
                     let a = unpacking_alignment.max(1);
@@ -3069,6 +3095,90 @@ impl WebGLImpl {
             gl.tex_parameter_i32(target, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
         }
         *slot = Some(texture);
+    }
+
+    /// Partii (perf): allocates a texture level with no data and clears it to zero through a temporary
+    /// framebuffer, leaving all GL state as it was. Returns false (and allocates nothing) when the level
+    /// can't be cleared that way (a depth / stencil / integer format, a bound pixel unpack buffer, a GL
+    /// before 3.0) or (with the level allocated, uninitialised) when a framebuffer with it isn't
+    /// complete; the caller then uploads zeros. The texture is the one bound to `target` on the active
+    /// unit, as for texImage2D itself.
+    #[allow(clippy::too_many_arguments)]
+    fn tex_image_2d_cleared(
+        gl: &Gl,
+        state: &GLState,
+        target: u32,
+        level: i32,
+        internal_format: u32,
+        size: Size2D<u32>,
+        format: u32,
+        data_type: u32,
+    ) -> bool {
+        if !matches!(format, gl::RGBA | gl::RGB | gl::RG | gl::RED | gl::BGRA) {
+            return false;
+        }
+        let binding = match target {
+            gl::TEXTURE_2D => gl::TEXTURE_BINDING_2D,
+            gl::TEXTURE_CUBE_MAP_POSITIVE_X..=gl::TEXTURE_CUBE_MAP_NEGATIVE_Z => {
+                gl::TEXTURE_BINDING_CUBE_MAP
+            },
+            _ => return false,
+        };
+        unsafe {
+            if gl.version().major < 3 || gl.get_parameter_i32(gl::PIXEL_UNPACK_BUFFER_BINDING) != 0 {
+                return false;
+            }
+            let Some(texture) = NonZeroU32::new(gl.get_parameter_i32(binding) as u32) else {
+                return false;
+            };
+            let texture = glow::NativeTexture(texture);
+            gl.tex_image_2d(
+                target,
+                level,
+                internal_format as i32,
+                size.width as i32,
+                size.height as i32,
+                0,
+                format,
+                data_type,
+                PixelUnpackData::Slice(None),
+            );
+            let read = gl.get_parameter_framebuffer(gl::READ_FRAMEBUFFER_BINDING);
+            let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
+            let Ok(fbo) = gl.create_framebuffer() else {
+                return false;
+            };
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                gl::DRAW_FRAMEBUFFER,
+                gl::COLOR_ATTACHMENT0,
+                target,
+                Some(texture),
+                level,
+            );
+            let complete =
+                gl.check_framebuffer_status(gl::DRAW_FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
+            if complete {
+                let discard = gl.is_enabled(gl::RASTERIZER_DISCARD);
+                if discard {
+                    gl.disable(gl::RASTERIZER_DISCARD);
+                }
+                gl.disable(gl::SCISSOR_TEST);
+                gl.color_mask(true, true, true, true);
+                gl.clear_color(0., 0., 0., 0.);
+                gl.clear(gl::COLOR_BUFFER_BIT);
+                if discard {
+                    gl.enable(gl::RASTERIZER_DISCARD);
+                }
+            }
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
+            gl.bind_framebuffer(gl::READ_FRAMEBUFFER, read);
+            gl.delete_framebuffer(fbo);
+            state.restore_clear_invariant(gl);
+            state.restore_scissor_invariant(gl);
+            state.restore_alpha_invariant(gl);
+            complete
+        }
     }
 
     fn initialize_framebuffer(gl: &Gl, state: &GLState, color: bool, depth: bool, stencil: bool) {
@@ -4383,6 +4493,13 @@ unsafe fn copy_tex_image_2d(
             )
         },
     }
+}
+
+/// Partii (perf): texImage2D(null) clears colour-renderable levels instead of uploading zeros, unless
+/// `PARTII_WEBGL_TEX_CLEAR=0` (A/B switch).
+fn tex_clear_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_TEX_CLEAR").map_or(true, |v| v != "0"))
 }
 
 /// Partii (perf stream): `PARTII_WEBGL_STATS` set logs WebGL context creation timing to stderr.
