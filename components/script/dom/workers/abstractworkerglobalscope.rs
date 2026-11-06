@@ -17,6 +17,7 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::worker::TrustedWorkerAddress;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
 use crate::realms::enter_auto_realm;
+use crate::runtime::gc_scheduler;
 use crate::tasks::task_queue::{QueuedTaskConversion, TaskQueue};
 
 pub(crate) trait WorkerEventLoopMethods {
@@ -63,6 +64,10 @@ pub(crate) fn run_worker_event_loop<T, WorkerMsg, Event>(
     let animation_frame_tick_receiver = worker_scope
         .animation_frame_tick_receiver()
         .unwrap_or(&animation_frame_tick_never);
+    // Wake up by ourselves once the worker has been idle long enough for an idle GC.
+    let idle_gc = gc_scheduler::idle_deadline()
+        .map(crossbeam_channel::at)
+        .unwrap_or_else(crossbeam_channel::never);
 
     let event = select! {
         recv(worker_scope.control_receiver()) -> msg => match msg {
@@ -85,6 +90,10 @@ pub(crate) fn run_worker_event_loop<T, WorkerMsg, Event>(
             Ok(Err(_)) | Err(_) => None,
         },
         recv(scope.timer_scheduler().wait_channel()) -> _ => Some(T::from_timer_msg()),
+        recv(idle_gc) -> _ => {
+            gc_scheduler::on_idle(cx);
+            return;
+        },
     };
 
     // Worker channels can be closed during teardown (for example, after an
@@ -134,4 +143,5 @@ pub(crate) fn run_worker_event_loop<T, WorkerMsg, Event>(
     worker_scope
         .upcast::<GlobalScope>()
         .perform_a_dom_garbage_collection_checkpoint();
+    gc_scheduler::after_tasks(cx, gc_scheduler::Kind::Worker);
 }

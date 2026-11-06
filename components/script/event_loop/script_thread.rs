@@ -158,6 +158,7 @@ use crate::mime::{APPLICATION, CHARSET, MimeExt, TEXT, XML};
 use crate::modules::script_module::ScriptFetchOptions;
 use crate::navigation::{InProgressLoad, NavigationListener};
 use crate::realms::enter_auto_realm;
+use crate::runtime::gc_scheduler;
 use crate::runtime::job_queue::{MicrotaskRunnable, job_queue_microtask_checkpoint};
 use crate::runtime::script_runtime::{
     IntroductionType, Runtime, ScriptThreadEventCategory, ThreadSafeJSContext, get_reports,
@@ -1694,6 +1695,9 @@ impl ScriptThread {
             cx.no_gc(),
             built_any_display_lists,
         );
+
+        // A periodic GC, if one is due, right after the frame (runtime/gc_scheduler.rs).
+        gc_scheduler::after_tasks(cx, gc_scheduler::Kind::Window);
 
         true
     }
