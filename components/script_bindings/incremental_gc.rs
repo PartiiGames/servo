@@ -270,7 +270,7 @@ mod tests {
 
     use js::jsapi::{
         GCContext, GCOptions, GCReason, Heap, JSCLASS_FOREGROUND_FINALIZE, JSClass, JSClassOps,
-        JSGCParamKey, JSObject, OnNewGlobalHookOption, SliceBudget,
+        JSGCParamKey, JSObject, JSTracer, OnNewGlobalHookOption, SliceBudget,
     };
     use js::realm::AutoRealm;
     use js::rooted;
@@ -278,7 +278,10 @@ mod tests {
         FinishIncrementalGC, IncrementalGCSlice, IsIncrementalGCInProgress, JS_GC,
         JS_NewGlobalObject, JS_NewObject, JS_SetGCParameter, PrepareForFullGC, StartIncrementalGC,
     };
-    use js::rust::{JSEngine, RealmOptions, Runtime, SIMPLE_GLOBAL_CLASS};
+    use js::rust::{
+        CompileOptionsWrapper, JSEngine, RealmOptions, Runtime, SIMPLE_GLOBAL_CLASS,
+        evaluate_script,
+    };
 
     use super::*;
 
@@ -465,6 +468,186 @@ mod tests {
             assert!(DEAD_FINALIZED.load(Ordering::SeqCst));
             assert!(!LIVE_FINALIZED.load(Ordering::SeqCst));
             assert!(!live.get().is_null());
+        }
+    }
+
+    // The move case: a Rust edge moved, without a barrier, out of an object marking hasn't
+    // reached into one it has already scanned.
+    thread_local! {
+        static FIELD1: Box<Heap<*mut JSObject>> = Heap::boxed(ptr::null_mut());
+        static FIELD2: Box<Heap<*mut JSObject>> = Heap::boxed(ptr::null_mut());
+        static OWNER1: Box<Heap<*mut JSObject>> = Heap::boxed(ptr::null_mut());
+        static OWNER2: Box<Heap<*mut JSObject>> = Heap::boxed(ptr::null_mut());
+        static SLOT1: Box<Cell<usize>> = Box::new(Cell::new(UNREGISTERED));
+        static SLOT2: Box<Cell<usize>> = Box::new(Cell::new(UNREGISTERED));
+    }
+    static CHILD_FINALIZED: AtomicBool = AtomicBool::new(false);
+
+    unsafe fn trace_heap(trc: *mut JSTracer, heap: &Heap<*mut JSObject>) {
+        unsafe { crate::trace::trace_object(trc, "field", heap) };
+    }
+    unsafe extern "C" fn trace_owner1(trc: *mut JSTracer, _: *mut JSObject) {
+        FIELD1.with(|f| unsafe { trace_heap(trc, f) });
+        OWNER1.with(|f| unsafe { trace_heap(trc, f) });
+    }
+    unsafe extern "C" fn trace_owner2(trc: *mut JSTracer, _: *mut JSObject) {
+        FIELD2.with(|f| unsafe { trace_heap(trc, f) });
+        OWNER2.with(|f| unsafe { trace_heap(trc, f) });
+    }
+    unsafe extern "C" fn finalize_child(_: *mut GCContext, _: *mut JSObject) {
+        CHILD_FINALIZED.store(true, Ordering::SeqCst);
+    }
+    unsafe extern "C" fn finalize_nothing(_: *mut GCContext, _: *mut JSObject) {}
+
+    const fn traced_ops(trace: unsafe extern "C" fn(*mut JSTracer, *mut JSObject)) -> JSClassOps {
+        JSClassOps {
+            trace: Some(trace),
+            ..ops(finalize_nothing)
+        }
+    }
+    static OWNER1_OPS: JSClassOps = traced_ops(trace_owner1);
+    static OWNER2_OPS: JSClassOps = traced_ops(trace_owner2);
+    static CHILD_OPS: JSClassOps = ops(finalize_child);
+    static OWNER1_CLASS: JSClass = JSClass {
+        name: c"IncrementalGcOwner1".as_ptr(),
+        flags: JSCLASS_FOREGROUND_FINALIZE,
+        cOps: &OWNER1_OPS,
+        spec: ptr::null(),
+        ext: ptr::null(),
+        oOps: ptr::null(),
+    };
+    static OWNER2_CLASS: JSClass = JSClass {
+        name: c"IncrementalGcOwner2".as_ptr(),
+        flags: JSCLASS_FOREGROUND_FINALIZE,
+        cOps: &OWNER2_OPS,
+        spec: ptr::null(),
+        ext: ptr::null(),
+        oOps: ptr::null(),
+    };
+    static CHILD_CLASS: JSClass = JSClass {
+        name: c"IncrementalGcChild".as_ptr(),
+        flags: JSCLASS_FOREGROUND_FINALIZE,
+        cOps: &CHILD_OPS,
+        spec: ptr::null(),
+        ext: ptr::null(),
+        oOps: ptr::null(),
+    };
+
+    /// owner1 is rooted (scanned early); owner2 sits at the end of a long chain (scanned late)
+    /// and holds the child. Mid-mark the child moves from owner2's Rust field to owner1's with no
+    /// barrier. With the black remark between slices the child survives; without it (the control
+    /// run) it is normally collected, which shows the test exercises the hazard.
+    #[test]
+    fn black_remark_catches_a_moved_edge() {
+        let engine = JSEngine::init().unwrap();
+        let mut runtime = Runtime::new(engine.handle());
+        let cx = runtime.cx();
+        enable();
+        unsafe {
+            rooted!(&in(cx) let global = JS_NewGlobalObject(
+                cx,
+                &SIMPLE_GLOBAL_CLASS,
+                ptr::null_mut(),
+                OnNewGlobalHookOption::FireOnNewGlobalHook,
+                &*RealmOptions::default(),
+            ));
+            let mut realm = AutoRealm::new_from_handle(cx, global.handle());
+            let cx = &mut realm;
+            JS_SetGCParameter(cx, JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED, 1);
+
+            let mut outcomes = vec![];
+            for with_remark in [false, true] {
+                CHILD_FINALIZED.store(false, Ordering::SeqCst);
+                rooted!(&in(cx) let owner1 = JS_NewObject(cx, &OWNER1_CLASS));
+                rooted!(&in(cx) let mut owner2 = JS_NewObject(cx, &OWNER2_CLASS));
+                let child = JS_NewObject(cx, &CHILD_CLASS);
+                OWNER1.with(|h| h.set(owner1.get()));
+                OWNER2.with(|h| h.set(owner2.get()));
+                FIELD2.with(|h| h.set(child));
+                OWNER1.with(|h| SLOT1.with(|s| register(h, s)));
+                OWNER2.with(|h| SLOT2.with(|s| register(h, s)));
+
+                // owner2 at the end of a 20000-object chain, reachable only through it.
+                rooted!(&in(cx) let o2 = js::jsval::ObjectValue(owner2.get()));
+                assert!(js::rust::wrappers2::JS_SetProperty(
+                    cx,
+                    global.handle().into(),
+                    c"o2".as_ptr(),
+                    o2.handle().into()
+                ));
+                owner2.set(ptr::null_mut());
+                rooted!(&in(cx) let mut head = js::jsval::UndefinedValue());
+                let options = CompileOptionsWrapper::new(cx, c"chain".to_owned(), 1);
+                assert!(evaluate_script(
+                    cx,
+                    global.handle(),
+                    "var h = {}, c = h; for (var i = 0; i < 20000; i++) { c.n = {}; c = c.n; } c.o2 = o2; delete globalThis.o2; h",
+                    head.handle_mut(),
+                    options,
+                )
+                .is_ok());
+                // Tenure everything (the traced fields follow).
+                JS_GC(cx, GCReason::API);
+                assert!(
+                    !CHILD_FINALIZED.load(Ordering::SeqCst),
+                    "the child is reachable before the GC"
+                );
+
+                PrepareForFullGC(cx);
+                StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
+                // A few slices in: owner1 marked, the chain (and so owner2) not reached yet.
+                let owner2_ptr = OWNER2.with(|h| h.get());
+                let mut slices = 0;
+                while IsIncrementalGCInProgress(cx)
+                    && !(is_marked_any(owner1.get()) && slices >= 50)
+                    && slices < 100_000
+                {
+                    IncrementalGCSlice(cx, GCReason::API, &work_budget(100));
+                    slices += 1;
+                }
+                assert!(
+                    IsIncrementalGCInProgress(cx),
+                    "the GC ended before the move ({slices} slices)"
+                );
+                let owner2_reached = is_marked_any(owner2_ptr);
+                // The move, with no barrier on either side.
+                let moved =
+                    FIELD2.with(|h| std::mem::replace(&mut *h.get_unsafe(), ptr::null_mut()));
+                FIELD1.with(|h| *h.get_unsafe() = moved);
+                if with_remark {
+                    let done = black_remark(cx.raw_cx(), None);
+                    assert!(
+                        done.traced >= 1 && done.edges >= 1,
+                        "the black remark traced owner1"
+                    );
+                }
+                FinishIncrementalGC(cx, GCReason::API);
+                let died = CHILD_FINALIZED.load(Ordering::SeqCst);
+                outcomes.push((with_remark, owner2_reached, died, slices));
+                if died {
+                    FIELD1.with(|h| *h.get_unsafe() = ptr::null_mut());
+                }
+                SLOT1.with(|s| unregister(s));
+                SLOT2.with(|s| unregister(s));
+                FIELD1.with(|h| *h.get_unsafe() = ptr::null_mut());
+                OWNER1.with(|h| *h.get_unsafe() = ptr::null_mut());
+                OWNER2.with(|h| *h.get_unsafe() = ptr::null_mut());
+                head.set(js::jsval::UndefinedValue());
+            }
+            eprintln!(
+                "black_remark_catches_a_moved_edge: (remark, owner2 reached before the move, child died, slices) = {outcomes:?}"
+            );
+            let (_, _, control_died, _) = outcomes[0];
+            if !control_died {
+                eprintln!(
+                    "warning: the control run's child survived without the remark; the move wasn't a hazard this time"
+                );
+            }
+            let (_, _, died, _) = outcomes[1];
+            assert!(
+                !died,
+                "the child moved into an already-marked owner was collected despite the black remark"
+            );
         }
     }
 }
