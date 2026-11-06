@@ -924,6 +924,16 @@ impl HTMLIFrameElement {
         // document later
         let pipeline_id = self.pipeline_id.get();
 
+        // Partii: unload the child's document (pagehide, unload) before it is destroyed, as
+        // Chromium and Gecko do, so `unload` handlers in a removed same-thread iframe run (and
+        // can send keepalive fetches and messages). A document in another script thread is
+        // unloaded by the constellation while it handles `RemoveIFrame`.
+        if let Some(child_document) = pipeline_id.and_then(ScriptThread::find_document) {
+            if child_document.is_fully_active() {
+                child_document.unload(cx, false);
+            }
+        }
+
         // Step 3. Set container's content navigable to null.
         //
         // Resetting the pipeline_id to None is required here so that
