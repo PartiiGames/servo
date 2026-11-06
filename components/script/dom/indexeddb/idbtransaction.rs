@@ -775,7 +775,8 @@ impl IDBTransaction {
             .map(|request| Trusted::new(&**request))
             .collect();
         let global = self.global();
-        let task_source = global.task_manager().database_access_task_source();
+        let task_manager = global.task_manager();
+        let task_source = task_manager.database_access_task_source();
         for request in pending {
             task_source.queue(task!(abort_pending_request: move |cx| {
                 request.root().abort_with_abort_error(cx);
