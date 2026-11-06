@@ -990,6 +990,23 @@ impl SqliteEngine {
         Ok(CreateObjectResult::Created)
     }
 
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-name> step 9, "set store's
+    /// name to name". Its records and indexes refer to the store by id, so they follow.
+    fn rename_store(
+        connection: &Connection,
+        store_name: &str,
+        new_name: &str,
+    ) -> Result<(), Error> {
+        let renamed = connection.execute(
+            "UPDATE object_store SET name = ? WHERE name = ?",
+            params![new_name, store_name],
+        )?;
+        if renamed == 0 {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
     fn rename_index(
         connection: &Connection,
         store_name: &str,
@@ -1201,6 +1218,14 @@ impl SqliteEngine {
             },
             AsyncOperation::Schema(AsyncSchemaOperation::DeleteObjectStore { callback }) => {
                 if let Err(error) = Self::delete_store(connection, &request.store_name) {
+                    let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
+                }
+            },
+            AsyncOperation::Schema(AsyncSchemaOperation::RenameObjectStore {
+                new_name,
+                callback,
+            }) => {
+                if let Err(error) = Self::rename_store(connection, &request.store_name, &new_name) {
                     let _ = callback.send(BackendError::DbErr(format!("{error:?}")));
                 }
             },
@@ -1461,6 +1486,7 @@ mod tests {
     use std::sync::Arc;
 
     use profile_traits::generic_callback::GenericCallback;
+    use rusqlite::params;
     use serde::{Deserialize, Serialize};
     use servo_base::generic_channel::{self, GenericReceiver, GenericSender};
     use servo_base::id::{PIPELINE_NAMESPACE, PipelineNamespace, PipelineNamespaceId, WebViewId};
@@ -1470,9 +1496,9 @@ mod tests {
         ClientStorageThreadHandle, StorageIdentifier, StorageProxyMap, StorageType,
     };
     use storage_traits::indexeddb::{
-        AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, BackendResult,
-        CreateObjectResult, IndexKeys, IndexedDBDirection, IndexedDBKeyRange, IndexedDBKeyType,
-        IndexedDBTxnMode, KeyPath, PutItemResult,
+        AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
+        BackendResult, CreateObjectResult, IndexKeys, IndexedDBDirection, IndexedDBKeyRange,
+        IndexedDBKeyType, IndexedDBTxnMode, KeyPath, PutItemResult,
     };
     use url::Host;
 
@@ -2137,6 +2163,62 @@ mod tests {
         assert!(db.begin_transaction(3).is_ok());
         db.rollback_transaction(3);
         assert_eq!(record_count(&db), 1, "committed data survives");
+    }
+
+    fn rename_store_request(store_name: &str, new_name: &str) -> KvsOperation {
+        KvsOperation {
+            store_name: store_name.to_owned(),
+            operation: AsyncOperation::Schema(AsyncSchemaOperation::RenameObjectStore {
+                callback: GenericCallback::new(|_| {}).unwrap(),
+                new_name: new_name.to_owned(),
+            }),
+        }
+    }
+
+    /// Partii: a store renamed in an upgrade transaction keeps its records; the rename is undone
+    /// when the transaction aborts and kept when it commits.
+    #[test]
+    fn test_rename_store_rolls_back_and_commits() {
+        let (_temp_dir, _proxy_map, _handle, db) = open_engine();
+        db.create_store("store", None, false).unwrap();
+        let (sender, receiver) = generic_channel::channel().unwrap();
+        run_batch(
+            &db,
+            1,
+            IndexedDBTxnMode::Readwrite,
+            vec![put_request("store", 1.0, vec![1], sender.clone())],
+        );
+        assert!(receiver.recv().unwrap().is_ok());
+        db.commit_transaction(1).unwrap();
+
+        run_batch(
+            &db,
+            2,
+            IndexedDBTxnMode::Versionchange,
+            vec![rename_store_request("store", "renamed")],
+        );
+        assert_eq!(db.object_store_names().unwrap(), vec!["renamed".to_owned()]);
+        db.rollback_transaction(2);
+        assert_eq!(db.object_store_names().unwrap(), vec!["store".to_owned()]);
+
+        run_batch(
+            &db,
+            3,
+            IndexedDBTxnMode::Versionchange,
+            vec![rename_store_request("store", "renamed")],
+        );
+        db.commit_transaction(3).unwrap();
+        assert_eq!(db.object_store_names().unwrap(), vec!["renamed".to_owned()]);
+        let store = SqliteEngine::object_store_by_name(&db.connection(), "renamed").unwrap();
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM object_data WHERE object_store_id = ?",
+                params![store.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "the records follow the store");
     }
 
     fn index_row_count(db: &SqliteEngine) -> i64 {

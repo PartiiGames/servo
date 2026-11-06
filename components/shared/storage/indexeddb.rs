@@ -463,6 +463,12 @@ pub enum AsyncSchemaOperation {
     DeleteObjectStore {
         callback: GenericCallback<BackendError>,
     },
+    /// Partii: rename the object store (<https://w3c.github.io/IndexedDB/#dom-idbobjectstore-name>,
+    /// in an upgrade transaction; reverted with it when it aborts).
+    RenameObjectStore {
+        callback: GenericCallback<BackendError>,
+        new_name: String,
+    },
 }
 
 impl AsyncSchemaOperation {
@@ -475,6 +481,9 @@ impl AsyncSchemaOperation {
                 let _ = callback.send(error);
             },
             AsyncSchemaOperation::DeleteObjectStore { callback, .. } => {
+                let _ = callback.send(error);
+            },
+            AsyncSchemaOperation::RenameObjectStore { callback, .. } => {
                 let _ = callback.send(error);
             },
         };
