@@ -140,7 +140,7 @@ pub struct GLState {
 }
 
 /// Partii (perf): see GLState::zero_level0.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct ZeroLevel0 {
     texture: gl::NativeTexture,
     size: Size2D<u32>,
@@ -1206,7 +1206,6 @@ impl WebGLImpl {
                 command,
                 WebGLCommand::TexParameteri(..) |
                     WebGLCommand::TexParameterf(..) |
-                    WebGLCommand::TexParameter { .. } |
                     WebGLCommand::BindTexture(..) |
                     WebGLCommand::ActiveTexture(..) |
                     WebGLCommand::PixelStorei(..) |
@@ -3365,7 +3364,6 @@ impl WebGLImpl {
             WebGLCommand::TexImage2D { .. } |
             WebGLCommand::TexParameteri(..) |
             WebGLCommand::TexParameterf(..) |
-            WebGLCommand::TexParameter { .. } |
             WebGLCommand::GenerateMipmap(..) |
             WebGLCommand::PixelStorei(..) |
             WebGLCommand::GenObjectNames(..) |
