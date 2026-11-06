@@ -6502,27 +6502,29 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             }
         }
 
-        let get_default_formats = || -> WebGLResult<(Option<u32>, Option<u32>, Option<u32>)> {
-            // All attempts to blit to an antialiased back buffer should fail.
-            if attributes.antialias {
-                return Err(InvalidOperation);
+        let get_default_formats =
+            |draw: bool| -> WebGLResult<(Option<u32>, Option<u32>, Option<u32>)> {
+                // An antialiased back buffer is multisampled: blits into it fail (GL ES 3.0 4.3.3);
+                // blits out of it are resolves, checked below.
+                if draw && attributes.antialias {
+                    return Err(InvalidOperation);
+                };
+                let color = if attributes.alpha {
+                    Some(constants::RGBA8)
+                } else {
+                    Some(constants::RGB8)
+                };
+                let (depth, stencil) = match (attributes.depth, attributes.stencil) {
+                    (true, true) => (
+                        Some(constants::DEPTH24_STENCIL8),
+                        Some(constants::DEPTH24_STENCIL8),
+                    ),
+                    (true, false) => (Some(constants::DEPTH_COMPONENT16), None),
+                    (false, true) => (None, Some(constants::STENCIL_INDEX8)),
+                    _ => (None, None),
+                };
+                Ok((color, depth, stencil))
             };
-            let color = if attributes.alpha {
-                Some(constants::RGBA8)
-            } else {
-                Some(constants::RGB8)
-            };
-            let (depth, stencil) = match (attributes.depth, attributes.stencil) {
-                (true, true) => (
-                    Some(constants::DEPTH24_STENCIL8),
-                    Some(constants::DEPTH24_STENCIL8),
-                ),
-                (true, false) => (Some(constants::DEPTH_COMPONENT16), None),
-                (false, true) => (None, Some(constants::STENCIL_INDEX8)),
-                _ => (None, None),
-            };
-            Ok((color, depth, stencil))
-        };
 
         let (src_color, src_depth, src_stencil) = match &src_fb {
             Some(fb) => handle_potential_webgl_error!(
@@ -6530,7 +6532,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 fb.get_attachment_formats(fb.read_buffer()),
                 return
             ),
-            None => handle_potential_webgl_error!(self.base, get_default_formats(), return),
+            None => handle_potential_webgl_error!(self.base, get_default_formats(false), return),
         };
         let (dst_color, dst_depth, dst_stencil) = match &dst_fb {
             Some(fb) => {
@@ -6544,7 +6546,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                     return
                 )
             },
-            None => handle_potential_webgl_error!(self.base, get_default_formats(), return),
+            None => handle_potential_webgl_error!(self.base, get_default_formats(true), return),
         };
 
         // Reading and writing the same image is INVALID_OPERATION (GL ES 3.0, 4.3.3), for each
@@ -6669,6 +6671,21 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
                 if any_differs {
                     return self.base.webgl_error(InvalidOperation);
                 }
+            }
+        }
+        // The same for a resolve out of an antialiased back buffer (dst is a framebuffer object:
+        // blits into the antialiased back buffer failed above).
+        if src_fb.is_none() && attributes.antialias {
+            if (src_x0, src_y0, src_x1, src_y1) != (dst_x0, dst_y0, dst_x1, dst_y1) {
+                return self.base.webgl_error(InvalidOperation);
+            }
+            if bits.intersects(BlitFrameBufferFlags::COLOR) &&
+                let (Some(src_format), Some(fb)) = (src_color, &dst_fb) &&
+                dst_color_attachments
+                    .iter()
+                    .any(|&dst| fb.attachment_sized_format(dst).is_some_and(|dst| dst != src_format))
+            {
+                return self.base.webgl_error(InvalidOperation);
             }
         }
 
