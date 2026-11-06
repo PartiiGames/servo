@@ -184,8 +184,8 @@ impl Touch {
             None, // related_target
             point_in_node,
             pointer_id,
-            1, // width (TODO: could get from touch if available)
-            1, // height (TODO: could get from touch if available)
+            1.0, // width (TODO: could get from touch if available)
+            1.0, // height (TODO: could get from touch if available)
             pressure,
             0.0,      // tangential_pressure
             0,        // tilt_x

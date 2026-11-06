@@ -10,8 +10,8 @@ interface PointerEvent : MouseEvent
 
   readonly attribute long pointerId;
 
-  readonly attribute long width;
-  readonly attribute long height;
+  readonly attribute double width;
+  readonly attribute double height;
   readonly attribute float pressure;
   readonly attribute float tangentialPressure;
   readonly attribute long tiltX;
@@ -30,8 +30,8 @@ interface PointerEvent : MouseEvent
 dictionary PointerEventInit : MouseEventInit
 {
   long pointerId = 0;
-  long width = 1;
-  long height = 1;
+  double width = 1;
+  double height = 1;
   float pressure = 0;
   float tangentialPressure = 0;
   long tiltX;

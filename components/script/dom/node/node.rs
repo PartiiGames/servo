@@ -617,8 +617,8 @@ impl Node {
             None,                               // related_target
             None,                               // point_in_target
             PointerId::NonPointerDevice as i32, // pointer_id
-            1,                                  // width
-            1,                                  // height
+            1.0,                                // width
+            1.0,                                // height
             0.5,                                // pressure
             0.0,                                // tangential_pressure
             0,                                  // tilt_x

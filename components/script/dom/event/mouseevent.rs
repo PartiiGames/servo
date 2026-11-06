@@ -378,8 +378,8 @@ impl MouseEvent {
             self.GetRelatedTarget().as_deref(),
             self.point_in_target.get(),
             PointerId::Mouse as i32, // Mouse pointer ID is always -1
-            1,                       // width
-            1,                       // height
+            1.0,                     // width
+            1.0,                     // height
             pressure,
             0.0,      // tangential_pressure
             0,        // tilt_x
@@ -440,8 +440,8 @@ impl MouseEvent {
             self.GetRelatedTarget().as_deref(),
             self.point_in_target.get(),
             PointerId::Mouse as i32, // Mouse pointer ID is always -1
-            1,                       // width
-            1,                       // height
+            1.0,                     // width
+            1.0,                     // height
             0.0,                     // pressure: 0.0 for hover events
             0.0,                     // tangential_pressure
             0,                       // tilt_x

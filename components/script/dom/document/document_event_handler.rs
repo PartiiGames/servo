@@ -1409,8 +1409,8 @@ impl DocumentEventHandler {
             None,                            // related_target
             None,                            // point_in_target
             PointerId::Mouse as i32,         // pointer_id
-            1,                               // width
-            1,                               // height
+            1.0,                             // width
+            1.0,                             // height
             0.5,                             // pressure
             0.0,                             // tangential_pressure
             0,                               // tilt_x
@@ -2746,8 +2746,8 @@ impl DocumentEventHandler {
             None,
             None,
             pointer_id,
-            1,
-            1,
+            1.0,
+            1.0,
             0.0,
             0.0,
             0,
@@ -2796,8 +2796,8 @@ impl DocumentEventHandler {
             related_target.map(|el| el.upcast::<EventTarget>()),
             None,
             pointer_id,
-            1,
-            1,
+            1.0,
+            1.0,
             0.0,
             0.0,
             0,
