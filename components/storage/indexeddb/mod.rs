@@ -112,6 +112,10 @@ struct IndexedDBEnvironment<E: KvsEngine> {
     handled_pending: FxHashMap<u64, HashSet<u64>>,
     pending_commit_callbacks: FxHashMap<u64, Vec<GenericCallback<TxnCompleteMsg>>>,
     pending_abort_callbacks: FxHashMap<u64, Vec<GenericCallback<TxnCompleteMsg>>>,
+    /// Partii: the readwrite or versionchange transaction whose sqlite transaction is open in the
+    /// engine. sqlite has a single writer, so no other write transaction starts until this one
+    /// commits or rolls back.
+    engine_write_txn: Option<u64>,
 }
 
 impl<E: KvsEngine> IndexedDBEnvironment<E> {
@@ -135,7 +139,46 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
             handled_pending: FxHashMap::default(),
             pending_commit_callbacks: FxHashMap::default(),
             pending_abort_callbacks: FxHashMap::default(),
+            engine_write_txn: None,
         }
+    }
+
+    /// Partii: open the sqlite transaction of `txn` now.
+    fn begin_engine_transaction(&mut self, txn: u64) -> BackendResult<()> {
+        if self.engine_write_txn.is_some_and(|holder| holder != txn) {
+            return Err(BackendError::DbErr(format!(
+                "Transaction {txn} cannot write while another transaction writes"
+            )));
+        }
+        self.engine
+            .begin_transaction(txn)
+            .map_err(|err| BackendError::DbErr(format!("{err:?}")))?;
+        self.engine_write_txn = Some(txn);
+        Ok(())
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#commit-a-transaction>, the part that writes the
+    /// transaction's changes to the database. A no-op for a transaction that never wrote.
+    fn commit_engine_transaction(&mut self, txn: u64) -> BackendResult<()> {
+        if self.engine_write_txn != Some(txn) {
+            return Ok(());
+        }
+        self.engine_write_txn = None;
+        self.engine
+            .commit_transaction(txn)
+            .map_err(|err| BackendError::DbErr(format!("{err:?}")))
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 1: "All the changes
+    /// made to the database by the transaction are reverted." Returns whether `txn` had an open
+    /// sqlite transaction.
+    fn rollback_engine_transaction(&mut self, txn: u64) -> bool {
+        if self.engine_write_txn != Some(txn) {
+            return false;
+        }
+        self.engine_write_txn = None;
+        self.engine.rollback_transaction(txn);
+        true
     }
 
     fn register_transaction(&mut self, txn: u64, mode: IndexedDBTxnMode, scope: Vec<String>) {
@@ -350,7 +393,11 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
             if transaction.requests.is_empty() {
                 continue;
             }
-            if !self.can_start_by_spec(txn) {
+            // Partii: while another write transaction's sqlite transaction is open, wait for it to
+            // commit or abort (sqlite allows one writer at a time).
+            if !self.can_start_by_spec(txn) ||
+                self.engine_write_txn.is_some_and(|holder| holder != txn)
+            {
                 if self.queued_readwrite_set.insert(txn) {
                     self.queued_readwrite.push_back(txn);
                 }
@@ -401,8 +448,15 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
             return;
         }
 
+        // Partii: a readwrite or versionchange batch runs inside the transaction's sqlite
+        // transaction, which now holds the database's write lock.
+        if mode != IndexedDBTxnMode::Readonly {
+            debug_assert!(self.engine_write_txn.is_none_or(|holder| holder == txn));
+            self.engine_write_txn = Some(txn);
+        }
         let manager_sender = self.manager_sender.clone();
         self.engine.process_transaction(
+            txn,
             KvsTransaction { mode, requests },
             Box::new(move || {
                 // Notify the manager thread when the engine finishes so it can:
@@ -506,6 +560,11 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
     }
 
     fn finish_transaction(&mut self, txn: u64) {
+        // Partii: a transaction that finishes without having committed was aborted; never leave
+        // its sqlite transaction open.
+        if self.rollback_engine_transaction(txn) {
+            warn!("IndexedDB transaction {txn} finished without commit; rolled back");
+        }
         if let Some(info) = self.txn_info.get_mut(&txn) {
             info.live = false;
         }
@@ -540,12 +599,20 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // Partii: roll back every record, index and key generator change of the transaction.
+        // The snapshot below is only used when the transaction never opened a sqlite
+        // transaction; otherwise the rollback already restored the key generators, and
+        // writing the (possibly stale) snapshot would be wrong.
+        let rolled_back = self.rollback_engine_transaction(txn);
+
         // https://w3c.github.io/IndexedDB/#key-generator-construct
         // Likewise, if a transaction is aborted, the current number of the
         // key generator for each object store in the transaction’s scope is
         // reverted to the value it had before the transaction was started.
-        let res = self.restore_key_generators_after_abort(&key_generator_snapshots);
-        debug_assert!(res.is_ok(), "Restoring key generators should not fail.");
+        if !rolled_back {
+            let res = self.restore_key_generators_after_abort(&key_generator_snapshots);
+            debug_assert!(res.is_ok(), "Restoring key generators should not fail.");
+        }
 
         // Keep scheduling metadata until script reports TransactionFinished.
         // https://w3c.github.io/IndexedDB/#transaction-lifetime
@@ -771,7 +838,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
     /// This only aborts the transaction if one was previously queued by adding an abort
     /// callback to [`Self::pending_abort_callbacks`].
     ///
-    /// TODO: implement the abort algorithm and rollback for the engine.
+    /// Partii: the engine rollback happens in [`Self::abort_transaction`].
     fn abort(&mut self, origin: &ImmutableOrigin, database_name: &str, transaction: u64) -> bool {
         let message = || TxnCompleteMsg {
             origin: origin.clone(),
@@ -1184,14 +1251,23 @@ impl IndexedDBManager {
             origin: origin.clone(),
             name: db_name.clone(),
         };
-        let callbacks = {
+        let (callbacks, result) = {
             let Some(db) = self.databases.get_mut(&key) else {
                 return;
             };
             if !db.can_commit_now(txn) {
                 return;
             }
-            db.take_pending_commit_callbacks(txn)
+            let callbacks = db.take_pending_commit_callbacks(txn);
+            if callbacks.is_empty() {
+                (callbacks, Ok(()))
+            } else {
+                // Partii: commit the engine transaction before reporting success, then let
+                // write transactions that waited for it start.
+                let result = db.commit_engine_transaction(txn);
+                db.schedule_transactions(origin.clone(), &db_name);
+                (callbacks, result)
+            }
         };
 
         if callbacks.is_empty() {
@@ -1205,7 +1281,7 @@ impl IndexedDBManager {
                     origin: origin.clone(),
                     db_name: db_name.clone(),
                     txn,
-                    result: Ok(()),
+                    result: result.clone(),
                 })
                 .is_err()
             {
@@ -1398,6 +1474,11 @@ impl IndexedDBManager {
         upgrade: &VersionUpgrade,
         proxy_map: &StorageProxyMap,
     ) {
+        // Partii: roll back the upgrade's sqlite transaction and drop its queued requests. A
+        // no-op when script already aborted the transaction in the backend.
+        if let Some(db) = self.databases.get_mut(key) {
+            db.abort_transaction(upgrade.transaction);
+        }
         if upgrade.old == 0 {
             if let Some(db) = self.databases.remove(key) {
                 // Note: ensure db is dropped before deleting directory,
@@ -1429,6 +1510,8 @@ impl IndexedDBManager {
         // database was newly created.
         let res = db.restore_object_stores(&upgrade.object_stores);
         debug_assert!(res.is_ok(), "Restoring object stores should not fail.");
+        // Partii: write transactions may have waited for the upgrade's write lock.
+        db.schedule_transactions(key.origin.clone(), &key.name);
     }
 
     /// Aborting the current upgrade for an origin.
@@ -1640,6 +1723,15 @@ impl IndexedDBManager {
 
         // Step 8: Set db’s version to version. This change is considered part of the
         // transaction, and so if the transaction is aborted, this change is reverted.
+        // Partii: the upgrade runs in one sqlite transaction, opened here, so aborting it reverts
+        // the version and all schema and record changes. If a write transaction of a closed
+        // connection still holds the database, the sqlite transaction opens with the upgrade's
+        // first request batch instead, and `revert_aborted_upgrade` restores the version.
+        if db.engine_write_txn.is_none() &&
+            let Err(error) = db.begin_engine_transaction(transaction)
+        {
+            warn!("Could not open the upgrade transaction: {error:?}");
+        }
         db.set_version(new_version)
             .expect("Setting the version should not fail");
 
@@ -2280,12 +2372,14 @@ impl IndexedDBManager {
                 // transitioned the transaction to committed/aborted (should be atomic).
                 if let Some(db) = self.get_database_mut(origin.clone(), db_name.clone()) {
                     if db.can_commit_now(txn) {
+                        // Partii: the writes become durable here, before script fires complete.
+                        let result = db.commit_engine_transaction(txn);
                         if callback
                             .send(TxnCompleteMsg {
                                 origin: origin.clone(),
                                 db_name: db_name.clone(),
                                 txn,
-                                result: Ok(()),
+                                result,
                             })
                             .is_err()
                         {
@@ -2324,6 +2418,14 @@ impl IndexedDBManager {
                 txn,
                 committed,
             } => {
+                // Partii: the upgrade normally committed when script asked to commit it; make
+                // sure a committed upgrade never leaves its sqlite transaction open.
+                if committed &&
+                    let Some(db) = self.get_database_mut(origin.clone(), db_name.clone()) &&
+                    let Err(error) = db.commit_engine_transaction(txn)
+                {
+                    error!("Failed to commit upgrade transaction {txn}: {error:?}");
+                }
                 self.handle_upgrade_transaction_finished(db_name, origin, txn, committed);
             },
             SyncOperation::RequestHandled {

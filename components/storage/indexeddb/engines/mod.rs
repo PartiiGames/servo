@@ -43,11 +43,24 @@ pub trait KvsEngine: MallocSizeOf {
     #[expect(dead_code)]
     fn close_store(&self, store_name: &str) -> Result<(), Self::Error>;
 
+    /// Partii: `txn` is the IndexedDB transaction the batch belongs to. A readwrite or
+    /// versionchange batch runs inside that transaction's sqlite transaction, which its first
+    /// batch opens (unless [`Self::begin_transaction`] already did) and which stays open until
+    /// [`Self::commit_transaction`] or [`Self::rollback_transaction`].
     fn process_transaction(
         &self,
+        txn: u64,
         transaction: KvsTransaction,
         on_complete: Box<dyn FnOnce() + Send + 'static>,
     );
+
+    /// Partii: open the sqlite transaction of write transaction `txn` now (an upgrade does this
+    /// before it changes the version). Fails if another write transaction is open.
+    fn begin_transaction(&self, txn: u64) -> Result<(), Self::Error>;
+    /// Partii: make everything `txn` wrote durable. A no-op if `txn` never wrote.
+    fn commit_transaction(&self, txn: u64) -> Result<(), Self::Error>;
+    /// Partii: undo everything `txn` wrote. A no-op if `txn` never wrote.
+    fn rollback_transaction(&self, txn: u64);
 
     fn key_generator_current_number(&self, store_name: &str) -> Option<i64>;
     fn set_key_generator_current_number(
