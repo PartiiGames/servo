@@ -63,3 +63,7 @@ pub(crate) use crate::dom::bindings::trace::{CustomTraceable, JSTraceable};
 pub use crate::dom::serviceworker::serviceworker_manager::ServiceWorkerManager;
 pub use crate::engine::handle::JSEngineSetup;
 pub use crate::engine::init::init;
+/// Partii: hot functions compiled ahead of time, called from pages through `PartiiHot` (console mode).
+pub mod partii_hot {
+    pub use crate::dom::partiihot::{HotArg, HotFunction, HotWrapper, register_hot_functions};
+}

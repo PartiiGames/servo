@@ -212,6 +212,9 @@ pub struct Preferences {
     // feature: OffscreenCanvas | #34111 | Web/API/OffscreenCanvas
     pub dom_offscreen_canvas_enabled: bool,
     pub dom_parallel_css_parsing_enabled: bool,
+    /// Partii: the PartiiHot namespace, calls into Hot TS compiled ahead of time and linked into the
+    /// embedder (console mode, no JIT; script::partii_hot).
+    pub dom_partii_hot_enabled: bool,
     // feature: Permissions API | #31235 | Web/API/Permissions_API
     pub dom_permissions_enabled: bool,
     pub dom_permissions_testing_allowed_in_nonsecure_contexts: bool,
@@ -513,6 +516,7 @@ impl Preferences {
             dom_navigator_protocol_handlers_enabled: false,
             dom_notification_enabled: false,
             dom_parallel_css_parsing_enabled: true,
+            dom_partii_hot_enabled: false,
             dom_offscreen_canvas_enabled: false,
             dom_permissions_enabled: false,
             dom_permissions_testing_allowed_in_nonsecure_contexts: false,

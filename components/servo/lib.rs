@@ -85,6 +85,8 @@ pub use profile_traits;
 // This should be replaced with an API on ServoBuilder.
 // See <https://github.com/servo/servo/issues/40950>.
 pub use resources;
+/// Partii: register hot functions (Hot TS compiled to C) for the `PartiiHot` namespace.
+pub use script::partii_hot;
 pub use servo_base::generic_channel::GenericSender;
 pub use servo_base::id::WebViewId;
 pub use servo_config::opts::{DiagnosticsLogging, DiagnosticsLoggingOption, Opts, OutputOptions};
