@@ -292,7 +292,7 @@ fn collect(cx: &mut JSContext, state: &State, kind: Kind, shrink: bool) {
     if config().finalize_stats {
         script_bindings::take_finalize_stats();
     }
-    black_remark_before_slice(cx.raw_cx());
+    black_remark_before_slice(unsafe { cx.raw_cx() });
     let started = Instant::now();
     unsafe {
         PrepareForFullGC(cx);
@@ -809,7 +809,7 @@ fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant)
         return true;
     }
     let started = Instant::now();
-    black_remark_before_slice(cx.raw_cx());
+    black_remark_before_slice(unsafe { cx.raw_cx() });
     if started - gc.started > config().incremental_max {
         our_slice(|| unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) });
         let mut gc = gc;
