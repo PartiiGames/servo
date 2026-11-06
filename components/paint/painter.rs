@@ -498,10 +498,18 @@ impl Painter {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default();
                         let ms = (t3 - t0).as_secs_f64() * 1000.0;
+                        let st = results.as_ref().map(|r| &r.stats);
                         eprintln!(
-                            "partii-trace paint render at={:.1} ms={ms:.1} update={:.1}",
+                            "partii-trace paint render at={:.1} ms={ms:.1} update={:.1} render={:.1} draws={} color={} alpha={} upload_mb={:.2} build={:.1} full={}",
                             (d.as_micros() % 10_000_000_000) as f64 / 1000.0 - ms,
-                            (t1 - t0).as_secs_f64() * 1000.0
+                            (t1 - t0).as_secs_f64() * 1000.0,
+                            (t2 - t1).as_secs_f64() * 1000.0,
+                            st.map_or(0, |s| s.total_draw_calls),
+                            st.map_or(0, |s| s.color_target_count),
+                            st.map_or(0, |s| s.alpha_target_count),
+                            st.map_or(0., |s| s.texture_upload_mb),
+                            st.map_or(0., |s| s.frame_build_time),
+                            st.is_some_and(|s| s.full_paint),
                         );
                     }
                     let (taken, offscreen) = self
