@@ -201,3 +201,210 @@ pub unsafe fn remark(trc: *mut JSTracer) -> (usize, usize) {
     }
     (len, traced)
 }
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use std::cell::Cell;
+    use std::ptr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use js::jsapi::{
+        GCContext, GCOptions, GCReason, Heap, JSCLASS_FOREGROUND_FINALIZE, JSClass, JSClassOps,
+        JSGCParamKey, JSObject, OnNewGlobalHookOption, SliceBudget,
+    };
+    use js::realm::AutoRealm;
+    use js::rooted;
+    use js::rust::wrappers2::{
+        FinishIncrementalGC, IncrementalGCSlice, IsIncrementalGCInProgress, JS_GC,
+        JS_NewGlobalObject, JS_NewObject, JS_SetGCParameter, PrepareForFullGC, StartIncrementalGC,
+    };
+    use js::rust::{JSEngine, RealmOptions, Runtime, SIMPLE_GLOBAL_CLASS};
+
+    use super::*;
+
+    unsafe extern "C" {
+        #[cfg_attr(
+            target_vendor = "apple",
+            link_name = "\u{1}__ZN2JS11SliceBudgetC1ENS_10WorkBudgetE"
+        )]
+        #[cfg_attr(
+            not(target_vendor = "apple"),
+            link_name = "\u{1}_ZN2JS11SliceBudgetC1ENS_10WorkBudgetE"
+        )]
+        fn SliceBudgetFromWork(this: *mut SliceBudget, work: i64);
+    }
+
+    fn work_budget(work: i64) -> SliceBudget {
+        let mut budget = std::mem::MaybeUninit::<SliceBudget>::zeroed();
+        unsafe {
+            SliceBudgetFromWork(budget.as_mut_ptr(), work);
+            budget.assume_init()
+        }
+    }
+
+    static LIVE_FINALIZED: AtomicBool = AtomicBool::new(false);
+    static DEAD_FINALIZED: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "C" fn finalize_live(_: *mut GCContext, _: *mut JSObject) {
+        LIVE_FINALIZED.store(true, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn finalize_dead(_: *mut GCContext, _: *mut JSObject) {
+        DEAD_FINALIZED.store(true, Ordering::SeqCst);
+    }
+
+    const fn ops(finalize: unsafe extern "C" fn(*mut GCContext, *mut JSObject)) -> JSClassOps {
+        JSClassOps {
+            addProperty: None,
+            delProperty: None,
+            enumerate: None,
+            newEnumerate: None,
+            resolve: None,
+            mayResolve: None,
+            finalize: Some(finalize),
+            call: None,
+            construct: None,
+            trace: None,
+        }
+    }
+
+    static LIVE_OPS: JSClassOps = ops(finalize_live);
+    static DEAD_OPS: JSClassOps = ops(finalize_dead);
+
+    // Foreground-finalized, like every DOM class (codegen.py).
+    static LIVE_CLASS: JSClass = JSClass {
+        name: c"IncrementalGcLive".as_ptr(),
+        flags: JSCLASS_FOREGROUND_FINALIZE,
+        cOps: &LIVE_OPS,
+        spec: ptr::null(),
+        ext: ptr::null(),
+        oOps: ptr::null(),
+    };
+    static DEAD_CLASS: JSClass = JSClass {
+        name: c"IncrementalGcDead".as_ptr(),
+        flags: JSCLASS_FOREGROUND_FINALIZE,
+        cOps: &DEAD_OPS,
+        spec: ptr::null(),
+        ext: ptr::null(),
+        oOps: ptr::null(),
+    };
+
+    /// Unregistering swaps the last entry into the hole and fixes that entry's index slot.
+    #[test]
+    fn registry_swap_remove_fixes_indices() {
+        enable();
+        let heaps: Vec<Box<Heap<*mut JSObject>>> =
+            (0..4).map(|_| Box::new(Heap::default())).collect();
+        let slots: Vec<Box<Cell<usize>>> =
+            (0..4).map(|_| Box::new(Cell::new(UNREGISTERED))).collect();
+        let base = registered();
+        for i in 0..4 {
+            register(&heaps[i], &slots[i]);
+            assert_eq!(slots[i].get(), base + i);
+        }
+        // Registering twice is a no-op.
+        register(&heaps[0], &slots[0]);
+        assert_eq!(registered(), base + 4);
+
+        unregister(&slots[1]);
+        assert_eq!(slots[1].get(), UNREGISTERED);
+        assert_eq!(registered(), base + 3);
+        assert_eq!(
+            slots[3].get(),
+            base + 1,
+            "the last entry moved into the hole"
+        );
+        let check = |i: usize| {
+            REGISTRY.with(|r| {
+                let r = r.borrow();
+                let (heap, slot) = r[slots[i].get()];
+                assert_eq!(heap, &*heaps[i] as *const _);
+                assert_eq!(slot, &*slots[i] as *const _);
+            })
+        };
+        [0, 2, 3].into_iter().for_each(check);
+
+        // Removing the last entry, and removing twice.
+        unregister(&slots[3]);
+        unregister(&slots[3]);
+        unregister(&slots[1]);
+        assert_eq!(registered(), base + 2);
+        [0, 2].into_iter().for_each(check);
+        unregister(&slots[0]);
+        unregister(&slots[2]);
+        assert_eq!(registered(), base);
+    }
+
+    /// Off unless sweeping (one TLS load), and never for null.
+    #[test]
+    fn about_to_be_finalized_is_off_outside_sweeping() {
+        set_sweeping(false);
+        assert!(!about_to_be_finalized(ptr::null_mut()));
+        set_sweeping(true);
+        assert!(!about_to_be_finalized(ptr::null_mut()));
+        set_sweeping(false);
+    }
+
+    /// An unreachable object is reported dying while its zone is swept, before its finalizer runs;
+    /// a reachable one never is. (`WeakRef::root` returns None exactly when this is true.)
+    #[test]
+    fn about_to_be_finalized_while_sweeping_in_slices() {
+        let engine = JSEngine::init().unwrap();
+        let mut runtime = Runtime::new(engine.handle());
+        let cx = runtime.cx();
+        unsafe {
+            rooted!(&in(cx) let global = JS_NewGlobalObject(
+                cx,
+                &SIMPLE_GLOBAL_CLASS,
+                ptr::null_mut(),
+                OnNewGlobalHookOption::FireOnNewGlobalHook,
+                &*RealmOptions::default(),
+            ));
+            let mut realm = AutoRealm::new_from_handle(cx, global.handle());
+            let cx = &mut realm;
+            JS_SetGCParameter(cx, JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED, 1);
+
+            rooted!(&in(cx) let live = JS_NewObject(cx, &LIVE_CLASS));
+            rooted!(&in(cx) let dead = JS_NewObject(cx, &DEAD_CLASS));
+            // Tenure both (the roots are updated to where they moved).
+            JS_GC(cx, GCReason::API);
+            let dead_ptr = dead.get();
+            dead.set(ptr::null_mut());
+            assert!(!DEAD_FINALIZED.load(Ordering::SeqCst));
+
+            set_sweeping(true);
+            assert!(!about_to_be_finalized(dead_ptr), "no GC in progress");
+            set_sweeping(false);
+
+            PrepareForFullGC(cx);
+            StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
+            let mut seen = false;
+            let mut slices = 0;
+            while IsIncrementalGCInProgress(cx) && slices < 1_000_000 {
+                // Between slices, as the slice callback would set it.
+                set_sweeping(true);
+                assert!(!about_to_be_finalized(live.get()), "a reachable object");
+                if DEAD_FINALIZED.load(Ordering::SeqCst) {
+                    break;
+                }
+                if about_to_be_finalized(dead_ptr) {
+                    seen = true;
+                    break;
+                }
+                set_sweeping(false);
+                IncrementalGCSlice(cx, GCReason::API, &work_budget(1));
+                slices += 1;
+            }
+            set_sweeping(false);
+            assert!(
+                seen,
+                "the unreachable object was finalized (or the GC ended) before it was reported dying, after {slices} slices"
+            );
+            assert!(!about_to_be_finalized(dead_ptr), "off outside sweeping");
+            FinishIncrementalGC(cx, GCReason::API);
+            assert!(DEAD_FINALIZED.load(Ordering::SeqCst));
+            assert!(!LIVE_FINALIZED.load(Ordering::SeqCst));
+            assert!(!live.get().is_null());
+        }
+    }
+}
