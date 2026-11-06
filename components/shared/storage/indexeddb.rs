@@ -638,6 +638,9 @@ pub enum SyncOperation {
         db_name: String,
         mode: IndexedDBTxnMode,
         scope: Vec<String>,
+        /// Partii: the id of the connection (IDBDatabase) the transaction is created on, so
+        /// that a forced close can abort it.
+        connection: Uuid,
     },
     /// Request script to recheck transaction commit eligibility.
     TxnMaybeCommit {
@@ -655,6 +658,9 @@ pub enum SyncOperation {
         ImmutableOrigin,
         Uuid,
         String, // Database
+        // Partii: the forced flag of <https://w3c.github.io/IndexedDB/#close-a-database-connection>.
+        // A forced close aborts every transaction of the connection.
+        bool,
     ),
 
     OpenDatabase(

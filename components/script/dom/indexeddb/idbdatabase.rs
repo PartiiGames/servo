@@ -176,17 +176,23 @@ impl IDBDatabase {
         );
     }
 
+    /// Partii: the connection's id, which the backend ties its transactions to.
+    pub(crate) fn id(&self) -> Uuid {
+        self.id
+    }
+
     /// <https://w3c.github.io/IndexedDB/#close-a-database-connection>
-    pub(crate) fn close_a_database_connection(&self, _forced: bool) {
+    pub(crate) fn close_a_database_connection(&self, forced: bool) {
         // Step 1: Set connection’s close pending flag to true.
         self.close_pending.set(true);
 
         // Note: rest of the steps run in the storage backend.
-        // TODO: `_forced` either needs to be used here or passed to the backend.
+        // Partii: the backend aborts the connection's transactions when `forced` is set.
         let operation = SyncOperation::CloseDatabase(
             self.global().origin().immutable().clone(),
             self.id,
             self.name.to_string(),
+            forced,
         );
         let _ = self
             .get_idb_thread()

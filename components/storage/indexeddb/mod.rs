@@ -92,6 +92,9 @@ struct TxnInfo {
     mode: IndexedDBTxnMode,
     scope: Vec<TxnScopeStore>,
     live: bool,
+    /// Partii: the connection the transaction was created on; a forced close of it aborts the
+    /// transaction.
+    connection: Uuid,
 }
 
 #[derive(MallocSizeOf)]
@@ -181,7 +184,13 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         true
     }
 
-    fn register_transaction(&mut self, txn: u64, mode: IndexedDBTxnMode, scope: Vec<String>) {
+    fn register_transaction(
+        &mut self,
+        txn: u64,
+        mode: IndexedDBTxnMode,
+        scope: Vec<String>,
+        connection: Uuid,
+    ) {
         if self.txn_info.contains_key(&txn) {
             return;
         }
@@ -213,6 +222,7 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
                 mode: mode.clone(),
                 scope,
                 live: true,
+                connection,
             },
         );
         self.transactions
@@ -581,6 +591,60 @@ impl<E: KvsEngine> IndexedDBEnvironment<E> {
         self.handled_next_unhandled_request_id.remove(&txn);
         self.handled_pending.remove(&txn);
         self.pending_commit_callbacks.remove(&txn);
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#close-a-database-connection> step 2, "If the
+    /// forced flag is true, then for each transaction created using connection run abort a
+    /// transaction". Script is gone (its global was torn down), so nothing will commit or finish
+    /// these transactions: roll back their changes, free the database's write lock and forget
+    /// them, so that transactions waiting on them can start. Returns the aborted transactions.
+    fn abort_connection_transactions(
+        &mut self,
+        origin: &ImmutableOrigin,
+        db_name: &str,
+        connection: Uuid,
+    ) -> Vec<u64> {
+        let mut aborted: Vec<(u64, u64)> = self
+            .txn_info
+            .iter()
+            .filter(|(_, info)| info.connection == connection)
+            .map(|(txn, info)| (info.created_seq, *txn))
+            .collect();
+        aborted.sort_unstable();
+        let mut aborted_txns = Vec::with_capacity(aborted.len());
+        for (_, txn) in aborted {
+            let writes = self
+                .txn_info
+                .get(&txn)
+                .is_some_and(|info| info.mode != IndexedDBTxnMode::Readonly);
+            // Every change, including key generator updates, is inside the sqlite
+            // transaction: rolling it back is the whole revert.
+            if !self.rollback_engine_transaction(txn) && writes {
+                // A batch may still be on its way to the engine; this makes it fail instead
+                // of opening the transaction again.
+                self.engine.rollback_transaction(txn);
+            }
+            let callbacks: Vec<_> = self
+                .take_pending_commit_callbacks(txn)
+                .into_iter()
+                .chain(
+                    self.pending_abort_callbacks
+                        .remove(&txn)
+                        .unwrap_or_default(),
+                )
+                .collect();
+            for callback in callbacks {
+                let _ = callback.send(TxnCompleteMsg {
+                    origin: origin.clone(),
+                    db_name: db_name.to_owned(),
+                    txn,
+                    result: Err(BackendError::Abort),
+                });
+            }
+            self.finish_transaction(txn);
+            aborted_txns.push(txn);
+        }
+        aborted_txns
     }
 
     fn abort_transaction(&mut self, txn: u64) {
@@ -1691,6 +1755,9 @@ impl IndexedDBManager {
             return;
         };
 
+        // Partii: the open request's id is the id of the connection it opens.
+        let connection = *id;
+
         // Step 1: Let db be connection’s database.
         let db = self
             .databases
@@ -1708,7 +1775,12 @@ impl IndexedDBManager {
 
         // Step 4: Set db’s upgrade transaction to transaction.
         // Backend tracks the active upgrade transaction in `pending_upgrade` below.
-        db.register_transaction(transaction, IndexedDBTxnMode::Versionchange, scope.clone());
+        db.register_transaction(
+            transaction,
+            IndexedDBTxnMode::Versionchange,
+            scope.clone(),
+            connection,
+        );
 
         // Step 5: Set transaction’s state to inactive.
         // Step 6: Start transaction.
@@ -2206,7 +2278,7 @@ impl IndexedDBManager {
     }
 
     /// <https://w3c.github.io/IndexedDB/#closing-connection>
-    fn close_database(&mut self, origin: ImmutableOrigin, id: Uuid, name: String) {
+    fn close_database(&mut self, origin: ImmutableOrigin, id: Uuid, name: String, forced: bool) {
         // Step 1: Set connection’s close pending flag to true.
         // TODO: seems like a script only flag.
 
@@ -2219,6 +2291,31 @@ impl IndexedDBManager {
 
         // Step 4: If the forced flag is true, then fire an event named close at connection.
         // TODO: implement, probably only on the script side of things.
+
+        // Partii: step 2. Only teardown forces a close, so script will never finish these
+        // transactions; abort them now rather than waiting for them (step 3).
+        if forced {
+            let key = IndexedDBDescription {
+                origin: origin.clone(),
+                name: name.clone(),
+            };
+            let maybe_commit_txns = match self.databases.get_mut(&key) {
+                Some(db) => {
+                    let aborted = db.abort_connection_transactions(&origin, &name, id);
+                    if aborted.is_empty() {
+                        Vec::new()
+                    } else {
+                        debug!("Forced close of {id} aborted IndexedDB transactions {aborted:?}");
+                        db.schedule_transactions(origin.clone(), &name);
+                        db.maybe_commit_candidates()
+                    }
+                },
+                None => Vec::new(),
+            };
+            for candidate in maybe_commit_txns {
+                self.handle_txn_maybe_commit(origin.clone(), name.clone(), candidate);
+            }
+        }
 
         // Note: below we are continuing
         // <https://w3c.github.io/IndexedDB/#open-a-database-connection>
@@ -2332,8 +2429,8 @@ impl IndexedDBManager {
                     debug!("Couldn't send SyncOperation::GetDatabases reply.");
                 }
             },
-            SyncOperation::CloseDatabase(origin, id, db_name) => {
-                self.close_database(origin, id, db_name);
+            SyncOperation::CloseDatabase(origin, id, db_name, forced) => {
+                self.close_database(origin, id, db_name, forced);
             },
             SyncOperation::OpenDatabase(sender, origin, db_name, version, id, proxy_map) => {
                 self.open_a_database_connection(sender, origin, db_name, version, id, proxy_map);
@@ -2485,6 +2582,7 @@ impl IndexedDBManager {
                 db_name,
                 mode,
                 scope,
+                connection,
             } => {
                 let key = IndexedDBDescription {
                     origin: origin.clone(),
@@ -2493,7 +2591,7 @@ impl IndexedDBManager {
                 if let Some(db) = self.databases.get_mut(&key) {
                     let transaction_id = self.serial_number_counter;
                     self.serial_number_counter += 1;
-                    db.register_transaction(transaction_id, mode, scope);
+                    db.register_transaction(transaction_id, mode, scope, connection);
                     db.schedule_transactions(origin, &db_name);
                     let _ = sender.send(Ok(transaction_id));
                 } else {
@@ -2594,11 +2692,18 @@ impl IndexedDBManager {
 
 #[cfg(test)]
 mod tests {
+    use profile_traits::generic_callback::GenericCallback;
     use servo_base::generic_channel;
+    use servo_base::generic_channel::{GenericReceiver, GenericSender};
     use servo_base::threadpool::ThreadPool;
     use servo_url::ImmutableOrigin;
-    use storage_traits::indexeddb::{IndexedDBTxnMode, KeyPath};
+    use storage_traits::indexeddb::{
+        AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, BackendResult,
+        IndexedDBKeyRange, IndexedDBKeyType, IndexedDBThreadMsg, IndexedDBTxnMode, KeyPath,
+        PutItemResult,
+    };
     use url::Host;
+    use uuid::Uuid;
 
     use super::{IndexedDBDescription, IndexedDBEnvironment};
     use crate::indexeddb::engines::SqliteEngine;
@@ -2668,12 +2773,159 @@ mod tests {
         env.create_object_store("books", None, true).unwrap();
         assert_eq!(env.key_generator_current_number("books"), Some(1));
 
-        env.register_transaction(1, IndexedDBTxnMode::Readwrite, vec!["books".to_string()]);
+        env.register_transaction(
+            1,
+            IndexedDBTxnMode::Readwrite,
+            vec!["books".to_string()],
+            Uuid::new_v4(),
+        );
         env.set_key_generator_current_number("books", 345680)
             .unwrap();
 
         env.abort_transaction(1);
 
         assert_eq!(env.key_generator_current_number("books"), Some(1));
+    }
+
+    /// Partii: wait until the engine finished a batch of `txn`, then clear the running flag as
+    /// the manager's EngineTxnBatchComplete handler does.
+    fn wait_for_batch(
+        env: &mut IndexedDBEnvironment<SqliteEngine>,
+        manager: &GenericReceiver<IndexedDBThreadMsg>,
+        txn: u64,
+    ) {
+        loop {
+            if let IndexedDBThreadMsg::EngineTxnBatchComplete { txn: done, .. } =
+                manager.recv().unwrap()
+            {
+                assert_eq!(done, txn);
+                break;
+            }
+        }
+        if env.running_readwrite == Some(txn) {
+            env.running_readwrite = None;
+        }
+        env.running_readonly.remove(&txn);
+    }
+
+    fn put(key: f64, sender: GenericSender<BackendResult<PutItemResult>>) -> AsyncOperation {
+        AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
+            callback: GenericCallback::new(move |result| {
+                let _ = sender.send(result.unwrap());
+            })
+            .unwrap(),
+            key: Some(IndexedDBKeyType::Number(key)),
+            value: vec![key as u8],
+            should_overwrite: true,
+            key_generator_current_number: None,
+            index_keys: vec![],
+        })
+    }
+
+    /// Partii: a page torn down mid-transaction never commits or finishes it. The forced close
+    /// of its connection rolls the transaction back and frees the write lock, so the next
+    /// read-write transaction on the database runs and commits.
+    #[test]
+    fn test_forced_close_aborts_the_connections_transactions() {
+        let base_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let description = IndexedDBDescription {
+            name: "test_db".to_string(),
+            origin: test_origin(),
+        };
+        let engine = SqliteEngine::new(
+            base_dir.path().to_path_buf(),
+            true,
+            &description,
+            ThreadPool::global(),
+        )
+        .unwrap();
+        let (manager_sender, manager) = generic_channel::channel().unwrap();
+        let mut env = IndexedDBEnvironment::new(engine, manager_sender);
+        env.create_object_store("books", None, false).unwrap();
+        let origin = test_origin();
+        let (put_sender, put_results) = generic_channel::channel().unwrap();
+
+        // Connection A's read-write transaction writes and is never committed.
+        let connection_a = Uuid::new_v4();
+        env.register_transaction(
+            1,
+            IndexedDBTxnMode::Readwrite,
+            vec!["books".to_string()],
+            connection_a,
+        );
+        env.queue_operation(
+            "books",
+            1,
+            IndexedDBTxnMode::Readwrite,
+            put(1.0, put_sender.clone()),
+        );
+        env.schedule_transactions(origin.clone(), "test_db");
+        wait_for_batch(&mut env, &manager, 1);
+        assert!(put_results.recv().unwrap().is_ok());
+        assert_eq!(env.engine_write_txn, Some(1));
+
+        // Connection B's read-write transaction waits for it.
+        let connection_b = Uuid::new_v4();
+        env.register_transaction(
+            2,
+            IndexedDBTxnMode::Readwrite,
+            vec!["books".to_string()],
+            connection_b,
+        );
+        env.queue_operation(
+            "books",
+            2,
+            IndexedDBTxnMode::Readwrite,
+            put(2.0, put_sender.clone()),
+        );
+        env.schedule_transactions(origin.clone(), "test_db");
+        assert_eq!(env.running_readwrite, None);
+        assert!(env.queued_readwrite_set.contains(&2));
+
+        // A's page goes away: the forced close aborts transaction 1 only.
+        assert_eq!(
+            env.abort_connection_transactions(&origin, "test_db", connection_a),
+            vec![1]
+        );
+        assert_eq!(env.engine_write_txn, None);
+        assert!(!env.txn_info.contains_key(&1));
+        assert!(env.txn_info.contains_key(&2));
+
+        env.schedule_transactions(origin.clone(), "test_db");
+        assert_eq!(env.running_readwrite, Some(2));
+        wait_for_batch(&mut env, &manager, 2);
+        assert!(put_results.recv().unwrap().is_ok());
+        assert!(env.can_commit_now(2));
+        env.commit_engine_transaction(2).unwrap();
+        env.finish_transaction(2);
+        assert_eq!(env.engine_write_txn, None);
+
+        // Only transaction 2's record exists.
+        let (count_sender, count_result) = generic_channel::channel().unwrap();
+        env.register_transaction(
+            3,
+            IndexedDBTxnMode::Readonly,
+            vec!["books".to_string()],
+            connection_b,
+        );
+        env.queue_operation(
+            "books",
+            3,
+            IndexedDBTxnMode::Readonly,
+            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
+                callback: GenericCallback::new(move |result| {
+                    let _ = count_sender.send(result.unwrap());
+                })
+                .unwrap(),
+                key_range: IndexedDBKeyRange::default(),
+                count: None,
+                index_name: None,
+                direction: Default::default(),
+            }),
+        );
+        env.schedule_transactions(origin, "test_db");
+        wait_for_batch(&mut env, &manager, 3);
+        let keys: BackendResult<Vec<IndexedDBKeyType>> = count_result.recv().unwrap();
+        assert_eq!(keys.unwrap(), vec![IndexedDBKeyType::Number(2.0)]);
     }
 }

@@ -168,8 +168,7 @@ impl IDBTransaction {
         durability: IDBTransactionDurability,
         scope: &DOMStringList,
     ) -> DomRoot<IDBTransaction> {
-        let serial_number =
-            IDBTransaction::create_transaction(global, connection.get_name(), mode, scope);
+        let serial_number = IDBTransaction::create_transaction(global, connection, mode, scope);
         IDBTransaction::new_with_serial(
             cx,
             global,
@@ -205,7 +204,7 @@ impl IDBTransaction {
 
     fn create_transaction(
         global: &GlobalScope,
-        db_name: DOMString,
+        connection: &IDBDatabase,
         mode: IDBTransactionMode,
         scope: &DOMStringList,
     ) -> u64 {
@@ -225,9 +224,10 @@ impl IDBTransaction {
             .send(IndexedDBThreadMsg::Sync(SyncOperation::CreateTransaction {
                 sender,
                 origin: global.origin().immutable().clone(),
-                db_name: String::from(db_name),
+                db_name: String::from(connection.get_name()),
                 mode: backend_mode,
                 scope,
+                connection: connection.id(),
             }))
             .expect("Failed to send IndexedDBThreadMsg::Sync");
 

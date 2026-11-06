@@ -519,6 +519,13 @@ impl WorkerGlobalScope {
         self.upcast::<GlobalScope>()
             .remove_web_messaging_and_dedicated_workers_infra();
 
+        // Partii: a terminated worker leaves its event loop without running close(), so its
+        // IndexedDB connections would stay open, with their transactions (and a database's
+        // write lock) held forever. Close them here too; this is a no-op after close().
+        if let Some(factory) = self.upcast::<GlobalScope>().indexeddb_factory() {
+            factory.abort_pending_upgrades_and_close_databases();
+        }
+
         // Drop the runtime.
         let runtime = self.runtime.borrow_mut().take();
         drop(runtime);

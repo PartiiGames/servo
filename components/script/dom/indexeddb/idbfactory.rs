@@ -1,6 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+use std::cell::Cell;
 use std::collections::HashSet;
 
 use dom_struct::dom_struct;
@@ -57,6 +58,9 @@ pub struct IDBFactory {
 
     #[no_trace]
     callback: DomRefCell<Option<GenericCallback<ConnectionMsg>>>,
+
+    /// Partii: set once the global's connections were closed at teardown.
+    closed_for_teardown: Cell<bool>,
 }
 
 impl IDBFactory {
@@ -66,6 +70,7 @@ impl IDBFactory {
             connections: Default::default(),
             indexeddb_transactions: Default::default(),
             callback: Default::default(),
+            closed_for_teardown: Cell::new(false),
         }
     }
 
@@ -491,7 +496,17 @@ impl IDBFactory {
         Ok(())
     }
 
+    /// Run when the global goes away (window teardown, worker close or termination). Every
+    /// connection opened through this factory is reached: an open request keeps its connection
+    /// in `pending_connection` after it succeeded, and requests are never removed from
+    /// `connections`. The forced close makes the backend abort the connection's transactions,
+    /// which script can no longer commit or finish.
     pub(crate) fn abort_pending_upgrades_and_close_databases(&self) {
+        // Partii: teardown can reach this twice (a worker's close() and then its runtime
+        // shutdown).
+        if self.closed_for_teardown.replace(true) {
+            return;
+        }
         let global = self.global();
         let connections = self.connections.borrow();
         let pending_upgrades = connections
