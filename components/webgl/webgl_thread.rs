@@ -1672,7 +1672,18 @@ impl WebGLImpl {
                 unsafe { gl.delete_framebuffer(id.glow()) }
             },
             WebGLCommand::DeleteRenderbuffer(id) => {
-                state.pending_renderbuffers.remove(&id.glow().0.get());
+                // A deleted renderbuffer still attached to a framebuffer lives on as its attachment
+                // (orphaned): make its storage first. Otherwise it is never needed.
+                let name = id.glow().0.get();
+                if state.pending_renderbuffers.contains_key(&name) &&
+                    state
+                        .framebuffer_renderbuffers
+                        .values()
+                        .any(|attached| attached.contains(&name))
+                {
+                    Self::make_renderbuffers(gl, state, vec![name]);
+                }
+                state.pending_renderbuffers.remove(&name);
                 unsafe { gl.delete_renderbuffer(id.glow()) }
             },
             WebGLCommand::DeleteTexture(id) => unsafe { gl.delete_texture(id.glow()) },
@@ -3387,6 +3398,11 @@ impl WebGLImpl {
                 names
             },
         };
+        Self::make_renderbuffers(gl, state, names);
+    }
+
+    /// Partii (perf): makes the storage of these pending renderbuffers, keeping RENDERBUFFER's binding.
+    fn make_renderbuffers(gl: &Gl, state: &mut GLState, names: Vec<u32>) {
         if names.is_empty() {
             return;
         }
