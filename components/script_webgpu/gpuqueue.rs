@@ -21,8 +21,8 @@ use script_bindings::codegen::GenericBindings::WebGPUBinding::{
     GPUSize64, GPUTexelCopyBufferLayout, GPUTexelCopyTextureInfo,
 };
 use script_bindings::codegen::GenericUnionTypes::{
-    ArrayBufferViewOrArrayBuffer as BufferSource,
     ImageBitmapOrImageDataOrHTMLImageElementOrHTMLVideoElementOrHTMLCanvasElementOrOffscreenCanvas as GPUCopyExternalImageSource,
+    MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer as AllowSharedBufferSource,
     RangeEnforcedUnsignedLongSequenceOrGPUExtent3DDict as GPUExtent3D,
 };
 use script_bindings::error::{Error, Fallible};
@@ -141,16 +141,19 @@ where
         cx: &mut JSContext,
         buffer: &GPUBuffer<D>,
         buffer_offset: GPUSize64,
-        data: BufferSource,
+        data: AllowSharedBufferSource,
         data_offset: GPUSize64,
         size: Option<GPUSize64>,
     ) -> Fallible<()> {
-        // Step 1
-        let (sizeof_element, data_len): (usize, usize) = match &data {
-            BufferSource::ArrayBufferView(d) => {
-                (d.get_array_type().byte_size().unwrap_or(1), d.len())
+        // Step 1. The byte length comes from the bytes themselves: mozjs's `len()` asserts the
+        // buffer is not shared.
+        let bytes = get_buffer_source_slice(&data, cx.no_gc());
+        let data_len = bytes.len();
+        let sizeof_element = match &data {
+            AllowSharedBufferSource::ArrayBufferView(d) => {
+                d.get_array_type().byte_size().unwrap_or(1)
             },
-            BufferSource::ArrayBuffer(d) => (1, d.len()),
+            AllowSharedBufferSource::ArrayBuffer(_) => 1,
         };
         // Step 2
         let data_size: usize = data_len / sizeof_element;
@@ -182,9 +185,7 @@ where
         // Step 5&6
         let byte_start = (data_offset as usize) * sizeof_element;
         let byte_end = ((data_offset + content_size) as usize) * sizeof_element;
-        let contents = GenericSharedMemory::from_bytes(
-            &get_buffer_source_slice(&data, cx.no_gc())[byte_start..byte_end],
-        );
+        let contents = GenericSharedMemory::from_bytes(&bytes[byte_start..byte_end]);
         if let Err(e) = self.channel.0.send(WebGPURequest::WriteBuffer {
             device_id: self.device.borrow().as_ref().unwrap().id().0,
             queue_id: self.queue.0,
@@ -206,7 +207,7 @@ where
         &self,
         cx: &mut JSContext,
         destination: &GPUTexelCopyTextureInfo<D>,
-        data: BufferSource,
+        data: AllowSharedBufferSource,
         data_layout: &GPUTexelCopyBufferLayout,
         size: GPUExtent3D,
     ) -> Fallible<()> {

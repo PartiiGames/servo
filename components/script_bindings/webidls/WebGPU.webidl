@@ -1181,14 +1181,14 @@ interface GPUQueue {
     undefined writeBuffer(
         GPUBuffer buffer,
         GPUSize64 bufferOffset,
-        BufferSource data,
+        AllowSharedBufferSource data,
         optional GPUSize64 dataOffset = 0,
         optional GPUSize64 size);
 
     [Throws]
     undefined writeTexture(
       GPUTexelCopyTextureInfo destination,
-      BufferSource data,
+      AllowSharedBufferSource data,
       GPUTexelCopyBufferLayout dataLayout,
       GPUExtent3D size);
 

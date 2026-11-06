@@ -4,3 +4,7 @@
 
 // https://webidl.spec.whatwg.org/#BufferSource
 typedef (ArrayBufferView or ArrayBuffer) BufferSource;
+
+// https://webidl.spec.whatwg.org/#AllowSharedBufferSource
+// (the spec spells the buffer member SharedArrayBuffer; an [AllowShared] ArrayBuffer is the same set here)
+typedef ([AllowShared] ArrayBufferView or [AllowShared] ArrayBuffer) AllowSharedBufferSource;
