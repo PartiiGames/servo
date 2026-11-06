@@ -840,8 +840,9 @@ impl WebGLThread {
 
         // Partii: antialias: true draws into a multisampled framebuffer that stands in for the
         // default one (surfman surfaces are single-sampled) and is resolved into the surface
-        // before reads and swaps. PARTII_WEBGL_MSAA=0 turns it off.
-        let msaa = if attributes.antialias && msaa_enabled() {
+        // before reads and swaps. Not on Mesa's software renderers unless PARTII_WEBGL_MSAA=1
+        // (see msaa_enabled); PARTII_WEBGL_MSAA=0 turns it off everywhere.
+        let msaa = if attributes.antialias && msaa_enabled(&gl) {
             let msaa = unsafe { MsaaFramebuffer::new(&gl, size.to_i32()) };
             if msaa.is_none() {
                 warn!("antialias: no multisampled default framebuffer, drawing without it");
@@ -5046,11 +5047,24 @@ fn surface_framebuffer(device: &Device, ctx: &Context) -> Option<gl::NativeFrame
         .and_then(|info| info.framebuffer_object)
 }
 
-/// Partii: `PARTII_WEBGL_MSAA=0` turns off the multisampled default framebuffer for
-/// antialias: true (A/B switch; then the default framebuffer is single-sampled as before).
-fn msaa_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_MSAA").map_or(true, |v| v != "0"))
+/// Partii: whether antialias: true gets the multisampled default framebuffer. `PARTII_WEBGL_MSAA=1`
+/// forces it on, `0` off (then the default framebuffer is single-sampled as before). Unset, it is
+/// off on Mesa's software renderers (llvmpipe, softpipe, swrast): there 4x multisampling halves
+/// brawlii's frame rate (32 -> 17 fps) and llvmpipe's scissor test lets half a pixel through
+/// below and left of the box on multisampled targets (gl-scissor-test with antialias).
+fn msaa_enabled(gl: &Gl) -> bool {
+    static MODE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let mode = *MODE.get_or_init(|| match std::env::var("PARTII_WEBGL_MSAA").as_deref() {
+        Ok("0") => Some(false),
+        Ok("1") => Some(true),
+        _ => None,
+    });
+    mode.unwrap_or_else(|| {
+        let renderer = unsafe { gl.get_parameter_string(gl::RENDERER) }.to_ascii_lowercase();
+        !["llvmpipe", "softpipe", "swrast"]
+            .iter()
+            .any(|software| renderer.contains(software))
+    })
 }
 
 /// Partii (perf): texImage2D(null) clears colour-renderable levels instead of uploading zeros, unless
