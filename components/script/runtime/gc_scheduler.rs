@@ -36,6 +36,15 @@
 //!   CPUs (and the GC helper threads) in the same few ms.
 //! - `PARTII_GC_FINALIZE_STATS=1` adds the DOM objects each GC finalized, and their finalizers'
 //!   time, to the log line.
+//!
+//! **Incremental marking** (`PARTII_GC_INCREMENTAL=1`, default off; not on Windows): a periodic GC
+//! marks in slices of `PARTII_GC_SLICE_MS` (default 5) at most every `PARTII_GC_SLICE_GAP_MS`
+//! (default 10), from the event loops, and sweeps in one pause: as soon as sweeping starts the GC is
+//! finished before any script runs again. SpiderMonkey's own GCs stay non-incremental (their slice
+//! budget is unlimited). The DOM's Rust edges have no write barriers, so `script_bindings::
+//! incremental_gc` shades every reflector Rust hands out while marking, and re-traces the Rust roots
+//! and every marked reflector's Rust fields when marking ends (SpiderMonkey's gray-roots hook).
+//! The slices use a work budget, calibrated to the slice time from the last slices' speed.
 
 #![allow(unsafe_code)]
 
@@ -44,11 +53,19 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use std::os::raw::c_void;
+
 use js::context::JSContext;
-use js::jsapi::{GCOptions, GCReason, JSGCParamKey};
-use js::rust::wrappers2::{
-    JS_GetGCParameter, JS_GetRuntime, JS_SetGCParameter, NonIncrementalGC, PrepareForFullGC,
+use js::jsapi::{
+    GCDescription, GCOptions, GCProgress, GCReason, GCSliceCallback, JSContext as RawJSContext,
+    JSGCParamKey, JSTracer, SliceBudget,
 };
+use js::rust::wrappers2::{
+    FinishIncrementalGC, IncrementalGCSlice, IsIncrementalGCInProgress, JS_GetGCParameter,
+    JS_GetRuntime, JS_SetGCParameter, NonIncrementalGC, PrepareForFullGC, SetGCSliceCallback,
+    StartIncrementalGC,
+};
+use script_bindings::incremental_gc;
 
 struct Config {
     enabled: bool,
@@ -65,6 +82,14 @@ struct Config {
     stagger: Duration,
     /// Count DOM finalizers in the log line.
     finalize_stats: bool,
+    /// Mark periodic GCs incrementally.
+    incremental: bool,
+    /// Target length of a marking slice.
+    slice: Duration,
+    /// Least time between two marking slices.
+    slice_gap: Duration,
+    /// An incremental GC still running after this long is finished in one go.
+    incremental_max: Duration,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -94,6 +119,11 @@ fn config() -> &'static Config {
             std::env::var("PARTII_GC_FINALIZE_STATS").as_deref(),
             Ok("1")
         ),
+        incremental: cfg!(not(windows))
+            && matches!(std::env::var("PARTII_GC_INCREMENTAL").as_deref(), Ok("1")),
+        slice: env_ms("PARTII_GC_SLICE_MS", 5),
+        slice_gap: env_ms("PARTII_GC_SLICE_GAP_MS", 10),
+        incremental_max: env_ms("PARTII_GC_INCREMENTAL_MAX_MS", 2000),
     })
 }
 
@@ -124,6 +154,21 @@ struct State {
     /// When we emptied the nursery for the next periodic GC (split mode), and how long it took.
     nursery_at: Cell<Option<Instant>>,
     nursery_pause: Cell<Duration>,
+    /// The incremental GC in progress (ours), if any.
+    incremental: Cell<Option<IncrementalGc>>,
+    /// Work units per ms that marking slices managed lately (to size the work budget).
+    units_per_ms: Cell<f64>,
+}
+
+/// An incremental GC the scheduler started.
+#[derive(Clone, Copy)]
+struct IncrementalGc {
+    started: Instant,
+    before: u32,
+    slices: u32,
+    last_slice: Instant,
+    max_slice: Duration,
+    total: Duration,
 }
 
 thread_local! {
@@ -137,8 +182,20 @@ thread_local! {
         tuned: Cell::new(false),
         nursery_at: Cell::new(None),
         nursery_pause: Cell::new(Duration::ZERO),
+        incremental: Cell::new(None),
+        units_per_ms: Cell::new(20_000.),
     };
+    /// Set from the gray-roots hook: sweeping began in the current GC.
+    static SWEEP_STARTED: Cell<bool> = const { Cell::new(false) };
+    /// Whether the current GC is one of our incremental ones (the remark runs only then).
+    static IN_INCREMENTAL: Cell<bool> = const { Cell::new(false) };
+    /// The Rust roots tracer and its data, for the remark.
+    static ROOTS_TRACER: Cell<Option<(RootsTracer, *mut c_void)>> = const { Cell::new(None) };
+    /// The GC slice callback that was installed before ours.
+    static PREVIOUS_SLICE_CALLBACK: Cell<GCSliceCallback> = const { Cell::new(None) };
 }
+
+type RootsTracer = unsafe extern "C" fn(*mut JSTracer, *mut c_void);
 
 /// When some runtime in the process last started a periodic GC, in ms since `epoch()` (+1, so 0
 /// means never).
@@ -282,6 +339,9 @@ pub(crate) fn after_tasks(cx: &mut JSContext, kind: Kind) {
         let now = Instant::now();
         state.last_task.set(now);
         state.dirty_since_shrink.set(true);
+        if config.incremental && incremental_step(cx, state, kind, now) {
+            return;
+        }
         if !state.tuned.replace(true) {
             if config.finalize_stats {
                 script_bindings::set_finalize_stats(true);
@@ -326,7 +386,11 @@ pub(crate) fn after_tasks(cx: &mut JSContext, kind: Kind) {
         } else if !claim_periodic_slot(config.stagger, now) {
             return;
         }
-        collect(cx, state, kind, false);
+        if config.incremental {
+            start_incremental(cx, state, kind);
+        } else {
+            collect(cx, state, kind, false);
+        }
     })
 }
 
@@ -337,6 +401,9 @@ pub(crate) fn idle_deadline() -> Option<Instant> {
         return None;
     }
     STATE.with(|state| {
+        if let Some(gc) = state.incremental.get() {
+            return Some(gc.last_slice + config.slice_gap);
+        }
         state
             .dirty_since_shrink
             .get()
@@ -347,9 +414,275 @@ pub(crate) fn idle_deadline() -> Option<Instant> {
 /// Called by a worker's event loop when it woke up at `idle_deadline()` with no task.
 pub(crate) fn on_idle(cx: &mut JSContext) {
     STATE.with(|state| {
+        if state.incremental.get().is_some() {
+            incremental_step(cx, state, Kind::Worker, Instant::now());
+            return;
+        }
         if !state.dirty_since_shrink.get() || state.last_task.get().elapsed() < config().idle {
             return;
         }
         collect(cx, state, Kind::Worker, true);
     })
+}
+
+// ---- Incremental marking (PARTII_GC_INCREMENTAL=1) ----
+
+// SpiderMonkey entry points the bindings don't cover (exported from the static library).
+#[cfg(not(windows))]
+unsafe extern "C" {
+    #[cfg_attr(
+        target_vendor = "apple",
+        link_name = "\u{1}__Z23JS_SetGrayGCRootsTracerP9JSContextPFbP8JSTracerRN2JS11SliceBudgetEPvES6_"
+    )]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        link_name = "\u{1}_Z23JS_SetGrayGCRootsTracerP9JSContextPFbP8JSTracerRN2JS11SliceBudgetEPvES6_"
+    )]
+    fn SetGrayGCRootsTracer(
+        cx: *mut RawJSContext,
+        trace: Option<unsafe extern "C" fn(*mut JSTracer, *mut SliceBudget, *mut c_void) -> bool>,
+        data: *mut c_void,
+    );
+    /// `JS::SliceBudget::SliceBudget(JS::WorkBudget)` (complete-object constructor).
+    #[cfg_attr(
+        target_vendor = "apple",
+        link_name = "\u{1}__ZN2JS11SliceBudgetC1ENS_10WorkBudgetE"
+    )]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        link_name = "\u{1}_ZN2JS11SliceBudgetC1ENS_10WorkBudgetE"
+    )]
+    fn SliceBudgetFromWork(this: *mut SliceBudget, work: i64);
+}
+
+#[cfg(windows)]
+unsafe fn SetGrayGCRootsTracer(
+    _: *mut RawJSContext,
+    _: Option<unsafe extern "C" fn(*mut JSTracer, *mut SliceBudget, *mut c_void) -> bool>,
+    _: *mut c_void,
+) {
+}
+
+#[cfg(windows)]
+unsafe fn SliceBudgetFromWork(_: *mut SliceBudget, _: i64) {
+    unreachable!()
+}
+
+/// A work budget of `units` (marking steps, roughly cells).
+fn work_budget(units: i64) -> SliceBudget {
+    let mut budget = std::mem::MaybeUninit::<SliceBudget>::uninit();
+    unsafe {
+        SliceBudgetFromWork(budget.as_mut_ptr(), units.max(1000));
+        budget.assume_init()
+    }
+}
+
+/// Sets a runtime up for the schedule. Called when a script or worker runtime is created, before
+/// any DOM object exists on its thread.
+pub(crate) unsafe fn init_runtime(
+    cx: &mut JSContext,
+    roots: Option<RootsTracer>,
+    roots_data: *mut c_void,
+) {
+    let config = config();
+    if !config.enabled || !config.incremental {
+        return;
+    }
+    incremental_gc::enable();
+    ROOTS_TRACER.with(|r| r.set(roots.map(|f| (f, roots_data))));
+    unsafe {
+        JS_SetGCParameter(cx, JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED, 1);
+        // SpiderMonkey's own GCs (and any slice it runs by itself) get an unlimited budget: only
+        // ours are incremental, so sweeping never interleaves with script.
+        JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, 0);
+        let raw = cx.raw_cx();
+        SetGrayGCRootsTracer(raw, Some(gray_roots), roots_data);
+        let previous = SetGCSliceCallback(cx, Some(slice_callback));
+        PREVIOUS_SLICE_CALLBACK.with(|p| p.set(previous));
+    }
+}
+
+/// SpiderMonkey calls this when marking of a sweep group is done, before it sweeps it: the remark.
+unsafe extern "C" fn gray_roots(
+    trc: *mut JSTracer,
+    _budget: *mut SliceBudget,
+    _data: *mut c_void,
+) -> bool {
+    if !IN_INCREMENTAL.with(Cell::get) {
+        return true;
+    }
+    SWEEP_STARTED.with(|s| s.set(true));
+    if let Some((roots, data)) = ROOTS_TRACER.with(Cell::get) {
+        unsafe { roots(trc, data) };
+    }
+    let (registered, traced) = unsafe { incremental_gc::remark(trc) };
+    if config().log {
+        eprintln!("[gc-sched] remark: {registered} reflectors, {traced} re-traced");
+    }
+    true
+}
+
+/// Turns the expose barrier off inside every GC slice (finalizers must not barrier), and resets
+/// our flags when a GC ends.
+unsafe extern "C" fn slice_callback(
+    cx: *mut RawJSContext,
+    progress: GCProgress,
+    desc: *const GCDescription,
+) {
+    match progress {
+        GCProgress::GC_CYCLE_BEGIN | GCProgress::GC_SLICE_BEGIN => {
+            incremental_gc::set_marking(false)
+        },
+        GCProgress::GC_CYCLE_END => {
+            incremental_gc::set_marking(false);
+            IN_INCREMENTAL.with(|i| i.set(false));
+            SWEEP_STARTED.with(|s| s.set(false));
+        },
+        GCProgress::GC_SLICE_END => {},
+    }
+    if let Some(previous) = PREVIOUS_SLICE_CALLBACK.with(Cell::get) {
+        unsafe { previous(cx, progress, desc) };
+    }
+}
+
+/// Starts an incremental GC with a first slice.
+fn start_incremental(cx: &mut JSContext, state: &State, kind: Kind) {
+    let before = param(cx, JSGCParamKey::JSGC_BYTES);
+    if config().finalize_stats {
+        script_bindings::take_finalize_stats();
+    }
+    let started = Instant::now();
+    IN_INCREMENTAL.with(|i| i.set(true));
+    SWEEP_STARTED.with(|s| s.set(false));
+    let budget = work_budget(slice_units(state));
+    unsafe {
+        PrepareForFullGC(cx);
+        StartIncrementalGC(cx, GCOptions::Normal, GCReason::FULL_GC_TIMER, &budget);
+    }
+    let gc = IncrementalGc {
+        started,
+        before,
+        slices: 0,
+        last_slice: started,
+        max_slice: Duration::ZERO,
+        total: Duration::ZERO,
+    };
+    after_slice(cx, state, kind, gc, started);
+}
+
+/// Work units for one slice of the configured length.
+fn slice_units(state: &State) -> i64 {
+    (state.units_per_ms.get() * config().slice.as_secs_f64() * 1000.) as i64
+}
+
+/// Runs the next slice of our incremental GC if one is due. Returns whether a GC is in progress
+/// (then nothing else should be scheduled this turn).
+fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant) -> bool {
+    let Some(gc) = state.incremental.get() else {
+        return false;
+    };
+    if !unsafe { IsIncrementalGCInProgress(cx) } {
+        // SpiderMonkey finished it (a GC of its own with an unlimited budget).
+        finish_log(cx, state, kind, gc, "finished by SpiderMonkey");
+        return false;
+    }
+    if now - gc.last_slice < config().slice_gap {
+        return true;
+    }
+    let started = Instant::now();
+    if started - gc.started > config().incremental_max {
+        unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) };
+        let mut gc = gc;
+        gc.slices += 1;
+        let pause = Instant::now() - started;
+        gc.max_slice = gc.max_slice.max(pause);
+        gc.total += pause;
+        finish_log(cx, state, kind, gc, "over its time limit, finished");
+        return true;
+    }
+    let units = slice_units(state);
+    let budget = work_budget(units);
+    unsafe { IncrementalGCSlice(cx, GCReason::FULL_GC_TIMER, &budget) };
+    // Calibrate: units per ms in this slice (marking slices only; sweeping isn't budgeted here).
+    let ms = (Instant::now() - started).as_secs_f64() * 1000.;
+    if ms > 0.5 && !SWEEP_STARTED.with(Cell::get) {
+        let speed = units as f64 / ms;
+        state
+            .units_per_ms
+            .set((state.units_per_ms.get() * 0.7 + speed * 0.3).clamp(1000., 1_000_000.));
+    }
+    after_slice(cx, state, kind, gc, started);
+    true
+}
+
+/// After a slice: finishes the GC if sweeping started, else turns the expose barrier on.
+fn after_slice(
+    cx: &mut JSContext,
+    state: &State,
+    kind: Kind,
+    mut gc: IncrementalGc,
+    started: Instant,
+) {
+    if unsafe { IsIncrementalGCInProgress(cx) } && SWEEP_STARTED.with(Cell::get) {
+        unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) };
+    }
+    let now = Instant::now();
+    let pause = now - started;
+    gc.slices += 1;
+    gc.last_slice = now;
+    gc.max_slice = gc.max_slice.max(pause);
+    gc.total += pause;
+    if unsafe { IsIncrementalGCInProgress(cx) } {
+        state.incremental.set(Some(gc));
+        incremental_gc::set_marking(true);
+    } else {
+        finish_log(cx, state, kind, gc, "done");
+    }
+}
+
+/// Bookkeeping and the log line when our incremental GC is over.
+fn finish_log(cx: &JSContext, state: &State, kind: Kind, gc: IncrementalGc, how: &str) {
+    state.incremental.set(None);
+    incremental_gc::set_marking(false);
+    let now = Instant::now();
+    state.last_pause.set(gc.max_slice);
+    state
+        .major_number
+        .set(param(cx, JSGCParamKey::JSGC_MAJOR_GC_NUMBER));
+    state.last_major.set(now);
+    let after = param(cx, JSGCParamKey::JSGC_BYTES);
+    state.bytes_after.set(after);
+    let nursery = state.nursery_at.take();
+    if config().log {
+        let finalized = if config().finalize_stats {
+            let (n, ns) = script_bindings::take_finalize_stats();
+            format!(", finalized {} DOM objects in {:.2} ms", n, ns as f64 / 1e6)
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "[gc-sched] {} incremental GC {}: {} slices, max {:.2} ms, total {:.2} ms over {} ms, {} -> {} KB, {:.0} units/ms{}{}",
+            if kind == Kind::Worker {
+                "worker"
+            } else {
+                "window"
+            },
+            how,
+            gc.slices,
+            gc.max_slice.as_secs_f64() * 1000.,
+            gc.total.as_secs_f64() * 1000.,
+            (now - gc.started).as_millis(),
+            gc.before / 1024,
+            after / 1024,
+            state.units_per_ms.get(),
+            nursery
+                .map(|at| format!(
+                    ", nursery {:.2} ms",
+                    state.nursery_pause.get().as_secs_f64() * 1000.
+                ))
+                .unwrap_or_default(),
+            finalized
+        );
+    }
+    let _ = nursery;
 }
