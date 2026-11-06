@@ -249,7 +249,7 @@ impl Painter {
                     // PARTII_WR_DEBUG=<bits>: any WebRender debug flags (measurement only).
                     std::env::var("PARTII_WR_DEBUG")
                         .ok()
-                        .and_then(|v| v.parse::<u32>().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
                         .unwrap_or(0),
                 ),
                 // PARTII_WR_TILES=1: WebRender fills per-tile picture cache debug info, which
