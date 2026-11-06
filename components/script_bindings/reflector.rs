@@ -61,6 +61,15 @@ pub struct Reflector<T = ()> {
     size: T,
     /// Cached prototype ID for fast type checks.
     proto_id: Cell<u16>,
+    /// Index in the incremental GC's reflector registry (`incremental_gc::UNREGISTERED` if not in it).
+    #[ignore_malloc_size_of = "an index"]
+    gc_registry: Cell<usize>,
+}
+
+impl<T> Drop for Reflector<T> {
+    fn drop(&mut self) {
+        crate::incremental_gc::unregister(&self.gc_registry);
+    }
 }
 
 unsafe impl<T> js::gc::Traceable for Reflector<T> {
@@ -81,6 +90,7 @@ impl<T> Reflector<T> {
     /// Get the reflector.
     #[inline]
     pub fn get_jsobject(&self) -> HandleObject<'_> {
+        crate::incremental_gc::expose(self.object.get());
         // We're rooted, so it's safe to hand out a handle to object in Heap
         unsafe { HandleObject::from_raw(self.object.handle()) }
     }
@@ -106,12 +116,14 @@ impl<T> Reflector<T> {
         assert!(self.object.get().is_null());
         assert!(!object.is_null());
         self.object.set(object);
+        crate::incremental_gc::register(&self.object, &self.gc_registry);
     }
 
     /// Return a pointer to the memory location at which the JS reflector
     /// object is stored. Used to root the reflector, as
     /// required by the JSAPI rooting APIs.
     pub fn rootable(&self) -> &Heap<*mut JSObject> {
+        crate::incremental_gc::expose(self.object.get());
         &self.object
     }
 }
@@ -125,6 +137,7 @@ impl<T: AssociatedMemorySize> Reflector<T> {
             object: Heap::default(),
             proto_id: Cell::new(u16::MAX),
             size: T::default(),
+            gc_registry: Cell::new(crate::incremental_gc::UNREGISTERED),
         }
     }
 
