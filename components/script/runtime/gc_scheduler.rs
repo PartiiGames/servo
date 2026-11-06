@@ -74,8 +74,8 @@ use js::jsapi::{
 };
 use js::rust::wrappers2::{
     FinishIncrementalGC, IncrementalGCSlice, IsIncrementalGCInProgress, JS_GetGCParameter,
-    JS_GetRuntime, JS_SetGCParameter, NonIncrementalGC, PrepareForFullGC, SetGCSliceCallback,
-    StartIncrementalGC,
+    JS_GetRuntime, JS_SetGCParameter, NonIncrementalGC, PrepareForFullGC,
+    SetCreateGCSliceBudgetCallback, SetGCSliceCallback, StartIncrementalGC,
 };
 use script_bindings::incremental_gc;
 
@@ -206,6 +206,11 @@ thread_local! {
     };
     /// Set from the gray-roots hook: sweeping began in the current GC.
     static SWEEP_STARTED: Cell<bool> = const { Cell::new(false) };
+    /// This thread's context, for SpiderMonkey's slice-budget callback (which gets none).
+    static RAW_CX: Cell<*mut RawJSContext> = const { Cell::new(std::ptr::null_mut()) };
+    /// Black remarks in the current GC: count, edges shaded, longest, total.
+    static BLACK_REMARKS: Cell<(u32, usize, Duration, Duration)> =
+        const { Cell::new((0, 0, Duration::ZERO, Duration::ZERO)) };
     /// Whether the scheduler itself is running a slice (else a slice is SpiderMonkey's own).
     static OUR_SLICE: Cell<bool> = const { Cell::new(false) };
     /// When SpiderMonkey's own slice in progress began.
@@ -287,6 +292,7 @@ fn collect(cx: &mut JSContext, state: &State, kind: Kind, shrink: bool) {
     if config().finalize_stats {
         script_bindings::take_finalize_stats();
     }
+    black_remark_before_slice(cx.raw_cx());
     let started = Instant::now();
     unsafe {
         PrepareForFullGC(cx);
@@ -629,6 +635,11 @@ pub(crate) unsafe fn init_runtime(
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, sm_budget);
         let raw = cx.raw_cx();
         SetGrayGCRootsTracer(raw, Some(gray_roots), roots_data);
+        RAW_CX.with(|c| c.set(raw));
+        if budget_layout_ok() {
+            // SpiderMonkey's own slices: the black remark first, then its budget.
+            SetCreateGCSliceBudgetCallback(cx, Some(sm_slice_budget));
+        }
         let previous = SetGCSliceCallback(cx, Some(slice_callback));
         PREVIOUS_SLICE_CALLBACK.with(|p| p.set(previous));
     }
@@ -643,6 +654,36 @@ fn incremental_sweep() -> bool {
 /// Whether SpiderMonkey's own slices are budgeted (and its GCs incremental).
 fn sm_slices() -> bool {
     config().sm_slices && budget_layout_ok()
+}
+
+/// The black remark (`incremental_gc::black_remark`) before a slice of a GC that is still marking
+/// (or sweeping in slices: later sweep groups still mark). Outside any slice.
+fn black_remark_before_slice(cx: *mut RawJSContext) {
+    if cx.is_null() || !unsafe { js::jsapi::IsIncrementalGCInProgress(cx) } {
+        return;
+    }
+    if SWEEP_STARTED.with(Cell::get) && !incremental_sweep() {
+        return;
+    }
+    let started = Instant::now();
+    let roots = ROOTS_TRACER.with(Cell::get);
+    let done = unsafe { incremental_gc::black_remark(cx, roots) };
+    let took = started.elapsed();
+    BLACK_REMARKS.with(|b| {
+        let (n, edges, max, total) = b.get();
+        b.set((n + 1, edges + done.edges, max.max(took), total + took));
+    });
+}
+
+/// SpiderMonkey's slice-budget callback, for the slices it runs by itself (heap idle here): the
+/// black remark, then the budget (`millis` is JSGC_SLICE_TIME_BUDGET_MS; 0 means unlimited).
+unsafe extern "C" fn sm_slice_budget(_reason: GCReason, millis: i64) -> SliceBudget {
+    black_remark_before_slice(RAW_CX.with(Cell::get));
+    let mut budget = time_budget(Duration::from_millis(millis.max(1) as u64));
+    if millis <= 0 {
+        unsafe { unlimit_budget(&mut budget) };
+    }
+    budget
 }
 
 /// SpiderMonkey calls this when marking of a sweep group is done, before it sweeps it: the remark.
@@ -721,6 +762,7 @@ fn start_incremental(cx: &mut JSContext, state: &State, kind: Kind) {
     }
     let started = Instant::now();
     SM_SLICES.with(|s| s.set(Default::default()));
+    BLACK_REMARKS.with(|b| b.set(Default::default()));
     let budget = time_budget(config().slice);
     our_slice(|| unsafe {
         PrepareForFullGC(cx);
@@ -767,6 +809,7 @@ fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant)
         return true;
     }
     let started = Instant::now();
+    black_remark_before_slice(cx.raw_cx());
     if started - gc.started > config().incremental_max {
         our_slice(|| unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) });
         let mut gc = gc;
@@ -823,6 +866,7 @@ fn finish_log(cx: &JSContext, state: &State, kind: Kind, gc: IncrementalGc, how:
     incremental_gc::set_marking(false);
     let now = Instant::now();
     let (sm_n, sm_max, sm_total) = SM_SLICES.with(|s| s.replace(Default::default()));
+    let (br_n, br_edges, br_max, br_total) = BLACK_REMARKS.with(|b| b.replace(Default::default()));
     state.last_pause.set(gc.max_slice.max(sm_max));
     state
         .major_number
@@ -839,7 +883,7 @@ fn finish_log(cx: &JSContext, state: &State, kind: Kind, gc: IncrementalGc, how:
             String::new()
         };
         eprintln!(
-            "[gc-sched] {} incremental GC{} {}: {} slices, max {:.2} ms, total {:.2} ms; SpiderMonkey's {} slices, max {:.2} ms, total {:.2} ms; over {} ms, {} -> {} KB{}{}",
+            "[gc-sched] {} incremental GC{} {}: {} slices, max {:.2} ms, total {:.2} ms; SpiderMonkey's {} slices, max {:.2} ms, total {:.2} ms; black remark {}x, {} edges, max {:.2} ms, total {:.2} ms; over {} ms, {} -> {} KB{}{}",
             if kind == Kind::Worker {
                 "worker"
             } else {
@@ -857,6 +901,10 @@ fn finish_log(cx: &JSContext, state: &State, kind: Kind, gc: IncrementalGc, how:
             sm_n,
             sm_max.as_secs_f64() * 1000.,
             sm_total.as_secs_f64() * 1000.,
+            br_n,
+            br_edges,
+            br_max.as_secs_f64() * 1000.,
+            br_total.as_secs_f64() * 1000.,
             (now - gc.started).as_millis(),
             gc.before / 1024,
             after / 1024,

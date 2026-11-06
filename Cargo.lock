@@ -9620,6 +9620,7 @@ version = "0.7.0"
 dependencies = [
  "atomic_refcell",
  "bitflags 2.13.2",
+ "cc",
  "criterion",
  "crossbeam-channel",
  "encoding_rs",
@@ -9630,6 +9631,7 @@ dependencies = [
  "log",
  "malloc_size_of_derive",
  "mozjs",
+ "mozjs_sys",
  "num-traits",
  "parking_lot",
  "phf 0.14.0",

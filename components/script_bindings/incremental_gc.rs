@@ -172,11 +172,71 @@ pub unsafe fn is_marked_any(obj: *mut JSObject) -> bool {
     }
 }
 
-/// Re-traces the Rust fields of every registered reflector that is marked, with `trc` (the GC's
-/// marking tracer). Returns (registered, re-traced).
+#[cfg(not(windows))]
+unsafe extern "C" {
+    fn partii_barrier_tracer_new(cx: *mut js::jsapi::JSContext) -> *mut JSTracer;
+    fn partii_barrier_tracer_finish(trc: *mut JSTracer) -> usize;
+}
+
+#[cfg(windows)]
+unsafe fn partii_barrier_tracer_new(_: *mut js::jsapi::JSContext) -> *mut JSTracer {
+    std::ptr::null_mut()
+}
+
+#[cfg(windows)]
+unsafe fn partii_barrier_tracer_finish(_: *mut JSTracer) -> usize {
+    0
+}
+
+/// What a black remark did: reflectors re-traced, edges shaded.
+#[derive(Clone, Copy, Default)]
+pub struct BlackRemark {
+    pub registered: usize,
+    pub traced: usize,
+    pub edges: usize,
+}
+
+/// The black remark, from the mutator side between slices of an incremental GC that is marking:
+/// traces the Rust roots (`roots`) and the Rust fields of every registered reflector that is
+/// already marked with a tracer that applies the incremental pre-barrier to each child. Whatever
+/// a `Dom<T>` moved into an already-scanned object (or onto a Rust root) points to is then on the
+/// black mark stack, and the next slice marks it before marking can end. Run before every slice,
+/// SpiderMonkey's own included (its slice-budget callback), this covers the move case in black;
+/// the gray-roots remark (`remark`) stays as the fallback for GCs finished outside the driver.
 ///
 /// # Safety
-/// Only from inside a GC, with SpiderMonkey's marking tracer.
+/// `cx` is this thread's context; not inside a GC slice.
+pub unsafe fn black_remark(
+    cx: *mut js::jsapi::JSContext,
+    roots: Option<(
+        unsafe extern "C" fn(*mut JSTracer, *mut std::os::raw::c_void),
+        *mut std::os::raw::c_void,
+    )>,
+) -> BlackRemark {
+    unsafe {
+        let trc = partii_barrier_tracer_new(cx);
+        if trc.is_null() {
+            return BlackRemark::default();
+        }
+        if let Some((roots, data)) = roots {
+            roots(trc, data);
+        }
+        let (registered, traced) = remark(trc);
+        let edges = partii_barrier_tracer_finish(trc);
+        BlackRemark {
+            registered,
+            traced,
+            edges,
+        }
+    }
+}
+
+/// Re-traces the Rust fields of every registered reflector that is marked, with `trc`. Returns
+/// (registered, re-traced).
+///
+/// # Safety
+/// While an incremental GC is in progress: inside it with SpiderMonkey's marking tracer (the gray
+/// remark), or between slices with the barrier tracer (`black_remark`).
 pub unsafe fn remark(trc: *mut JSTracer) -> (usize, usize) {
     let len = registered();
     let mut traced = 0;

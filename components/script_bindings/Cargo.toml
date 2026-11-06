@@ -20,6 +20,8 @@ name = "script_bindings"
 path = "lib.rs"
 
 [dependencies]
+# Partii: direct, so build.rs runs after mozjs_sys's and finds its headers (incremental_gc_shim.cpp).
+mozjs_sys = { version = "=153.3.0-1", default-features = false }
 atomic_refcell = { workspace = true }
 bitflags = { workspace = true }
 crossbeam-channel = { workspace = true }
@@ -58,6 +60,7 @@ xml5ever = { workspace = true }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [build-dependencies]
+cc = { workspace = true }
 phf_codegen = { workspace = true }
 phf_shared = { workspace = true }
 serde_json = { workspace = true }

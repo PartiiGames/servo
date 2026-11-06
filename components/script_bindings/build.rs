@@ -21,6 +21,8 @@ fn main() {
 
     println!("cargo:out_dir={}", out_dir.display());
 
+    build_incremental_gc_shim();
+
     println!("cargo::rerun-if-changed=webidls");
     println!("cargo::rerun-if-changed=codegen");
     println!("cargo::rerun-if-changed={}", css_properties_json.display());
@@ -143,4 +145,72 @@ fn find_python() -> Command {
     println!("cargo:warning={}", python_result.unwrap_err());
 
     panic!("No suitable python found! Tried: `uv run python`, `python3`, `python`.");
+}
+
+/// Partii: compiles incremental_gc_shim.cpp (a JS::CallbackTracer for the incremental GC's black
+/// remark) against the SpiderMonkey headers of the mozjs_sys build next to ours. mozjs_sys doesn't
+/// export its include directory, so it is found among the sibling build directories (this crate
+/// depends on mozjs_sys directly, so its build script has run). With several, the newest wins.
+fn build_incremental_gc_shim() {
+    println!("cargo::rerun-if-changed=incremental_gc_shim.cpp");
+    if env::var("CARGO_CFG_WINDOWS").is_ok() {
+        return;
+    }
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let build_root = out_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap()
+        .to_path_buf();
+    let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&build_root)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("mozjs_sys-"))
+        .map(|e| e.path().join("out").join("build"))
+        .filter(|b| {
+            b.join("dist/include/jsapi.h").exists() && b.join("js/src/js-confdefs.h").exists()
+        })
+        .filter_map(|b| {
+            Some((
+                std::fs::metadata(b.join("js/src/js-confdefs.h"))
+                    .ok()?
+                    .modified()
+                    .ok()?,
+                b,
+            ))
+        })
+        .collect();
+    found.sort();
+    let Some((_, build_dir)) = found.pop() else {
+        panic!(
+            "incremental_gc_shim: no mozjs_sys build with headers under {}",
+            build_root.display()
+        );
+    };
+    println!(
+        "cargo::warning=incremental_gc_shim: SpiderMonkey headers from {}",
+        build_dir.display()
+    );
+    let config =
+        std::fs::read_to_string(build_dir.join("dist/include/js-config.h")).unwrap_or_default();
+    let debug = config.contains("#define JS_DEBUG 1");
+    let mut cc = cc::Build::new();
+    cc.cpp(true)
+        .std("gnu++20")
+        .pic(true)
+        .flag_if_supported("-fno-rtti")
+        .flag_if_supported("-fno-sized-deallocation")
+        .flag_if_supported("-Wno-unused-parameter")
+        .flag_if_supported("-Wno-invalid-offsetof")
+        .flag("-include")
+        .flag(build_dir.join("js/src/js-confdefs.h").display().to_string())
+        .include(build_dir.join("dist/include"))
+        .define("STATIC_JS_API", None)
+        .file("incremental_gc_shim.cpp");
+    if debug {
+        cc.define("JS_GC_ZEAL", None)
+            .define("DEBUG", None)
+            .define("JS_DEBUG", None);
+    }
+    cc.compile("partii_incremental_gc_shim");
 }

@@ -29,6 +29,8 @@ mod finalize;
 mod guard;
 mod import;
 pub mod incremental_gc;
+// Partii: linked for its build script's order only (build.rs finds the SpiderMonkey headers).
+use mozjs_sys as _;
 pub mod inheritance;
 mod init;
 pub mod interface;
