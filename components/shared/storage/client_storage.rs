@@ -38,7 +38,10 @@ impl ClientStorageThreadHandle {
             origin,
             sender,
         };
-        self.sender.send(message).unwrap();
+        // Partii: during shutdown the client storage thread can be gone already (the IndexedDB thread
+        // deletes databases while the pipeline tears down). Dropping the message drops its reply sender,
+        // so the caller's recv() fails and takes its existing error path instead of panicking here.
+        let _ = self.sender.send(message);
         receiver
     }
 
@@ -53,7 +56,10 @@ impl ClientStorageThreadHandle {
             name,
             sender,
         };
-        self.sender.send(message).unwrap();
+        // Partii: during shutdown the client storage thread can be gone already (the IndexedDB thread
+        // deletes databases while the pipeline tears down). Dropping the message drops its reply sender,
+        // so the caller's recv() fails and takes its existing error path instead of panicking here.
+        let _ = self.sender.send(message);
         receiver
     }
 
@@ -68,7 +74,10 @@ impl ClientStorageThreadHandle {
             name,
             sender,
         };
-        self.sender.send(message).unwrap();
+        // Partii: during shutdown the client storage thread can be gone already (the IndexedDB thread
+        // deletes databases while the pipeline tears down). Dropping the message drops its reply sender,
+        // so the caller's recv() fails and takes its existing error path instead of panicking here.
+        let _ = self.sender.send(message);
         receiver
     }
 
