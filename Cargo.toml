@@ -448,6 +448,8 @@ codegen-units = 1
 # Partii fork: Stylo 0.22.0 with our patches (docs: third_party/PARTII.md).
 stylo = { path = "third_party/stylo" }
 stylo_static_prefs = { path = "third_party/stylo_static_prefs" }
+# Partii fork: WebRender 0.70.0 (docs: third_party/PARTII.md).
+webrender = { path = "third_party/webrender" }
 # If you need to temporarily test Servo with a local fork of some upstream
 # crate, add that here. Use the form:
 #
