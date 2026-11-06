@@ -95,7 +95,7 @@ use euclid::approxeq::ApproxEq;
 use std::{f32, mem, usize};
 use std::collections::vec_deque::VecDeque;
 use std::sync::Arc;
-use crate::util::{VecHelper, MaxRect};
+use crate::util::{VecHelper, MaxRect, ScaleOffset};
 use crate::filterdata::{SFilterDataComponent, SFilterData, SFilterDataKey};
 use log::Level;
 
@@ -502,6 +502,9 @@ pub struct SceneBuilder<'a> {
     /// Maintains state about the list of tile caches being built for this scene.
     tile_cache_builder: TileCacheBuilder,
 
+    /// Partii: images that may be promoted to compositor surfaces, for backdrop underlays.
+    partii_surface_candidates: Vec<PartiiSurfaceCandidate>,
+
     /// A DAG that represents dependencies between picture primitives. This builds
     /// a set of passes to run various picture processing passes in during frame
     /// building, in a way that pictures are processed before (or after) their
@@ -589,6 +592,7 @@ impl<'a> SceneBuilder<'a> {
                 frame_builder_config.background_color,
                 debug_flags,
             ),
+            partii_surface_candidates: Vec::new(),
             picture_graph: mem::take(&mut recycler.picture_graph),
             // This vector is empty most of the time, don't bother with recycling it for now.
             snapshot_pictures: Vec::new(),
@@ -2108,6 +2112,116 @@ impl<'a> SceneBuilder<'a> {
             spatial_node_index,
             info.flags,
         );
+    }
+
+    /// Partii: upstream makes a slice with a backdrop-filter atomic, so its compositor
+    /// surfaces are never promoted (a promoted surface is not in the tiles the backdrop
+    /// reads): a WebGL game under a blurred HUD panel draws its whole canvas into picture
+    /// cache tiles every frame. Instead, when the backdrop goes straight into a non-atomic
+    /// slice, and lies inside an earlier compositor-surface candidate (both in the root
+    /// coordinate system), this adds an underlay: a copy of that image,
+    /// clipped to the backdrop rect grown by the blur's reach, drawn (only when the surface
+    /// is promoted) into the sub-slice above the surface, where the backdrop lands, before
+    /// the capture. The backdrop then blurs the game, and the canvas stays a compositor
+    /// surface. Returns false (upstream: atomic) otherwise. `PARTII_WR_BACKDROP_UNDERLAY=0`
+    /// turns it off. Limitation: under a promoted non-opaque surface, the content below it
+    /// is not in the capture.
+    fn partii_add_backdrop_underlay(
+        &mut self,
+        spatial_node_index: SpatialNodeIndex,
+        info: &LayoutPrimitiveInfo,
+        filters: &[Filter],
+    ) -> bool {
+        if !backdrop_underlay_enabled() {
+            return false;
+        }
+        let into_tile_cache = !self.sc_stack.iter().any(|sc| {
+            !sc.flags.contains(StackingContextFlags::WRAPS_BACKDROP_FILTER)
+        });
+        if !into_tile_cache {
+            return false;
+        }
+        let slice = match self.tile_cache_builder.partii_slice_position() {
+            Some((slice, secondary_slices)) if secondary_slices > 0 => slice,
+            _ => return false,
+        };
+        // How far outside the backdrop rect the filters read.
+        let mut reach: f32 = 0.0;
+        for filter in filters {
+            match *filter {
+                Filter::Blur { width, height, .. } => {
+                    reach += width.max(height).max(0.0) * BLUR_SAMPLE_SCALE;
+                }
+                Filter::Identity | Filter::Opacity(..) | Filter::Brightness(..) |
+                Filter::Contrast(..) | Filter::Grayscale(..) | Filter::HueRotate(..) |
+                Filter::Invert(..) | Filter::Saturate(..) | Filter::Sepia(..) |
+                Filter::ColorMatrix(..) | Filter::SrgbToLinear | Filter::LinearToSrgb => {}
+                _ => return false,
+            }
+        }
+        let rect = match info.rect.intersection(&info.clip_rect) {
+            Some(rect) => rect,
+            None => return false,
+        };
+        // The backdrop and the candidate, in the root coordinate system (both must be in it,
+        // with a scale/offset to it, at scene build).
+        let to_root = |node: SpatialNodeIndex| -> Option<ScaleOffset> {
+            if !self.spatial_tree.is_root_coord_system(node) {
+                return None;
+            }
+            self.spatial_tree.get_node_info(node).snapping_transform
+        };
+        let backdrop_to_root = match to_root(spatial_node_index) {
+            Some(t) => t,
+            None => return false,
+        };
+        let root_rect: LayoutRect = backdrop_to_root.map_rect(&rect);
+        let candidate = self.partii_surface_candidates.iter().rev().find(|c| {
+            c.primary_slice == Some(slice) &&
+                c.info.rect.intersection(&c.info.clip_rect).map_or(false, |r| {
+                    to_root(c.spatial_node_index).map_or(false, |t| {
+                        t.map_rect::<LayoutPixel, LayoutPixel>(&r).inflate(0.5, 0.5).contains_box(&root_rect)
+                    })
+                })
+        });
+        let candidate = match candidate {
+            Some(c) => c,
+            None => return false,
+        };
+        // The underlay: the candidate image on its own node, clipped to the backdrop rect grown
+        // by the filters' reach, a clip on the backdrop's node (so it follows the backdrop).
+        let mut underlay_info = candidate.info;
+        underlay_info.flags.remove(PrimitiveFlags::PREFER_COMPOSITOR_SURFACE);
+        let image = Image { partii_underlay_of: Some(candidate.prim_index), ..candidate.image.clone() };
+        let underlay_spatial_node_index = candidate.spatial_node_index;
+        let clip_node_id = candidate.clip_node_id;
+        let reach_clip = ClipItemEntry {
+            key: ClipItemKey {
+                kind: ClipItemKeyKind::rectangle(ClipMode::Clip),
+            },
+            spatial_node_index,
+            clip_rect: rect.inflate(reach.ceil(), reach.ceil()),
+        };
+        let clip_leaf_id = self.clip_tree_builder.build_for_prim(
+            clip_node_id,
+            &underlay_info,
+            &[reach_clip],
+            &mut self.interners,
+        );
+        let instance = self.create_primitive(&underlay_info, clip_leaf_id, image);
+        // The underlay and the chain go in the slice the backdrop's element would go in.
+        self.tile_cache_builder.partii_set_slice_node(Some(spatial_node_index));
+        self.tile_cache_builder.add_prim(
+            instance,
+            underlay_info.rect,
+            underlay_spatial_node_index,
+            underlay_info.flags,
+            self.spatial_tree,
+            &self.quality_settings,
+            &mut self.prim_instances,
+            &self.clip_tree_builder,
+        );
+        true
     }
 
     fn make_current_slice_atomic_if_required(&mut self) {
@@ -3638,20 +3752,38 @@ impl<'a> SceneBuilder<'a> {
             .. *info
         };
 
+        let image = Image {
+            key: image_key,
+            tile_spacing: tile_spacing.into(),
+            stretch_size,
+            color: color.into(),
+            image_rendering,
+            alpha_type,
+            partii_underlay_of: None,
+        };
+        // Partii: remember compositor-surface candidates for backdrop underlays.
+        let candidate = (info.flags.contains(PrimitiveFlags::PREFER_COMPOSITOR_SURFACE) &&
+            backdrop_underlay_enabled()).then(|| image.clone());
+        let prim_index = self.prim_instances.len();
         self.add_primitive(
             spatial_node_index,
             clip_node_id,
             &info,
             Vec::new(),
-            Image {
-                key: image_key,
-                tile_spacing: tile_spacing.into(),
-                stretch_size,
-                color: color.into(),
-                image_rendering,
-                alpha_type,
-            },
+            image,
         );
+        if let Some(image) = candidate {
+            if self.prim_instances.len() == prim_index + 1 {
+                self.partii_surface_candidates.push(PartiiSurfaceCandidate {
+                    prim_index: prim_index as u32,
+                    spatial_node_index,
+                    clip_node_id,
+                    info,
+                    image,
+                    primary_slice: self.tile_cache_builder.partii_slice_position().map(|p| p.0),
+                });
+            }
+        }
     }
 
     pub fn add_yuv_image(
@@ -3721,7 +3853,11 @@ impl<'a> SceneBuilder<'a> {
         // (which is the common case). It will get resolved later during `finalize_picture`.
         let filter_spatial_node_index = SpatialNodeIndex::UNKNOWN;
 
-        self.make_current_slice_atomic_if_required();
+        // Partii: keep the slice non-atomic (so compositor surfaces still promote) when the
+        // backdrop only covers a promotable surface; see `partii_add_backdrop_underlay`.
+        if !self.partii_add_backdrop_underlay(spatial_node_index, info, &filters) {
+            self.make_current_slice_atomic_if_required();
+        }
 
         // Ensure we create a clip-chain for the capture primitive that matches
         // the render primitive, otherwise one might get culled while the other
@@ -3829,6 +3965,7 @@ impl<'a> SceneBuilder<'a> {
                         &mut self.prim_instances,
                         &self.clip_tree_builder,
                     );
+                    self.tile_cache_builder.partii_set_slice_node(None);
                 }
             }
 
@@ -3857,6 +3994,7 @@ impl<'a> SceneBuilder<'a> {
                 info.flags,
             );
         }
+        self.tile_cache_builder.partii_set_slice_node(None);
     }
 
     #[must_use]
@@ -4902,4 +5040,24 @@ impl SceneRecycler {
 
         // Note: fields of the scene we don't recycle get dropped here.
     }
+}
+
+/// Partii: an image that may become a compositor surface (see
+/// `SceneBuilder::partii_add_backdrop_underlay`).
+struct PartiiSurfaceCandidate {
+    prim_index: u32,
+    spatial_node_index: SpatialNodeIndex,
+    clip_node_id: ClipNodeId,
+    info: LayoutPrimitiveInfo,
+    image: Image,
+    primary_slice: Option<usize>,
+}
+
+/// Partii: `PARTII_WR_BACKDROP_UNDERLAY=0` restores upstream (a backdrop-filter makes its
+/// slice atomic).
+fn backdrop_underlay_enabled() -> bool {
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("PARTII_WR_BACKDROP_UNDERLAY").map_or(true, |v| v != "0")
+    });
+    *ON
 }

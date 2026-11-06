@@ -23,4 +23,8 @@ patched in the same way. The vendoring commit copies the published crate unchang
 shows every Partii patch. `webrender_api` and `webrender_build` stay on crates.io.
 
 Patches on top of webrender 0.70.0:
-- none yet.
+- `PARTII_WR_BACKDROP_UNDERLAY` (on by default; `=0` is upstream): a backdrop-filter over a
+  compositor-surface candidate (a WebGL canvas) no longer makes its slice atomic; an underlay copy
+  of the surface, clipped to the backdrop plus the blur's reach, is drawn under it when the surface
+  is promoted (src/scene_building.rs, src/tile_cache/slice_builder.rs, src/tile_cache/mod.rs,
+  src/prim_store/image.rs).

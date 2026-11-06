@@ -2353,6 +2353,14 @@ impl TileCacheInstance {
                     is_opaque = image_properties.descriptor.is_opaque();
                 }
 
+                // Partii: a backdrop underlay re-draws its compositor surface into this
+                // sub-slice for the backdrop-filter's capture, so only when it was promoted.
+                if let Some(surface_index) = image_data.partii_underlay_of {
+                    if scratch.frame.draws[surface_index as usize].compositor_surface_kind != CompositorSurfaceKind::Overlay {
+                        return DrawState::Culled;
+                    }
+                }
+
                 let mut promotion_result: Result<CompositorSurfaceKind, SurfacePromotionFailure> = Ok(CompositorSurfaceKind::Blit);
                 if image_key.common.flags.contains(PrimitiveFlags::PREFER_COMPOSITOR_SURFACE) {
                     // Only consider promoting Images if all of our YuvImages have been
