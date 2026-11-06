@@ -238,6 +238,7 @@ pub(crate) use self::credentialmanagement::*;
 pub(crate) mod css;
 pub(crate) use self::css::*;
 pub(crate) mod partiihot;
+pub(crate) mod partiiwasm;
 pub(crate) mod datatransfer;
 pub(crate) use self::datatransfer::*;
 pub(crate) mod debugger;
