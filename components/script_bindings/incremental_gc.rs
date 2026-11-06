@@ -455,13 +455,16 @@ mod tests {
                     break;
                 }
                 set_sweeping(false);
-                IncrementalGCSlice(cx, GCReason::API, &work_budget(1));
+                // Small slices, so sweeping yields between them; WorkBudget(1) barely moves marking.
+                IncrementalGCSlice(cx, GCReason::API, &work_budget(200));
                 slices += 1;
             }
             set_sweeping(false);
             assert!(
                 seen,
-                "the unreachable object was finalized (or the GC ended) before it was reported dying, after {slices} slices"
+                "the unreachable object wasn't reported dying: after {slices} slices, GC in progress {}, finalized {}",
+                IsIncrementalGCInProgress(cx),
+                DEAD_FINALIZED.load(Ordering::SeqCst)
             );
             assert!(!about_to_be_finalized(dead_ptr), "off outside sweeping");
             FinishIncrementalGC(cx, GCReason::API);
