@@ -14,15 +14,18 @@ use js::rust::{HandleValue, MutableHandleValue};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use storage_traits::indexeddb::{
-    AsyncOperation, AsyncReadOnlyOperation, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
+    AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, IndexedDBKeyRange,
+    IndexedDBKeyType, IndexedDBRecord,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
     IDBCursorDirection, IDBCursorMethods,
 };
+use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::IDBTransactionMode;
 use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndex;
-use crate::dom::bindings::error::{Error, ErrorResult};
+use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
 use crate::dom::globalscope::GlobalScope;
@@ -30,7 +33,9 @@ use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
-use crate::dom::indexeddb::key::{convert_value_to_key, key_type_to_jsval};
+use crate::dom::indexeddb::key::{
+    ExtractionResult, convert_value_to_key, extract_key, key_type_to_jsval,
+};
 
 #[derive(JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
@@ -205,6 +210,35 @@ impl IDBCursor {
         } else {
             Ok(())
         }
+    }
+
+    /// Partii: steps 2-6 of update() and delete(), in spec order.
+    fn check_can_write_record(&self) -> ErrorResult {
+        self.check_transaction_active()?;
+        if self.transaction.get_mode() == IDBTransactionMode::Readonly {
+            return Err(Error::ReadOnly(None));
+        }
+        self.verify_not_deleted()?;
+        if !self.got_value.get() {
+            return Err(Error::InvalidState(Some(
+                "The cursor is being iterated or has iterated past its end".to_owned(),
+            )));
+        }
+        if self.key_only {
+            return Err(Error::InvalidState(Some(
+                "The cursor is a key cursor".to_owned(),
+            )));
+        }
+        Ok(())
+    }
+
+    /// Partii: a new request whose source is this cursor, for update() and delete().
+    fn new_request(&self, cx: &mut JSContext, store: &IDBObjectStore) -> DomRoot<IDBRequest> {
+        let request = IDBRequest::new(cx, &store.global());
+        request.set_source(Some(store));
+        request.set_cursor_source(self);
+        request.set_transaction(&self.transaction);
+        request
     }
 }
 
@@ -587,6 +621,87 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         )?;
 
         Ok(())
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbcursor-update>
+    fn Update(&self, cx: &mut JSContext, value: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+        // Step 1. Let transaction be this's transaction.
+        // Step 2. If transaction's state is not active, throw a "TransactionInactiveError"
+        // DOMException.
+        // Step 3. If transaction is a read-only transaction, throw a "ReadOnlyError"
+        // DOMException.
+        // Step 4. If this's source or effective object store has been deleted, throw an
+        // "InvalidStateError" DOMException.
+        // Step 5. If this's got value flag is false, indicating that the cursor is being iterated
+        // or has iterated past its end, throw an "InvalidStateError" DOMException.
+        // Step 6. If this's key only flag is true, throw an "InvalidStateError" DOMException.
+        self.check_can_write_record()?;
+        let Some(effective_key) = self.effective_key() else {
+            return Err(Error::InvalidState(None));
+        };
+        let store = self.effective_object_store();
+
+        // Step 7. Let targetRealm be a user-agent defined Realm.
+        // Step 8. Let clone be a clone of value in targetRealm during transaction. Rethrow any
+        // exceptions.
+        rooted!(&in(cx) let mut clone = UndefinedValue());
+        store.clone_value_in_target_realm(cx, value, clone.handle_mut())?;
+
+        // Step 9. If this's effective object store uses in-line keys, then:
+        if let Some(key_path) = store.key_path() {
+            // Step 9.1. Let kpk be the result of extracting a key from a value using a key path
+            // with clone and the key path of this's effective object store. Rethrow any
+            // exceptions.
+            // Step 9.2. If kpk is failure, invalid, or not equal to this's effective key, throw a
+            // "DataError" DOMException.
+            match extract_key(cx, clone.handle(), key_path, None)? {
+                ExtractionResult::Key(kpk) if kpk == effective_key => {},
+                _ => return Err(Error::Data(None)),
+            }
+        }
+
+        // Step 10. Let operation be an algorithm to run store a record into an object store with
+        // this's effective object store, clone, this's effective key, and false.
+        // Step 11. Return the result (an IDBRequest) of running asynchronously execute a request
+        // with this and operation.
+        let key_generator_current_number = store.possibly_update_the_key_generator(&effective_key);
+        let request = self.new_request(cx, &store);
+        store.store_record_request(
+            cx,
+            clone.handle(),
+            Some(effective_key),
+            key_generator_current_number,
+            false,
+            Some(request),
+        )
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbcursor-delete>
+    fn Delete(&self, cx: &mut JSContext) -> Fallible<DomRoot<IDBRequest>> {
+        // Steps 1-6: the same checks as update(), in the same order.
+        self.check_can_write_record()?;
+        let Some(effective_key) = self.effective_key() else {
+            return Err(Error::InvalidState(None));
+        };
+        let store = self.effective_object_store();
+
+        // Step 7. Let operation be an algorithm to run delete records from an object store with
+        // this's effective object store and this's effective key.
+        // Step 8. Return the result (an IDBRequest) of running asynchronously execute a request
+        // with this and operation.
+        let request = self.new_request(cx, &store);
+        IDBRequest::execute_async(
+            cx,
+            &store,
+            |callback| {
+                AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
+                    callback,
+                    key_range: IndexedDBKeyRange::only(effective_key),
+                })
+            },
+            Some(request),
+            None,
+        )
     }
 }
 

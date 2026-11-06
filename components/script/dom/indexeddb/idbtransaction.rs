@@ -486,7 +486,14 @@ impl IDBTransaction {
     }
 
     pub fn add_request(&self, request: &IDBRequest) {
-        self.requests.borrow_mut().push(Dom::from_ref(request));
+        // Partii: a cursor's request is added again each time the cursor iterates; keep only
+        // its latest place in the list, so an abort fires its error event in request order.
+        let mut requests = self.requests.borrow_mut();
+        if request.set_listed() {
+            requests.retain(|existing| !std::ptr::eq(&**existing, request));
+        }
+        requests.push(Dom::from_ref(request));
+        drop(requests);
         // Increase the number of outstanding requests so that we can detect when
         // the transaction is allowed to finish.
         self.pending_request_count
@@ -751,6 +758,35 @@ impl IDBTransaction {
         {
             self.error.set(Some(&exception));
         }
+        self.abort_pending_requests();
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 6: every request that
+    /// is not done yet gets an AbortError, in request order, before the transaction's abort
+    /// event. This runs on the script side from the request list, because the backend drops the
+    /// queued requests of an aborted transaction without answering them; answers that do still
+    /// arrive are ignored (see `IDBTransaction::is_aborted_or_finished`).
+    fn abort_pending_requests(&self) {
+        let pending: Vec<Trusted<IDBRequest>> = self
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| !request.is_done())
+            .map(|request| Trusted::new(&**request))
+            .collect();
+        let global = self.global();
+        let task_source = global.task_manager().database_access_task_source();
+        for request in pending {
+            task_source.queue(task!(abort_pending_request: move |cx| {
+                request.root().abort_with_abort_error(cx);
+            }));
+        }
+    }
+
+    /// Partii: whether the transaction was aborted or finished, after which the backend's
+    /// answers to its requests are ignored.
+    pub(crate) fn is_aborted_or_finished(&self) -> bool {
+        self.abort_initiated.get() || self.finished.get()
     }
 
     pub(crate) fn request_backend_abort(&self) {
@@ -803,11 +839,18 @@ impl IDBTransaction {
         self.committing.set(false);
         self.commit_started.set(false);
         let this = Trusted::new(self);
+        // Partii: a database task, queued after the error events of the pending requests
+        // (`abort_pending_requests`).
         self.global()
             .task_manager()
-            .dom_manipulation_task_source()
+            .database_access_task_source()
             .queue(task!(send_abort_notification: move |cx| {
                 let this = this.root();
+                // Partii: finalize_abort can be reached twice (a failed commit and the backend's
+                // abort answer); fire abort only once.
+                if this.finished.get() {
+                    return;
+                }
                 this.active.set(false);
                 if this.mode == IDBTransactionMode::Versionchange {
                     if let Some(old_version) = this.version_change_old_version.get() {
@@ -820,11 +863,14 @@ impl IDBTransaction {
                     this.db.clear_upgrade_transaction(&this);
                 }
                 let global = this.global();
+                // https://w3c.github.io/IndexedDB/#abort-a-transaction step 7.2: fire an event
+                // named abort at transaction with its bubbles attribute initialized to true.
+                // Partii: it bubbles to the connection.
                 let event = Event::new(
                     cx,
                     &global,
                     Atom::from("abort"),
-                    EventBubbles::DoesNotBubble,
+                    EventBubbles::Bubbles,
                     EventCancelable::NotCancelable,
                 );
                 event.fire(cx, this.upcast());
@@ -1101,7 +1147,10 @@ impl IDBTransactionMethods<crate::DomTypeHolder> for IDBTransaction {
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbtransaction-abort>
     fn Abort(&self, cx: &mut JSContext) -> Fallible<()> {
-        if self.finished.get() || self.committing.get() {
+        // Step 1. If this's state is committing or finished, then throw an "InvalidStateError"
+        // DOMException.
+        // Partii: an aborted transaction is finished from the moment it aborts.
+        if self.finished.get() || self.committing.get() || self.abort_initiated.get() {
             return Err(Error::InvalidState(None));
         }
         self.active.set(false);

@@ -37,7 +37,7 @@ use crate::dom::domexception::DOMException;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::indexeddb::idbcursor::{IterationParam, iterate_cursor};
+use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, iterate_cursor};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
@@ -172,6 +172,12 @@ impl RequestListener {
             .transaction
             .get()
             .expect("Request unexpectedly has no transaction");
+        // Partii: once the transaction aborted, its pending requests got an AbortError instead
+        // (`IDBTransaction::abort_pending_requests`); a late answer from the backend must not
+        // fire success or error.
+        if transaction.is_aborted_or_finished() {
+            return;
+        }
         // Substep 1: Set the result of request to result.
         request.set_ready_state_done();
 
@@ -458,8 +464,12 @@ pub struct IDBRequest {
     source: MutNullableDom<IDBObjectStore>,
     /// Partii: set when the request's source is an index of `source`.
     index_source: MutNullableDom<IDBIndex>,
+    /// Partii: set when the request was made by a cursor's update() or delete().
+    cursor_source: MutNullableDom<IDBCursor>,
     transaction: MutNullableDom<IDBTransaction>,
     ready_state: Cell<IDBRequestReadyState>,
+    /// Partii: whether the request is in its transaction's request list already.
+    listed: Cell<bool>,
 }
 
 impl IDBRequest {
@@ -471,8 +481,10 @@ impl IDBRequest {
             error: Default::default(),
             source: Default::default(),
             index_source: Default::default(),
+            cursor_source: Default::default(),
             transaction: Default::default(),
             ready_state: Cell::new(IDBRequestReadyState::Pending),
+            listed: Cell::new(false),
         }
     }
 
@@ -487,6 +499,11 @@ impl IDBRequest {
     /// Partii: make an index (of the object store already set as `source`) the request's source.
     pub(crate) fn set_index_source(&self, index: &IDBIndex) {
         self.index_source.set(Some(index));
+    }
+
+    /// Partii: make a cursor the request's source (update() and delete()).
+    pub(crate) fn set_cursor_source(&self, cursor: &IDBCursor) {
+        self.cursor_source.set(Some(cursor));
     }
 
     pub fn set_ready_state_done(&self) {
@@ -519,12 +536,45 @@ impl IDBRequest {
         self.ready_state.set(IDBRequestReadyState::Pending);
     }
 
-    fn is_done(&self) -> bool {
+    /// Partii: note that the request is in its transaction's request list; returns whether it
+    /// was already.
+    pub(crate) fn set_listed(&self) -> bool {
+        self.listed.replace(true)
+    }
+
+    pub(crate) fn is_done(&self) -> bool {
         self.ready_state.get() == IDBRequestReadyState::Done
     }
 
     pub(crate) fn transaction(&self) -> Option<DomRoot<IDBTransaction>> {
         self.transaction.get()
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#abort-a-transaction> step 6, for a request
+    /// that was not done when its transaction aborted.
+    pub(crate) fn abort_with_abort_error(&self, cx: &mut JSContext) {
+        if self.is_done() {
+            return;
+        }
+        let mut realm = enter_auto_realm(cx, self);
+        let cx: &mut JSContext = &mut realm;
+        // Step 6.1. Set request's done flag to true.
+        self.set_ready_state_done();
+        // Step 6.2. Set request's result to undefined.
+        rooted!(&in(cx) let undefined = UndefinedValue());
+        self.set_result(undefined.handle());
+        // Step 6.3. Set request's error to a newly created "AbortError" DOMException.
+        self.set_error(cx, Some(Error::Abort(None)));
+        // Step 6.4. Fire an event named error at request with its bubbles and cancelable
+        // attributes initialized to true.
+        let event = Event::new(
+            cx,
+            &self.global(),
+            Atom::from("error"),
+            EventBubbles::Bubbles,
+            EventCancelable::Cancelable,
+        );
+        event.fire(cx, self.upcast());
     }
 
     // https://www.w3.org/TR/IndexedDB-3/#asynchronously-execute-a-request
@@ -664,6 +714,10 @@ impl IDBRequestMethods<crate::DomTypeHolder> for IDBRequest {
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbrequest-source>
     fn GetSource(&self) -> Option<IDBObjectStoreOrIDBIndexOrIDBCursor> {
+        // Partii: requests made by a cursor's update() or delete() have the cursor as their source.
+        if let Some(cursor) = self.cursor_source.get() {
+            return Some(IDBObjectStoreOrIDBIndexOrIDBCursor::IDBCursor(cursor));
+        }
         // Partii: requests made through an index have the index as their source.
         if let Some(index) = self.index_source.get() {
             return Some(IDBObjectStoreOrIDBIndexOrIDBCursor::IDBIndex(index));

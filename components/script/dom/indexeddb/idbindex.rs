@@ -5,6 +5,8 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::conversions::ToJSValConvertible;
 use js::gc::MutableHandleValue;
+use js::jsapi::Heap;
+use js::jsval::JSVal;
 use js::rust::HandleValue;
 use profile_traits::generic_callback::GenericCallback;
 use script_bindings::cell::DomRefCell;
@@ -39,6 +41,10 @@ pub(crate) struct IDBIndex {
     multi_entry: bool,
     unique: bool,
     key_path: KeyPath,
+    /// Partii: the keyPath attribute's value, converted once so that it is the same object
+    /// each time (undefined until first read).
+    #[ignore_malloc_size_of = "mozjs"]
+    key_path_value: Heap<JSVal>,
 }
 
 impl IDBIndex {
@@ -56,6 +62,7 @@ impl IDBIndex {
             multi_entry,
             unique,
             key_path,
+            key_path_value: Heap::default(),
         }
     }
 
@@ -319,15 +326,21 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-keypath>
-    fn KeyPath(&self, cx: &mut JSContext, retval: MutableHandleValue) {
+    fn KeyPath(&self, cx: &mut JSContext, mut retval: MutableHandleValue) {
+        // Partii: return the same object each time.
+        if !self.key_path_value.get().is_undefined() {
+            retval.set(self.key_path_value.get());
+            return;
+        }
         match &self.key_path {
             KeyPath::String(string) => {
-                string.to_jsval(cx, retval);
+                string.to_jsval(cx, retval.reborrow());
             },
             KeyPath::StringSequence(sequence) => {
-                sequence.to_jsval(cx, retval);
+                sequence.to_jsval(cx, retval.reborrow());
             },
         }
+        self.key_path_value.set(retval.get());
     }
 
     /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbindex-get>
