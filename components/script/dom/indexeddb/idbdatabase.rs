@@ -20,16 +20,19 @@ use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::IDBTransacti
 use crate::dom::bindings::codegen::UnionTypes::StringOrStringSequence;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::domstringlist::DOMStringList;
+use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbobjectstore::{IDBObjectStore, IDBObjectStoreAbortState};
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::idbversionchangeevent::IDBVersionChangeEvent;
 use crate::dom::indexeddb::key::is_valid_key_path;
+use crate::dom::window::Window;
 
 #[dom_struct]
 pub struct IDBDatabase {
@@ -197,6 +200,74 @@ impl IDBDatabase {
         let _ = self
             .get_idb_thread()
             .send(IndexedDBThreadMsg::Sync(operation));
+
+        if forced {
+            self.abort_transactions_for_forced_close();
+        }
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#close-a-database-connection> steps 2 to 4 with
+    /// the forced flag, on the script side (the backend aborts the transactions itself). If the
+    /// global still runs script, each transaction created using the connection is aborted with
+    /// an "AbortError", and then the connection gets a close event. If it does not (teardown:
+    /// the window is gone or the worker is closing, so its tasks are discarded), nothing can
+    /// observe that, and the transactions just finish so that nothing keeps them alive.
+    fn abort_transactions_for_forced_close(&self) {
+        let global = self.global();
+        let mut transactions = global
+            .indexeddb_factory()
+            .map(|factory| factory.transactions_of(self))
+            .unwrap_or_default();
+        if let Some(upgrade) = self.upgrade_transaction.get() &&
+            !transactions
+                .iter()
+                .any(|transaction| std::ptr::eq(&**transaction, &*upgrade))
+        {
+            transactions.push(upgrade);
+        }
+        let can_run_script = global.can_continue_running() &&
+            global.downcast::<Window>().is_none_or(Window::is_alive);
+        if !can_run_script {
+            for transaction in transactions {
+                transaction.finish_after_forced_close();
+            }
+            self.upgrade_transaction.set(None);
+            return;
+        }
+        let this = Trusted::new(self);
+        let transactions: Vec<Trusted<IDBTransaction>> = transactions
+            .iter()
+            .map(|transaction| Trusted::new(&**transaction))
+            .collect();
+        global
+            .task_manager()
+            .database_access_task_source()
+            .queue(task!(forced_close: move |cx| {
+                // Step 2. For each transaction created using connection, abort a transaction
+                // with transaction and a newly created "AbortError" DOMException.
+                for transaction in transactions {
+                    transaction.root().abort_for_forced_close(cx);
+                }
+                // Step 3. Wait for all transactions created using connection to complete.
+                // Step 4. Fire an event named close at connection: queued after the
+                // transactions' abort events.
+                let task_this = this.clone();
+                this.root()
+                    .global()
+                    .task_manager()
+                    .database_access_task_source()
+                    .queue(task!(fire_close: move |cx| {
+                        let this = task_this.root();
+                        let event = Event::new(
+                            cx,
+                            &this.global(),
+                            Atom::from("close"),
+                            EventBubbles::DoesNotBubble,
+                            EventCancelable::NotCancelable,
+                        );
+                        event.fire(cx, this.upcast());
+                    }));
+            }));
     }
 }
 

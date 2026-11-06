@@ -34,6 +34,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::trace::HashMapTracedValues;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::indexeddb::idbdatabase::IDBDatabase;
 use crate::dom::indexeddb::idbopendbrequest::IDBOpenDBRequest;
 use crate::dom::indexeddb::key::{convert_value_to_key, map_backend_error_to_dom_error};
 use crate::dom::promise::Promise;
@@ -91,6 +92,18 @@ impl IDBFactory {
             bucket.push(Dom::from_ref(txn));
         }
         txn.set_registered_in_global();
+    }
+
+    /// Partii: the transactions created using `connection` that this global still tracks (all
+    /// but its upgrade transaction).
+    pub(crate) fn transactions_of(&self, connection: &IDBDatabase) -> Vec<DomRoot<IDBTransaction>> {
+        self.indexeddb_transactions
+            .borrow()
+            .iter()
+            .flat_map(|(_, bucket)| bucket.iter())
+            .filter(|txn| std::ptr::eq(txn.get_db(), connection))
+            .map(|txn| DomRoot::from_ref(&**txn))
+            .collect()
     }
 
     pub(crate) fn unregister_indexeddb_transaction(&self, txn: &IDBTransaction) {
