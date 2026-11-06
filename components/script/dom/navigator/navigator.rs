@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#[cfg(feature = "gamepad")]
+// Partii: also for `vibrate_generation`, which is not gamepad-only.
 use std::cell::Cell;
 use std::convert::TryInto;
 use std::ops::Deref;
