@@ -61,22 +61,29 @@ impl<T: WeakReferenceable> WeakRef<T> {
         value.downgrade()
     }
 
-    /// DomRoot a weak reference. Returns `None` if the object was already collected.
+    /// DomRoot a weak reference. Returns `None` if the object was already collected (or is dead
+    /// and waiting for an incremental sweep to finalize it).
     pub fn root(&self) -> Option<DomRoot<T>> {
-        self.0.upgrade().map(|x| DomRoot::from_ref(&*x))
+        self.live().map(|x| DomRoot::from_ref(&*x))
+    }
+
+    /// The object, unless it was collected or is about to be finalized.
+    fn live(&self) -> Option<Rc<T>> {
+        self.0.upgrade().filter(|x| {
+            !crate::incremental_gc::about_to_be_finalized(x.reflector().get_jsobject_unbarriered())
+        })
     }
 
     /// Return an [`UnrootedDom`] reference to the data contained in this [`WeakRef`],
     /// if it is still alive.
     pub fn unrooted<'a>(&self, no_gc: &'a NoGC) -> Option<UnrootedDom<'a, T>> {
-        self.0
-            .upgrade()
+        self.live()
             .map(|value| UnrootedDom::from_ref(&*value, no_gc))
     }
 
     /// Return whether the weakly-referenced object is still alive.
     pub fn is_alive(&self) -> bool {
-        self.0.strong_count() > 0
+        self.0.strong_count() > 0 && self.live().is_some()
     }
 }
 

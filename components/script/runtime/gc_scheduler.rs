@@ -52,6 +52,11 @@
 //! drives their slices), and the gray-roots hook turns the budget of the slice that starts sweeping
 //! unlimited, so sweeping still never interleaves with script. `PARTII_GC_SM_SLICES=0` keeps
 //! SpiderMonkey's slices unlimited (then its first continuation slice usually finishes our GC).
+//!
+//! **Incremental sweeping** (`PARTII_GC_INCREMENTAL_SWEEP=1`, default off, needs the above): the
+//! slice that starts sweeping keeps its budget, so sweeping is sliced too and script runs while
+//! zones are being swept. The expose barrier and the per-sweep-group remark stay on (later sweep
+//! groups still mark), and `WeakRef` treats a dead object that isn't finalized yet as gone.
 
 #![allow(unsafe_code)]
 
@@ -99,6 +104,8 @@ struct Config {
     incremental_max: Duration,
     /// SpiderMonkey's own slices get the slice budget too (not unlimited).
     sm_slices: bool,
+    /// Sweep in slices too (stage 2), script running in between.
+    incremental_sweep: bool,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -134,6 +141,10 @@ fn config() -> &'static Config {
         slice_gap: env_ms("PARTII_GC_SLICE_GAP_MS", 10),
         incremental_max: env_ms("PARTII_GC_INCREMENTAL_MAX_MS", 2000),
         sm_slices: !matches!(std::env::var("PARTII_GC_SM_SLICES").as_deref(), Ok("0")),
+        incremental_sweep: matches!(
+            std::env::var("PARTII_GC_INCREMENTAL_SWEEP").as_deref(),
+            Ok("1")
+        ),
     })
 }
 
@@ -623,6 +634,12 @@ pub(crate) unsafe fn init_runtime(
     }
 }
 
+/// Whether sweeping runs in slices with script in between (stage 2; needs budgeted SM slices, else
+/// SpiderMonkey's first slice of its own would sweep everything anyway).
+fn incremental_sweep() -> bool {
+    config().incremental_sweep && sm_slices()
+}
+
 /// Whether SpiderMonkey's own slices are budgeted (and its GCs incremental).
 fn sm_slices() -> bool {
     config().sm_slices && budget_layout_ok()
@@ -636,7 +653,7 @@ unsafe extern "C" fn gray_roots(
     _data: *mut c_void,
 ) -> bool {
     SWEEP_STARTED.with(|s| s.set(true));
-    if sm_slices() && !budget.is_null() {
+    if !incremental_sweep() && sm_slices() && !budget.is_null() {
         unsafe { unlimit_budget(budget) };
     }
     if let Some((roots, data)) = ROOTS_TRACER.with(Cell::get) {
@@ -659,10 +676,12 @@ unsafe extern "C" fn slice_callback(
     match progress {
         GCProgress::GC_CYCLE_BEGIN => {
             incremental_gc::set_marking(false);
+            incremental_gc::set_sweeping(false);
             SWEEP_STARTED.with(|s| s.set(false));
         },
         GCProgress::GC_SLICE_BEGIN => {
             incremental_gc::set_marking(false);
+            incremental_gc::set_sweeping(false);
             if !OUR_SLICE.with(Cell::get) {
                 SM_SLICE_BEGAN.with(|b| b.set(Some(Instant::now())));
             }
@@ -675,13 +694,17 @@ unsafe extern "C" fn slice_callback(
                     s.set((n + 1, max.max(pause), total + pause));
                 });
             }
-            // Between slices of a GC that is still marking, Rust's reads of reflectors shade them.
-            let marking = !SWEEP_STARTED.with(Cell::get)
-                && unsafe { js::jsapi::IsIncrementalGCInProgress(cx) };
-            incremental_gc::set_marking(marking);
+            // Between slices of a GC that is still marking, Rust's reads of reflectors shade them
+            // (while sweeping in slices too: later sweep groups still mark). While sweeping,
+            // WeakRef treats dead objects that aren't finalized yet as gone.
+            let in_progress = unsafe { js::jsapi::IsIncrementalGCInProgress(cx) };
+            let sweeping = SWEEP_STARTED.with(Cell::get);
+            incremental_gc::set_marking(in_progress && (!sweeping || incremental_sweep()));
+            incremental_gc::set_sweeping(in_progress && sweeping);
         },
         GCProgress::GC_CYCLE_END => {
             incremental_gc::set_marking(false);
+            incremental_gc::set_sweeping(false);
             SWEEP_STARTED.with(|s| s.set(false));
         },
     }
@@ -775,7 +798,10 @@ fn after_slice(
     mut gc: IncrementalGc,
     started: Instant,
 ) {
-    if unsafe { IsIncrementalGCInProgress(cx) } && SWEEP_STARTED.with(Cell::get) {
+    if unsafe { IsIncrementalGCInProgress(cx) }
+        && SWEEP_STARTED.with(Cell::get)
+        && !incremental_sweep()
+    {
         our_slice(|| unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) });
     }
     let now = Instant::now();
@@ -786,7 +812,6 @@ fn after_slice(
     gc.total += pause;
     if unsafe { IsIncrementalGCInProgress(cx) } {
         state.incremental.set(Some(gc));
-        incremental_gc::set_marking(true);
     } else {
         finish_log(cx, state, kind, gc, "done");
     }
