@@ -14,7 +14,7 @@ use js::rust::{HandleValue, MutableHandleValue};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use storage_traits::indexeddb::{
-    AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, IndexedDBKeyRange,
+    AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, CursorSeek, IndexedDBKeyRange,
     IndexedDBKeyType, IndexedDBRecord,
 };
 
@@ -34,7 +34,7 @@ use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::key::{
-    ExtractionResult, convert_value_to_key, extract_key, key_type_to_jsval,
+    ExtractionResult, convert_value_to_key, extract_key, key_type_to_jsval, to_backend_direction,
 };
 
 #[derive(JSTraceable, MallocSizeOf)]
@@ -160,6 +160,19 @@ impl IDBCursor {
         *self.object_store_position.borrow_mut() = object_store_position;
         if changed {
             *self.cached_primary_key.borrow_mut() = None;
+        }
+    }
+
+    /// Partii: where the backend starts reading for the iteration step `param` (see
+    /// [`CursorSeek`]); the cursor's position does not change while the step is pending.
+    pub(crate) fn seek(&self, param: &IterationParam) -> CursorSeek {
+        CursorSeek {
+            direction: to_backend_direction(self.direction),
+            position: self.position.borrow().clone(),
+            object_store_position: self.object_store_position.borrow().clone(),
+            key: param.key.clone(),
+            primary_key: param.primary_key.clone(),
+            count: param.count.unwrap_or(1),
         }
     }
 
@@ -358,6 +371,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
 
         let range = self.range.clone();
+        let seek = self.seek(&iteration_param);
         // NOTE: According to the spec, execute_async should take the cursor's source
         // (which may be an index). Using effective_object_store here is a temporary
         // workaround until execute_async supports ObjectStoreOrIndex as source.
@@ -370,6 +384,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                     key_range: range,
                     index_name: self.source_index_name(),
                     key_only: self.key_only,
+                    seek,
                 })
             },
             Some(request),
@@ -454,6 +469,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
 
         let range = self.range.clone();
+        let seek = self.seek(&iteration_param);
         // NOTE: According to the spec, execute_async should take the cursor's source
         // (which may be an index). Using effective_object_store here is a temporary
         // workaround until execute_async supports ObjectStoreOrIndex as source.
@@ -466,6 +482,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                     key_range: range,
                     index_name: self.source_index_name(),
                     key_only: self.key_only,
+                    seek,
                 })
             },
             Some(request),
@@ -602,6 +619,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
         };
 
         let range = self.range.clone();
+        let seek = self.seek(&iteration_param);
         // NOTE: According to the spec, execute_async should take the cursor's source
         // (which may be an index). Using effective_object_store here is a temporary
         // workaround until execute_async supports ObjectStoreOrIndex as source.
@@ -614,6 +632,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                     key_range: range,
                     index_name: self.source_index_name(),
                     key_only: self.key_only,
+                    seek,
                 })
             },
             Some(request),

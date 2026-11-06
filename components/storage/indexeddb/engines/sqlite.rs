@@ -16,7 +16,7 @@ use sea_query_rusqlite::RusqliteBinder;
 use servo_base::threadpool::ThreadPool;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    BackendError, CreateObjectResult, IndexKeys, IndexedDBDirection, IndexedDBIndex,
+    BackendError, CreateObjectResult, CursorSeek, IndexKeys, IndexedDBDirection, IndexedDBIndex,
     IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBTxnMode, KeyPath, PutItemResult,
 };
 
@@ -742,6 +742,172 @@ impl SqliteEngine {
         Ok(records)
     }
 
+    /// Partii: the records one step of <https://w3c.github.io/IndexedDB/#iterate-a-cursor> can
+    /// reach, read from where the step starts instead of from the start of `range`: the first
+    /// `seek.count` records past the cursor's position (and key / primary key, if given) in the
+    /// cursor's direction, or for "nextunique" and "prevunique" the record with the lowest primary
+    /// key of each of the first `seek.count` index keys. They come back in ascending (key,
+    /// primary key) order, as the script side's cursor iteration expects. Each step reads only
+    /// the records it returns (and, for the unique directions, the duplicates it skips), so a
+    /// cursor walk over n records costs O(n log n), not O(n²).
+    fn seek_records(
+        connection: &Connection,
+        store_id: i32,
+        index: Option<&object_store_index_model::Model>,
+        range: &IndexedDBKeyRange,
+        seek: &CursorSeek,
+        with_values: bool,
+    ) -> Result<Vec<RawRecord>, Error> {
+        let count = Ord::max(seek.count, 1) as usize;
+        let ascending = matches!(
+            seek.direction,
+            IndexedDBDirection::Next | IndexedDBDirection::NextUnique
+        );
+        // A store has one record per key, so its unique directions are plain ones.
+        let unique = index.is_some() &&
+            matches!(
+                seek.direction,
+                IndexedDBDirection::NextUnique | IndexedDBDirection::PrevUnique
+            );
+        let (at_or_past, past, order) = if ascending {
+            (">=", ">", "ASC")
+        } else {
+            ("<=", "<", "DESC")
+        };
+        let blob = |key: &IndexedDBKeyType| SqlValue::Blob(encoding::serialize(key));
+        let mut sql_params = vec![];
+        let sql = match index {
+            None => {
+                sql_params.push(SqlValue::Integer(store_id.into()));
+                let mut condition = range_condition(range, "key", &mut sql_params);
+                // If key is given, the record's key is at or past key.
+                if let Some(key) = &seek.key {
+                    condition.push_str(&format!(" AND key {at_or_past} ?"));
+                    sql_params.push(blob(key));
+                }
+                // If position is defined, the record's key is past position.
+                if let Some(position) = &seek.position {
+                    condition.push_str(&format!(" AND key {past} ?"));
+                    sql_params.push(blob(position));
+                }
+                let value = if with_values { "data" } else { "x''" };
+                sql_params.push(SqlValue::Integer(count as i64));
+                format!(
+                    "SELECT key, key, {value} FROM object_data \
+                     WHERE object_store_id = ?{condition} ORDER BY key {order} LIMIT ?"
+                )
+            },
+            Some(index) => {
+                sql_params.push(SqlValue::Integer(index.id.into()));
+                let mut condition = range_condition(range, "i.value", &mut sql_params);
+                // If key is given, the record's key is at or past key; with primaryKey ("next"
+                // and "prev" only), a record whose key is key also needs its value at or past
+                // primaryKey.
+                if let Some(key) = &seek.key {
+                    match &seek.primary_key {
+                        Some(primary_key) if !unique => {
+                            condition.push_str(&format!(
+                                " AND i.value {at_or_past} ? \
+                                 AND (i.value {past} ? OR i.object_data_key {at_or_past} ?)"
+                            ));
+                            sql_params.extend([blob(key), blob(key), blob(primary_key)]);
+                        },
+                        _ => {
+                            condition.push_str(&format!(" AND i.value {at_or_past} ?"));
+                            sql_params.push(blob(key));
+                        },
+                    }
+                }
+                // If position is defined, the record's key is past position, or ("next" and
+                // "prev") it is position and its value is past object store position.
+                if let Some(position) = &seek.position {
+                    match &seek.object_store_position {
+                        Some(object_store_position) if !unique => {
+                            condition.push_str(&format!(
+                                " AND i.value {at_or_past} ? \
+                                 AND (i.value {past} ? OR i.object_data_key {past} ?)"
+                            ));
+                            sql_params.extend([
+                                blob(position),
+                                blob(position),
+                                blob(object_store_position),
+                            ]);
+                        },
+                        _ => {
+                            condition.push_str(&format!(" AND i.value {past} ?"));
+                            sql_params.push(blob(position));
+                        },
+                    }
+                }
+                let table = index_table(index);
+                let (value, join) = if with_values {
+                    (
+                        "d.data",
+                        " JOIN object_data d \
+                         ON d.object_store_id = i.object_store_id AND d.key = i.object_data_key",
+                    )
+                } else {
+                    ("x''", "")
+                };
+                // The unique directions read rows until they have `count` keys; the others take
+                // `count` rows.
+                let limit = if unique {
+                    String::new()
+                } else {
+                    sql_params.push(SqlValue::Integer(count as i64));
+                    " LIMIT ?".to_owned()
+                };
+                format!(
+                    "SELECT i.value, i.object_data_key, {value} FROM {table} i{join} \
+                     WHERE i.index_id = ?{condition} \
+                     ORDER BY i.value {order}, i.object_data_key {order}{limit}"
+                )
+            },
+        };
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(sql_params), |row| {
+            Ok(RawRecord {
+                key: row.get(0)?,
+                primary_key: row.get(1)?,
+                value: row.get(2)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        if unique {
+            // Keep the lowest primary key of each index key: the first row of a run of equal
+            // keys when ascending, the last one when descending.
+            let mut current: Option<RawRecord> = None;
+            for row in rows {
+                let row = row?;
+                match &current {
+                    Some(record) if record.key == row.key => {
+                        if !ascending {
+                            current = Some(row);
+                        }
+                    },
+                    _ => {
+                        if let Some(record) = current.take() {
+                            records.push(record);
+                            if records.len() == count {
+                                break;
+                            }
+                        }
+                        current = Some(row);
+                    },
+                }
+            }
+            if records.len() < count {
+                records.extend(current);
+            }
+        } else {
+            records = rows.collect::<Result<_, _>>()?;
+        }
+        if !ascending {
+            records.reverse();
+        }
+        Ok(records)
+    }
+
     /// Partii: <https://w3c.github.io/IndexedDB/#count-the-records-in-a-range>, of an object
     /// store or an index.
     fn count_records(
@@ -887,9 +1053,10 @@ impl SqliteEngine {
                 callback,
                 key_range,
                 key_only,
+                seek,
                 ..
             } => callback.send(
-                all(&key_range, IndexedDBDirection::Next, None, !key_only)
+                Self::seek_records(connection, store.id, index, &key_range, &seek, !key_only)
                     .and_then(decode_records)
                     .map_err(backend_error),
             ),
@@ -1497,8 +1664,8 @@ mod tests {
     };
     use storage_traits::indexeddb::{
         AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-        BackendResult, CreateObjectResult, IndexKeys, IndexedDBDirection, IndexedDBKeyRange,
-        IndexedDBKeyType, IndexedDBTxnMode, KeyPath, PutItemResult,
+        BackendResult, CreateObjectResult, CursorSeek, IndexKeys, IndexedDBDirection,
+        IndexedDBKeyRange, IndexedDBKeyType, IndexedDBTxnMode, KeyPath, PutItemResult,
     };
     use url::Host;
 
@@ -2444,6 +2611,188 @@ mod tests {
         db.rollback_transaction(7);
         assert_eq!(record_count(&db), 0);
         assert_eq!(index_row_count(&db), 0);
+    }
+
+    /// Partii: walking a cursor one seek at a time visits the records a full read returns, in
+    /// every direction, for an index and for the object store; key, primaryKey and count seeks
+    /// start where iterate-a-cursor says.
+    #[test]
+    fn test_cursor_seek_walks() {
+        let (_temp_dir, _proxy_map, _handle, db) = open_engine();
+        db.create_store("store", None, false).unwrap();
+        db.create_index(
+            "store",
+            "by_name".to_owned(),
+            KeyPath::String("name".to_owned()),
+            false,
+            false,
+        )
+        .unwrap();
+        for (key, name) in [
+            (1.0, "b"),
+            (2.0, "a"),
+            (3.0, "b"),
+            (4.0, "a"),
+            (5.0, "c"),
+            (6.0, "b"),
+        ] {
+            let index_keys = vec![("by_name".to_owned(), vec![string_key(name)])];
+            assert!(matches!(
+                put_with_index_keys(&db, key, index_keys, true),
+                PutItemResult::Key(_)
+            ));
+        }
+        let connection = db.connection();
+        let store = SqliteEngine::object_store_by_name(&connection, "store").unwrap();
+        let index = SqliteEngine::index_by_name(&connection, store.id, "by_name")
+            .unwrap()
+            .unwrap();
+        let all = IndexedDBKeyRange::default();
+        let seek = |index, range: &IndexedDBKeyRange, seek: CursorSeek| {
+            decode_records(
+                SqliteEngine::seek_records(&connection, store.id, index, range, &seek, true)
+                    .unwrap(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|record| (record.key, record.primary_key))
+            .collect::<Vec<_>>()
+        };
+        let start = |direction| CursorSeek {
+            direction,
+            position: None,
+            object_store_position: None,
+            key: None,
+            primary_key: None,
+            count: 1,
+        };
+        for index in [None, Some(&index)] {
+            for direction in [
+                IndexedDBDirection::Next,
+                IndexedDBDirection::NextUnique,
+                IndexedDBDirection::Prev,
+                IndexedDBDirection::PrevUnique,
+            ] {
+                let expected = decode_records(
+                    SqliteEngine::read_records(
+                        &connection,
+                        store.id,
+                        index,
+                        &all,
+                        direction,
+                        None,
+                        true,
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .into_iter()
+                .map(|record| (record.key, record.primary_key))
+                .collect::<Vec<_>>();
+                let mut walked = vec![];
+                let mut step = start(direction);
+                loop {
+                    let found = seek(index, &all, step.clone());
+                    assert!(found.len() <= 1, "{direction:?}: one record per step");
+                    let Some((key, primary_key)) = found.into_iter().next() else {
+                        break;
+                    };
+                    walked.push((key.clone(), primary_key.clone()));
+                    step.position = Some(key);
+                    step.object_store_position = index.map(|_| primary_key);
+                }
+                assert_eq!(
+                    walked,
+                    expected,
+                    "{direction:?} walk, index {}",
+                    index.is_some()
+                );
+            }
+        }
+
+        let pair = |name: &str, key: f64| (string_key(name), IndexedDBKeyType::Number(key));
+        // continuePrimaryKey("b", 3) from ("a", 4): ("b", 3), then count 2 from there.
+        let found = seek(
+            Some(&index),
+            &all,
+            CursorSeek {
+                position: Some(string_key("a")),
+                object_store_position: Some(IndexedDBKeyType::Number(4.0)),
+                key: Some(string_key("b")),
+                primary_key: Some(IndexedDBKeyType::Number(3.0)),
+                ..start(IndexedDBDirection::Next)
+            },
+        );
+        assert_eq!(found, vec![pair("b", 3.0)]);
+        let found = seek(
+            Some(&index),
+            &all,
+            CursorSeek {
+                position: Some(string_key("b")),
+                object_store_position: Some(IndexedDBKeyType::Number(3.0)),
+                count: 2,
+                ..start(IndexedDBDirection::Next)
+            },
+        );
+        assert_eq!(found, vec![pair("b", 6.0), pair("c", 5.0)]);
+        // prev with continuePrimaryKey("b", 3) from the end.
+        let found = seek(
+            Some(&index),
+            &all,
+            CursorSeek {
+                key: Some(string_key("b")),
+                primary_key: Some(IndexedDBKeyType::Number(3.0)),
+                count: 2,
+                ..start(IndexedDBDirection::Prev)
+            },
+        );
+        assert_eq!(found, vec![pair("b", 1.0), pair("b", 3.0)]);
+        // prevunique, count 2, in a range: the lowest primary key of "a" and "b".
+        let found = seek(
+            Some(&index),
+            &IndexedDBKeyRange {
+                upper: Some(string_key("b")),
+                ..IndexedDBKeyRange::default()
+            },
+            CursorSeek {
+                count: 2,
+                ..start(IndexedDBDirection::PrevUnique)
+            },
+        );
+        assert_eq!(found, vec![pair("a", 2.0), pair("b", 1.0)]);
+        // nextunique with continue("b"): "b" with its lowest primary key.
+        let found = seek(
+            Some(&index),
+            &all,
+            CursorSeek {
+                position: Some(string_key("a")),
+                key: Some(string_key("b")),
+                ..start(IndexedDBDirection::NextUnique)
+            },
+        );
+        assert_eq!(found, vec![pair("b", 1.0)]);
+        // An object store cursor's continue(3) and advance(2).
+        let number = |key: f64| (IndexedDBKeyType::Number(key), IndexedDBKeyType::Number(key));
+        let found = seek(
+            None,
+            &all,
+            CursorSeek {
+                position: Some(IndexedDBKeyType::Number(1.0)),
+                key: Some(IndexedDBKeyType::Number(3.0)),
+                ..start(IndexedDBDirection::Next)
+            },
+        );
+        assert_eq!(found, vec![number(3.0)]);
+        let found = seek(
+            None,
+            &all,
+            CursorSeek {
+                position: Some(IndexedDBKeyType::Number(5.0)),
+                count: 2,
+                ..start(IndexedDBDirection::Prev)
+            },
+        );
+        assert_eq!(found, vec![number(3.0), number(4.0)]);
     }
 
     /// Partii: reads through an index come in (index key, primary key) order, honour the range
