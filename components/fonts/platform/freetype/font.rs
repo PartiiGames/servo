@@ -15,6 +15,7 @@ use freetype_sys::{
 use log::debug;
 use memmap2::Mmap;
 use parking_lot::ReentrantMutex;
+use read_fonts::tables::os2::SelectionFlags;
 use read_fonts::types::Tag;
 use read_fonts::{FontRef, ReadError, TableProvider};
 use servo_arc::Arc;
@@ -278,8 +279,6 @@ impl PlatformFontMethods for PlatformFont {
         // the top of the next line's ascent or: (line_height - ascent - descent),
         // see http://stackoverflow.com/a/5635981 for CTFont implementation.
         // Convert using a formula similar to what CTFont returns for consistency.
-        let leading = line_height - (max_ascent + max_descent);
-
         let underline_size = face.as_ref().underline_thickness as f64 * y_scale;
         let underline_offset = face.as_ref().underline_position as f64 * y_scale + 0.5;
 
@@ -311,7 +310,23 @@ impl PlatformFontMethods for PlatformFont {
             if !x_average_char_width.is_zero() {
                 average_advance = x_average_char_width as f64 * y_scale;
             }
+
+            // Partii: OS/2 USE_TYPO_METRICS says the typo ascender/descender/line gap are the font's real
+            // vertical metrics. FreeType's face ascender/descender come from hhea regardless; browsers
+            // (Gecko, Blink) use the typo values when the flag is set, so canvas measureText and line
+            // boxes otherwise came out taller than in Chromium for such fonts.
+            if face.scalable() && os2.fs_selection().contains(SelectionFlags::USE_TYPO_METRICS) {
+                let (ascent, descent) = (os2.s_typo_ascender(), os2.s_typo_descender());
+                if ascent != 0 || descent != 0 {
+                    max_ascent = ascent as f64 * y_scale;
+                    max_descent = -(descent as f64) * y_scale;
+                    line_height = (ascent as f64 - descent as f64 + os2.s_typo_line_gap() as f64) * y_scale;
+                }
+            }
         }
+
+        // 'leading' is the distance between one line's descent and the next line's ascent (see above).
+        let leading = line_height - (max_ascent + max_descent);
 
         if average_advance.is_zero() {
             average_advance = self
