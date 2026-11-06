@@ -18,7 +18,7 @@ use script_bindings::reflector::{Reflector, reflect_dom_object};
 use servo_base::generic_channel::{GenericSend, GenericSender};
 use storage_traits::indexeddb::{
     self, AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    IndexedDBKeyType, IndexedDBThreadMsg,
+    IndexKeys, IndexedDBKeyType, IndexedDBThreadMsg,
 };
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
@@ -44,7 +44,7 @@ use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::key::{
     ExtractionResult, can_inject_key_into_value, convert_value_to_key, convert_value_to_key_range,
-    extract_key, inject_key_into_value, is_valid_key_path,
+    extract_key, index_keys_for_value, inject_key_into_value, is_valid_key_path,
 };
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
@@ -317,6 +317,31 @@ impl IDBObjectStore {
         Some(next as i64)
     }
 
+    /// Partii: <https://w3c.github.io/IndexedDB/#store-a-record-into-an-object-store> step 5.1:
+    /// the keys `value` has in each index of this store. The backend stores them with the
+    /// record.
+    pub(crate) fn index_keys_for_value(&self, cx: &mut JSContext, value: HandleValue) -> IndexKeys {
+        let indexes: Vec<(String, KeyPath, bool)> = self
+            .index_set
+            .borrow()
+            .values()
+            .map(|index| {
+                (
+                    index.name().to_string(),
+                    index.key_path().clone(),
+                    index.multi_entry(),
+                )
+            })
+            .collect();
+        indexes
+            .into_iter()
+            .filter_map(|(name, key_path, multi_entry)| {
+                let keys = index_keys_for_value(cx, value, &key_path, multi_entry);
+                (!keys.is_empty()).then_some((name, keys))
+            })
+            .collect()
+    }
+
     /// <https://www.w3.org/TR/IndexedDB-3/#object-store-in-line-keys>
     fn uses_inline_keys(&self) -> bool {
         self.key_path.is_some()
@@ -463,6 +488,9 @@ impl IDBObjectStore {
             },
             None => structuredclone::write(cx, cloned_js_value.handle(), None)?,
         };
+        // Partii: the record's index keys come from the clone that is stored (with an injected
+        // key, if any).
+        let index_keys = self.index_keys_for_value(cx, cloned_js_value.handle());
         let Ok(serialized_value) = postcard::to_stdvec(&cloned_value) else {
             return Err(Error::InvalidState(None));
         };
@@ -478,6 +506,7 @@ impl IDBObjectStore {
                     value: serialized_value,
                     should_overwrite: !no_overwrite,
                     key_generator_current_number: key_generator_current_number_for_put,
+                    index_keys,
                 })
             },
             None,

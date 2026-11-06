@@ -80,6 +80,19 @@ impl IDBIndex {
         DomRoot::from_ref(&self.object_store)
     }
 
+    /// Partii: the index's key path, for computing a record's index keys.
+    pub(crate) fn key_path(&self) -> &KeyPath {
+        &self.key_path
+    }
+
+    pub(crate) fn multi_entry(&self) -> bool {
+        self.multi_entry
+    }
+
+    pub(crate) fn name(&self) -> DOMString {
+        self.name.borrow().clone()
+    }
+
     pub(crate) fn verify_not_deleted(&self) -> ErrorResult {
         let stored_name = self.name.borrow().clone();
         let transaction = self.object_store.transaction();

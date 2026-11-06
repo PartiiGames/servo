@@ -15,8 +15,8 @@ use sea_query_rusqlite::RusqliteBinder;
 use servo_base::threadpool::ThreadPool;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    BackendError, CreateObjectResult, IndexedDBIndex, IndexedDBKeyRange, IndexedDBKeyType,
-    IndexedDBRecord, IndexedDBTxnMode, KeyPath, PutItemResult,
+    BackendError, CreateObjectResult, IndexKeys, IndexedDBIndex, IndexedDBKeyRange,
+    IndexedDBKeyType, IndexedDBRecord, IndexedDBTxnMode, KeyPath, PutItemResult,
 };
 
 use crate::indexeddb::IndexedDBDescription;
@@ -244,6 +244,8 @@ impl SqliteEngine {
             let _ = connection.execute(stmt, ());
         }
         connection.busy_timeout(BUSY_TIMEOUT)?;
+        // Partii: bring databases written by older builds up to the current schema.
+        create::upgrade_tables(&connection)?;
 
         Ok(Self {
             shared: Arc::new(Mutex::new(EngineConnection {
@@ -387,6 +389,10 @@ impl SqliteEngine {
             .map(|models| models.into_iter().map(|m| (m.key, m.data)).collect())
     }
 
+    /// <https://w3c.github.io/IndexedDB/#store-a-record-into-an-object-store>
+    ///
+    /// Partii: the record and its index records are written as one database operation; a
+    /// unique index clash undoes the record write and reports a "ConstraintError".
     fn put_item(
         connection: &Connection,
         store: object_store_model::Model,
@@ -394,6 +400,33 @@ impl SqliteEngine {
         value: Vec<u8>,
         should_overwrite: bool,
         key_generator_current_number: Option<i64>,
+        index_keys: &IndexKeys,
+    ) -> Result<PutItemResult, Error> {
+        in_savepoint(
+            connection,
+            || {
+                Self::put_item_in_savepoint(
+                    connection,
+                    store,
+                    key,
+                    value,
+                    should_overwrite,
+                    key_generator_current_number,
+                    index_keys,
+                )
+            },
+            |result| matches!(result, PutItemResult::Key(_)),
+        )
+    }
+
+    fn put_item_in_savepoint(
+        connection: &Connection,
+        store: object_store_model::Model,
+        key: IndexedDBKeyType,
+        value: Vec<u8>,
+        should_overwrite: bool,
+        key_generator_current_number: Option<i64>,
+        index_keys: &IndexKeys,
     ) -> Result<PutItemResult, Error> {
         let no_overwrite = !should_overwrite;
         let serialized_key: Vec<u8> = encoding::serialize(&key);
@@ -409,6 +442,9 @@ impl SqliteEngine {
             if no_overwrite {
                 return Ok(PutItemResult::CannotOverwrite);
             }
+            // Step 2. If the no-overwrite flag is false and a record exists in store with key
+            // equal to key, remove the record (Partii: and its index records) from store.
+            Self::delete_index_records(connection, store.id, &serialized_key)?;
             // Preserve `put()` semantics by replacing the stored value when the primary
             // key already exists.
             connection.execute(
@@ -421,6 +457,10 @@ impl SqliteEngine {
                 params![store.id, serialized_key, value],
             )?;
         }
+        // Step 5. For each index which references store: store the record's index keys.
+        if !Self::write_index_records(connection, store.id, &serialized_key, index_keys)? {
+            return Ok(PutItemResult::CannotOverwrite);
+        }
         if let Some(next_key_generator_current_number) = key_generator_current_number {
             connection.execute(
                 "UPDATE object_store SET auto_increment = ? WHERE id = ?",
@@ -430,26 +470,136 @@ impl SqliteEngine {
         Ok(PutItemResult::Key(key))
     }
 
+    /// Partii: the index named `name` of the store with id `store_id`.
+    fn index_by_name(
+        connection: &Connection,
+        store_id: i32,
+        name: &str,
+    ) -> Result<Option<object_store_index_model::Model>, Error> {
+        connection
+            .query_row(
+                "SELECT * FROM object_store_index WHERE object_store_id = ? AND name = ?",
+                params![store_id, name],
+                |row| object_store_index_model::Model::try_from(row),
+            )
+            .optional()
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#store-a-record-into-an-object-store> step 5,
+    /// for the record with (encoded) primary key `primary_key`. Returns false, having written
+    /// some of the records, when a unique index already holds one of the keys for another
+    /// record: the caller undoes the operation.
+    fn write_index_records(
+        connection: &Connection,
+        store_id: i32,
+        primary_key: &[u8],
+        index_keys: &IndexKeys,
+    ) -> Result<bool, Error> {
+        for (index_name, keys) in index_keys {
+            if keys.is_empty() {
+                continue;
+            }
+            let Some(index) = Self::index_by_name(connection, store_id, index_name)? else {
+                warn!("IndexedDB put names unknown index {index_name:?}");
+                continue;
+            };
+            for key in keys {
+                let value = encoding::serialize(key);
+                if index.unique_index {
+                    // Steps 5.3 and 5.4: a unique index may hold each key once.
+                    let clash: bool = connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM unique_index_data \
+                         WHERE index_id = ? AND value = ? AND object_data_key != ?)",
+                        params![index.id, value, primary_key],
+                        |row| row.get(0),
+                    )?;
+                    if clash {
+                        return Ok(false);
+                    }
+                    connection.execute(
+                        "INSERT OR REPLACE INTO unique_index_data \
+                         (index_id, value, object_store_id, object_data_key) VALUES (?, ?, ?, ?)",
+                        params![index.id, value, store_id, primary_key],
+                    )?;
+                } else {
+                    // Steps 5.5 and 5.6.
+                    connection.execute(
+                        "INSERT OR IGNORE INTO index_data \
+                         (index_id, value, object_data_key, object_store_id) VALUES (?, ?, ?, ?)",
+                        params![index.id, value, primary_key, store_id],
+                    )?;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Partii: remove the index records of the record with (encoded) primary key `primary_key`.
+    fn delete_index_records(
+        connection: &Connection,
+        store_id: i32,
+        primary_key: &[u8],
+    ) -> Result<(), Error> {
+        connection.execute(
+            "DELETE FROM index_data WHERE object_store_id = ? AND object_data_key = ?",
+            params![store_id, primary_key],
+        )?;
+        connection.execute(
+            "DELETE FROM unique_index_data WHERE object_store_id = ? AND object_data_key = ?",
+            params![store_id, primary_key],
+        )?;
+        Ok(())
+    }
+
+    /// <https://w3c.github.io/IndexedDB/#delete-records-from-an-object-store>
     fn delete_item(
         connection: &Connection,
         store: object_store_model::Model,
         key_range: IndexedDBKeyRange,
     ) -> Result<(), Error> {
-        let query = range_to_query(key_range);
-        let (sql, values) = sea_query::Query::delete()
-            .from_table(object_data_model::Column::Table)
-            .and_where(query.and(Expr::col(object_data_model::Column::ObjectStoreId).is(store.id)))
-            .build_rusqlite(SqliteQueryBuilder);
-        connection.prepare(&sql)?.execute(&*values.as_params())?;
-        Ok(())
+        in_savepoint(
+            connection,
+            || {
+                // Partii: Step 3. Remove the records in range from each index of store.
+                for key in Self::get_all_keys(connection, store.clone(), key_range.clone(), None)? {
+                    Self::delete_index_records(connection, store.id, &key)?;
+                }
+                let query = range_to_query(key_range);
+                let (sql, values) = sea_query::Query::delete()
+                    .from_table(object_data_model::Column::Table)
+                    .and_where(
+                        query.and(Expr::col(object_data_model::Column::ObjectStoreId).is(store.id)),
+                    )
+                    .build_rusqlite(SqliteQueryBuilder);
+                connection.prepare(&sql)?.execute(&*values.as_params())?;
+                Ok(())
+            },
+            |_| true,
+        )
     }
 
+    /// <https://w3c.github.io/IndexedDB/#clear-an-object-store>
     fn clear(connection: &Connection, store: object_store_model::Model) -> Result<(), Error> {
-        connection.execute(
-            "DELETE FROM object_data WHERE object_store_id = ?",
-            params![store.id],
-        )?;
-        Ok(())
+        in_savepoint(
+            connection,
+            || {
+                // Partii: Step 2. Remove all records from each index of store.
+                connection.execute(
+                    "DELETE FROM index_data WHERE object_store_id = ?",
+                    params![store.id],
+                )?;
+                connection.execute(
+                    "DELETE FROM unique_index_data WHERE object_store_id = ?",
+                    params![store.id],
+                )?;
+                connection.execute(
+                    "DELETE FROM object_data WHERE object_store_id = ?",
+                    params![store.id],
+                )?;
+                Ok(())
+            },
+            |_| true,
+        )
     }
 
     fn count(
@@ -593,6 +743,19 @@ impl SqliteEngine {
             |row| Ok(object_store_model::Model::try_from(row).unwrap()),
         )?;
 
+        // Partii: https://w3c.github.io/IndexedDB/#dom-idbobjectstore-deleteindex
+        // Step 8. Destroy index: its records go with it.
+        if let Some(index) = Self::index_by_name(connection, object_store.id, &index_name)? {
+            connection.execute(
+                "DELETE FROM index_data WHERE index_id = ?",
+                params![index.id],
+            )?;
+            connection.execute(
+                "DELETE FROM unique_index_data WHERE index_id = ?",
+                params![index.id],
+            )?;
+        }
+
         // Delete the index if it exists
         let _ = connection.execute(
             "DELETE FROM object_store_index WHERE name = ? AND object_store_id = ?",
@@ -649,6 +812,7 @@ impl SqliteEngine {
                 value,
                 should_overwrite,
                 key_generator_current_number,
+                index_keys,
             }) => {
                 let (key, key_generator_current_number) = match key {
                     Some(key) => (key, key_generator_current_number),
@@ -687,6 +851,7 @@ impl SqliteEngine {
                         value,
                         should_overwrite,
                         key_generator_current_number,
+                        &index_keys,
                     )
                     .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                 );
@@ -1080,8 +1245,8 @@ mod tests {
     };
     use storage_traits::indexeddb::{
         AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, BackendResult,
-        CreateObjectResult, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBTxnMode, KeyPath,
-        PutItemResult,
+        CreateObjectResult, IndexKeys, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBTxnMode,
+        KeyPath, PutItemResult,
     };
     use url::Host;
 
@@ -1335,6 +1500,7 @@ mod tests {
             vec![1, 2, 3],
             true,
             None,
+            &vec![],
         )
         .expect("Failed to insert item");
 
@@ -1421,6 +1587,7 @@ mod tests {
                             value: vec![1, 2, 3],
                             should_overwrite: false,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     KvsOperation {
@@ -1431,6 +1598,7 @@ mod tests {
                             value: vec![4, 5, 6],
                             should_overwrite: false,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     KvsOperation {
@@ -1444,6 +1612,7 @@ mod tests {
                             value: vec![7, 8, 9],
                             should_overwrite: false,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     // Try to put a duplicate key without overwrite
@@ -1455,6 +1624,7 @@ mod tests {
                             value: vec![10, 11, 12],
                             should_overwrite: false,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     KvsOperation {
@@ -1465,6 +1635,7 @@ mod tests {
                             value: vec![13, 14, 15],
                             should_overwrite: true,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     KvsOperation {
@@ -1581,6 +1752,7 @@ mod tests {
                     vec![key as u8],
                     false,
                     None,
+                    &vec![],
                 )
                 .expect("Failed to seed object store");
             }
@@ -1679,6 +1851,7 @@ mod tests {
                 value,
                 should_overwrite: true,
                 key_generator_current_number: None,
+                index_keys: vec![],
             }),
         }
     }
@@ -1732,5 +1905,156 @@ mod tests {
         assert!(db.begin_transaction(3).is_ok());
         db.rollback_transaction(3);
         assert_eq!(record_count(&db), 1, "committed data survives");
+    }
+
+    fn index_row_count(db: &SqliteEngine) -> i64 {
+        db.connection()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM index_data) + (SELECT COUNT(*) FROM unique_index_data)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn put_with_index_keys(
+        db: &SqliteEngine,
+        key: f64,
+        index_keys: IndexKeys,
+        should_overwrite: bool,
+    ) -> PutItemResult {
+        let store = SqliteEngine::object_store_by_name(&db.connection(), "store").unwrap();
+        SqliteEngine::put_item(
+            &db.connection(),
+            store,
+            IndexedDBKeyType::Number(key),
+            vec![key as u8],
+            should_overwrite,
+            None,
+            &index_keys,
+        )
+        .unwrap()
+    }
+
+    fn string_key(value: &str) -> IndexedDBKeyType {
+        IndexedDBKeyType::String(value.to_owned())
+    }
+
+    /// Partii: a put writes the record's index records, an overwrite replaces them and a delete
+    /// removes them; a unique index clash fails the put with no trace of it.
+    #[test]
+    fn test_index_records_and_unique_constraint() {
+        let (_temp_dir, _proxy_map, _handle, db) = open_engine();
+        db.create_store("store", None, false).unwrap();
+        db.create_index(
+            "store",
+            "by_name".to_owned(),
+            KeyPath::String("name".to_owned()),
+            true,
+            false,
+        )
+        .unwrap();
+
+        let one = vec![("by_name".to_owned(), vec![string_key("a")])];
+        assert_eq!(
+            put_with_index_keys(&db, 1.0, one.clone(), true),
+            PutItemResult::Key(IndexedDBKeyType::Number(1.0))
+        );
+        assert_eq!(index_row_count(&db), 1);
+        // Overwriting the same record with the same index key is not a clash.
+        assert!(matches!(
+            put_with_index_keys(&db, 1.0, one.clone(), true),
+            PutItemResult::Key(_)
+        ));
+        assert_eq!(index_row_count(&db), 1);
+
+        // Another record with the same unique key fails with ConstraintError and leaves nothing.
+        assert_eq!(
+            put_with_index_keys(&db, 2.0, one.clone(), true),
+            PutItemResult::CannotOverwrite
+        );
+        assert_eq!(record_count(&db), 1);
+        assert_eq!(index_row_count(&db), 1);
+
+        // Overwriting record 1 with another key frees "a".
+        let other = vec![("by_name".to_owned(), vec![string_key("b")])];
+        assert!(matches!(
+            put_with_index_keys(&db, 1.0, other, true),
+            PutItemResult::Key(_)
+        ));
+        assert!(matches!(
+            put_with_index_keys(&db, 2.0, one, true),
+            PutItemResult::Key(_)
+        ));
+        assert_eq!(index_row_count(&db), 2);
+
+        let store = SqliteEngine::object_store_by_name(&db.connection(), "store").unwrap();
+        SqliteEngine::delete_item(
+            &db.connection(),
+            store.clone(),
+            IndexedDBKeyRange::only(IndexedDBKeyType::Number(1.0)),
+        )
+        .unwrap();
+        assert_eq!(index_row_count(&db), 1);
+        SqliteEngine::clear(&db.connection(), store).unwrap();
+        assert_eq!(index_row_count(&db), 0);
+    }
+
+    /// Partii: a multiEntry index gets one record per subkey; deleting the index removes them.
+    #[test]
+    fn test_multi_entry_index_records() {
+        let (_temp_dir, _proxy_map, _handle, db) = open_engine();
+        db.create_store("store", None, false).unwrap();
+        db.create_index(
+            "store",
+            "tags".to_owned(),
+            KeyPath::String("tags".to_owned()),
+            false,
+            true,
+        )
+        .unwrap();
+        let tags = vec![(
+            "tags".to_owned(),
+            vec![string_key("x"), string_key("y"), string_key("z")],
+        )];
+        assert!(matches!(
+            put_with_index_keys(&db, 1.0, tags.clone(), true),
+            PutItemResult::Key(_)
+        ));
+        assert!(matches!(
+            put_with_index_keys(&db, 2.0, tags, true),
+            PutItemResult::Key(_)
+        ));
+        assert_eq!(index_row_count(&db), 6);
+        db.delete_index("store", "tags".to_owned()).unwrap();
+        assert_eq!(index_row_count(&db), 0);
+    }
+
+    /// Partii: an aborted readwrite transaction leaves no record and no index record.
+    #[test]
+    fn test_aborted_transaction_leaves_no_index_records() {
+        let (_temp_dir, _proxy_map, _handle, db) = open_engine();
+        db.create_store("store", None, false).unwrap();
+        db.create_index(
+            "store",
+            "by_name".to_owned(),
+            KeyPath::String("name".to_owned()),
+            false,
+            false,
+        )
+        .unwrap();
+        let (sender, receiver) = generic_channel::channel().unwrap();
+        let mut put = put_request("store", 1.0, vec![1], sender);
+        if let AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem { index_keys, .. }) =
+            &mut put.operation
+        {
+            *index_keys = vec![("by_name".to_owned(), vec![string_key("a")])];
+        }
+        run_batch(&db, 7, IndexedDBTxnMode::Readwrite, vec![put]);
+        assert!(receiver.recv().unwrap().is_ok());
+        assert_eq!(index_row_count(&db), 1);
+        db.rollback_transaction(7);
+        assert_eq!(record_count(&db), 0);
+        assert_eq!(index_row_count(&db), 0);
     }
 }

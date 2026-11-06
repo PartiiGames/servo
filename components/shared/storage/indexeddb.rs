@@ -279,8 +279,16 @@ pub struct IndexedDBObjectStore {
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
 pub enum PutItemResult {
     Key(IndexedDBKeyType),
+    /// The put failed with a "ConstraintError": a record with the key exists and the
+    /// no-overwrite flag is set, or (Partii) a unique index already has one of the record's
+    /// index keys.
     CannotOverwrite,
 }
+
+/// Partii: the keys of a record in one index of its object store, by index name: one key, the
+/// unique subkeys of a multiEntry array key, or none when the record has no valid key there.
+/// <https://w3c.github.io/IndexedDB/#store-a-record-into-an-object-store> step 5.
+pub type IndexKeys = Vec<(String, Vec<IndexedDBKeyType>)>;
 
 #[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
 pub enum AsyncReadOnlyOperation {
@@ -338,6 +346,9 @@ pub enum AsyncReadWriteOperation {
         should_overwrite: bool,
         /// New object store key generator current number to persist if the put succeeds.
         key_generator_current_number: Option<i64>,
+        /// Partii: the record's keys in each index of the store. The backend replaces the
+        /// record's index records with these in the same database operation.
+        index_keys: IndexKeys,
     },
 
     /// Removes the key/value pair for the given key in the associated idb data

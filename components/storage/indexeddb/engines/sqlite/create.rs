@@ -78,5 +78,22 @@ CREATE TABLE unique_index_data (
     REFERENCES object_data(object_store_id, key)
 ) WITHOUT ROWID;"#;
     conn.execute(UNIQUE_INDEX_DATA, [])?;
+    upgrade_tables(conn)
+}
+
+/// Partii: changes to the schema above made after databases were first written to disk. Every
+/// step is idempotent; it runs each time a database is opened.
+pub(crate) fn upgrade_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    // Find the index records of one object store record (overwriting or deleting it).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS index_data_by_record \
+         ON index_data (object_store_id, object_data_key)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS unique_index_data_by_record \
+         ON unique_index_data (object_store_id, object_data_key)",
+        [],
+    )?;
     Ok(())
 }
