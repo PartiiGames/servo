@@ -846,6 +846,13 @@ impl Runtime {
                 JS_SetGCParameter(cx, JSGCParamKey::JSGC_URGENT_THRESHOLD_MB, val as u32);
             }
         }
+        unsafe {
+            super::gc_scheduler::init_runtime(
+                runtime.cx(),
+                Some(trace_rust_roots),
+                runtime_callback_data as *mut c_void,
+            );
+        }
         Runtime {
             rt: runtime,
             job_queue,

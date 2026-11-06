@@ -28,6 +28,7 @@ pub mod error;
 mod finalize;
 mod guard;
 mod import;
+pub mod incremental_gc;
 pub mod inheritance;
 mod init;
 pub mod interface;
