@@ -45,6 +45,9 @@ pub(crate) struct IDBIndex {
     /// each time (undefined until first read).
     #[ignore_malloc_size_of = "mozjs"]
     key_path_value: Heap<JSVal>,
+    /// Partii: the index's name when the transaction started, if it existed then (None for an
+    /// index created in this transaction). An aborted upgrade restores it.
+    original_name: DomRefCell<Option<DOMString>>,
 }
 
 impl IDBIndex {
@@ -63,6 +66,7 @@ impl IDBIndex {
             unique,
             key_path,
             key_path_value: Heap::default(),
+            original_name: DomRefCell::new(None),
         }
     }
 
@@ -105,10 +109,27 @@ impl IDBIndex {
         self.name.borrow().clone()
     }
 
+    /// Partii: note that the index existed when the transaction started.
+    pub(crate) fn mark_existing(&self) {
+        *self.original_name.borrow_mut() = Some(self.name());
+    }
+
+    /// Partii: the index's name when the transaction started, if it existed then.
+    pub(crate) fn original_name(&self) -> Option<DOMString> {
+        self.original_name.borrow().clone()
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#abort-an-upgrade-transaction> step 5.3: an index
+    /// handle of an index that was not created in the transaction gets its index's name back.
+    pub(crate) fn restore_name(&self, name: DOMString) {
+        *self.name.borrow_mut() = name;
+    }
+
     pub(crate) fn verify_not_deleted(&self) -> ErrorResult {
-        let stored_name = self.name.borrow().clone();
         let transaction = self.object_store.transaction();
-        if !self.object_store.has_index(&stored_name) ||
+        // Partii: this handle, not just an index of the same name, must still be in its object
+        // store handle's index set.
+        if !self.object_store.has_index_handle(self) ||
             !transaction
                 .get_db()
                 .object_store_exists(&self.object_store.get_name())
@@ -279,8 +300,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
         }
 
         // Step 6: If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
-        let mut stored_name = self.name.borrow_mut();
-        if !self.object_store.has_index(&stored_name) ||
+        if !self.object_store.has_index_handle(self) ||
             !transaction
                 .get_db()
                 .object_store_exists(&self.object_store.get_name())
@@ -290,6 +310,7 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             )));
         }
 
+        let mut stored_name = self.name.borrow_mut();
         // Step 7: If index’s name is equal to name, terminate these steps.
         if *stored_name == name {
             return Ok(());

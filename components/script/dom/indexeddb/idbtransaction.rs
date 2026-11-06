@@ -308,6 +308,14 @@ impl IDBTransaction {
             .insert(name.to_string(), Dom::from_ref(store));
     }
 
+    /// Partii: the object store handle this transaction made for `name`, if any.
+    pub(crate) fn object_store_handle(&self, name: &DOMString) -> Option<DomRoot<IDBObjectStore>> {
+        self.store_handles
+            .borrow()
+            .get(&name.to_string())
+            .map(|store| DomRoot::from_ref(&**store))
+    }
+
     pub(crate) fn rename_object_store_handle_cache(
         &self,
         old_name: &DOMString,
@@ -1116,15 +1124,19 @@ impl IDBTransactionMethods<crate::DomTypeHolder> for IDBTransaction {
                 });
             }
             for index in indexes {
-                store.add_index(
-                    cx,
-                    index.name.into(),
-                    &IDBIndexParameters {
-                        multiEntry: index.multi_entry,
-                        unique: index.unique,
-                    },
-                    index.key_path.into(),
-                );
+                // Partii: these indexes existed before the transaction, so an aborted upgrade
+                // gives their handles back their names.
+                store
+                    .add_index(
+                        cx,
+                        index.name.into(),
+                        &IDBIndexParameters {
+                            multiEntry: index.multi_entry,
+                            unique: index.unique,
+                        },
+                        index.key_path.into(),
+                    )
+                    .mark_existing();
             }
         }
         self.register_object_store_handle(&name, &store);

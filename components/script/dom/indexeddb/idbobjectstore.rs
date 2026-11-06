@@ -113,6 +113,9 @@ pub struct IDBObjectStore {
     #[ignore_malloc_size_of = "mozjs"]
     key_path_value: Heap<JSVal>,
     index_set: DomRefCell<HashMap<DOMString, Dom<IDBIndex>>>,
+    /// Partii: every index handle made for this object store handle, also those no longer in
+    /// its index set, so that an aborted upgrade can put them back (with their names).
+    index_handles: DomRefCell<Vec<Dom<IDBIndex>>>,
     abort_state_on_abort: DomRefCell<Option<IDBObjectStoreRollbackState>>,
     transaction: Dom<IDBTransaction>,
     has_key_generator: bool,
@@ -164,6 +167,7 @@ impl IDBObjectStore {
             key_path,
             key_path_value: Heap::default(),
             index_set: DomRefCell::new(HashMap::new()),
+            index_handles: Default::default(),
             abort_state_on_abort: DomRefCell::new(Some(IDBObjectStoreRollbackState {
                 newly_created_during_transaction,
                 rollback_name: None,
@@ -219,8 +223,30 @@ impl IDBObjectStore {
 
         // Step 5.2. Set handle’s index set to the set of indexes that reference
         // its object store.
+        // Step 5.3. For each index handle associated with handle: if index was not newly
+        // created during transaction, set index handle’s name to its index’s name.
+        // Partii: the handles of indexes that existed before the transaction come back (with
+        // their names), so they no longer count as deleted; handles of indexes made in the
+        // transaction stay out of the index set.
         self.index_set.borrow_mut().clear();
+        let handles: Vec<DomRoot<IDBIndex>> = self
+            .index_handles
+            .borrow()
+            .iter()
+            .map(|index| index.as_rooted())
+            .collect();
         for index in abort_state.rollback_indexes {
+            let name: DOMString = index.name.clone().into();
+            if let Some(handle) = handles
+                .iter()
+                .find(|handle| handle.original_name().as_ref() == Some(&name))
+            {
+                handle.restore_name(name.clone());
+                self.index_set
+                    .borrow_mut()
+                    .insert(name, Dom::from_ref(&**handle));
+                continue;
+            }
             self.add_index(
                 cx,
                 index.name.clone().into(),
@@ -731,11 +757,26 @@ impl IDBObjectStore {
         self.index_set
             .borrow_mut()
             .insert(name, Dom::from_ref(&index));
+        self.index_handles.borrow_mut().push(Dom::from_ref(&index));
         index
     }
 
     pub(crate) fn has_index(&self, name: &DOMString) -> bool {
         self.index_set.borrow().contains_key(name)
+    }
+
+    /// Partii: whether `index` (this handle, not another of the same name) is in the index set.
+    pub(crate) fn has_index_handle(&self, index: &IDBIndex) -> bool {
+        self.index_set
+            .borrow()
+            .values()
+            .any(|handle| std::ptr::eq(&**handle, index))
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbdatabase-deleteobjectstore> step 6:
+    /// "remove all entries from" the handle's index set.
+    pub(crate) fn clear_index_set(&self) {
+        self.index_set.borrow_mut().clear();
     }
 
     /// The caller must ensure that the original index exists.
