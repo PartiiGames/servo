@@ -315,12 +315,16 @@ impl PlatformFontMethods for PlatformFont {
             // vertical metrics. FreeType's face ascender/descender come from hhea regardless; browsers
             // (Gecko, Blink) use the typo values when the flag is set, so canvas measureText and line
             // boxes otherwise came out taller than in Chromium for such fonts.
-            if face.scalable() && os2.fs_selection().contains(SelectionFlags::USE_TYPO_METRICS) {
+            if face.scalable() &&
+                os2.fs_selection()
+                    .contains(SelectionFlags::USE_TYPO_METRICS)
+            {
                 let (ascent, descent) = (os2.s_typo_ascender(), os2.s_typo_descender());
                 if ascent != 0 || descent != 0 {
                     max_ascent = ascent as f64 * y_scale;
                     max_descent = -(descent as f64) * y_scale;
-                    line_height = (ascent as f64 - descent as f64 + os2.s_typo_line_gap() as f64) * y_scale;
+                    line_height =
+                        (ascent as f64 - descent as f64 + os2.s_typo_line_gap() as f64) * y_scale;
                 }
             }
         }

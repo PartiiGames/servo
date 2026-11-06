@@ -217,6 +217,13 @@ interface mixin CanvasPathDrawingStyles {
   attribute unrestricted double lineDashOffset;
 };
 
+enum CanvasFontKerning { "auto", "normal", "none" };
+enum CanvasFontStretch { "ultra-condensed", "extra-condensed", "condensed", "semi-condensed", "normal",
+                         "semi-expanded", "expanded", "extra-expanded", "ultra-expanded" };
+enum CanvasFontVariantCaps { "normal", "small-caps", "all-small-caps", "petite-caps", "all-petite-caps",
+                             "unicase", "titling-caps" };
+enum CanvasTextRendering { "auto", "optimizeSpeed", "optimizeLegibility", "geometricPrecision" };
+
 interface mixin CanvasTextDrawingStyles {
   // text
   attribute DOMString font; // (default 10px sans-serif)
@@ -224,6 +231,13 @@ interface mixin CanvasTextDrawingStyles {
   attribute CanvasTextBaseline textBaseline; // "top", "hanging", "middle", "alphabetic",
                                       // "ideographic", "bottom" (default: "alphabetic")
   attribute CanvasDirection direction; // "ltr", "rtl", "inherit" (default: "inherit")
+  // Partii: the rest of the HTML spec's text drawing styles (lang is not supported yet).
+  attribute DOMString letterSpacing; // CSS letter-spacing (default: "0px")
+  attribute CanvasFontKerning fontKerning; // "auto", "normal", "none" (default: "auto")
+  attribute CanvasFontStretch fontStretch; // (default: "normal")
+  attribute CanvasFontVariantCaps fontVariantCaps; // (default: "normal")
+  attribute CanvasTextRendering textRendering; // (default: "auto")
+  attribute DOMString wordSpacing; // CSS word-spacing (default: "0px")
 };
 
 interface mixin CanvasPath {

@@ -42,11 +42,12 @@ use style::properties::longhands::font_variant_caps::computed_value::T as FontVa
 use style::properties::style_structs::Font;
 use style::stylesheets::{CssRuleType, UrlExtraData};
 use style::values::computed::color::Color as ComputedColor;
-use style::values::computed::font::{FontStyle, FontWeight};
+use style::values::computed::font::{FontStyle, FontWeight, FontWidth};
 use style::values::computed::{
     FontFeatureSettings, FontVariantEastAsian, FontVariantLigatures, FontVariantNumeric,
 };
 use style::values::specified::color::Color;
+use style::values::specified::{LengthUnit, NoCalcLength};
 use style_traits::values::ToCss;
 use style_traits::{CssWriter, ParsingMode};
 use unicode_script::Script;
@@ -56,8 +57,9 @@ use crate::canvas_context::{CanvasContext, OffscreenRenderingContext, RenderingC
 use crate::conversions::Convert;
 use crate::css::css::{ANONYMOUS_CONTENT_URL_DATA, parser_context_for_anonymous_content};
 use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
-    CanvasDirection, CanvasFillRule, CanvasImageSource, CanvasLineCap, CanvasLineJoin,
-    CanvasTextAlign, CanvasTextBaseline, ImageDataMethods,
+    CanvasDirection, CanvasFillRule, CanvasFontKerning, CanvasFontStretch, CanvasFontVariantCaps,
+    CanvasImageSource, CanvasLineCap, CanvasLineJoin, CanvasTextAlign, CanvasTextBaseline,
+    CanvasTextRendering, ImageDataMethods,
 };
 use crate::dom::bindings::codegen::Bindings::DOMMatrixBinding::DOMMatrix2DInit;
 use crate::dom::bindings::codegen::UnionTypes::{
@@ -136,6 +138,15 @@ pub(super) struct CanvasContextState {
     text_align: CanvasTextAlign,
     text_baseline: CanvasTextBaseline,
     direction: CanvasDirection,
+    /// Partii: letterSpacing / wordSpacing as CSS lengths (absolute or font-relative).
+    #[no_trace]
+    letter_spacing: NoCalcLength,
+    #[no_trace]
+    word_spacing: NoCalcLength,
+    font_kerning: CanvasFontKerning,
+    font_stretch: CanvasFontStretch,
+    font_variant_caps: CanvasFontVariantCaps,
+    text_rendering: CanvasTextRendering,
     /// The number of clips pushed onto the context while in this state.
     /// When restoring old state, same number of clips will be popped to restore state.
     clips_pushed: usize,
@@ -164,6 +175,12 @@ impl CanvasContextState {
             text_align: CanvasTextAlign::Start,
             text_baseline: CanvasTextBaseline::Alphabetic,
             direction: CanvasDirection::Inherit,
+            letter_spacing: NoCalcLength::from_px(0.),
+            word_spacing: NoCalcLength::from_px(0.),
+            font_kerning: CanvasFontKerning::Auto,
+            font_stretch: CanvasFontStretch::Normal,
+            font_variant_caps: CanvasFontVariantCaps::Normal,
+            text_rendering: CanvasTextRendering::Auto,
             line_dash: Vec::new(),
             line_dash_offset: 0.0,
             clips_pushed: 0,
@@ -1583,7 +1600,11 @@ impl CanvasState {
         }
 
         if self.state.borrow().font_style.is_none() {
-            self.set_font(global_scope, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
+            self.set_font(
+                global_scope,
+                canvas,
+                CanvasContextState::DEFAULT_FONT_STYLE.into(),
+            )
         }
         // This may be `None` if if this is offscreen canvas, in which case just use
         // the initial values for the text style.
@@ -1627,7 +1648,11 @@ impl CanvasState {
         }
 
         if self.state.borrow().font_style.is_none() {
-            self.set_font(global_scope, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into())
+            self.set_font(
+                global_scope,
+                canvas,
+                CanvasContextState::DEFAULT_FONT_STYLE.into(),
+            )
         }
         // This may be `None` if if this is offscreen canvas, in which case just use
         // the initial values for the text style.
@@ -1672,7 +1697,11 @@ impl CanvasState {
         // > Step 3: Let font be the current font of target, as given by that object's font
         // > attribute.
         if self.state.borrow().font_style.is_none() {
-            self.set_font(global, canvas, CanvasContextState::DEFAULT_FONT_STYLE.into());
+            self.set_font(
+                global,
+                canvas,
+                CanvasContextState::DEFAULT_FONT_STYLE.into(),
+            );
         }
 
         let font_context = &global.font_context();
@@ -1682,12 +1711,13 @@ impl CanvasState {
         let ascent = font.metrics().ascent.to_f64_px();
         let descent = font.metrics().descent.to_f64_px();
         let runs = self.build_unshaped_text_runs(font_context, &text, &font_group);
+        let spacing = self.text_spacing();
 
         let mut total_advance = 0.0;
         let shaped_runs: Vec<_> = runs
             .into_iter()
             .filter_map(|unshaped_text_run| {
-                let text_run = unshaped_text_run.into_shaped_text_run(total_advance)?;
+                let text_run = unshaped_text_run.into_shaped_text_run(total_advance, &spacing)?;
                 total_advance += text_run.advance;
                 Some(text_run)
             })
@@ -1780,11 +1810,37 @@ impl CanvasState {
     }
 
     fn font_style(&self) -> ServoArc<Font> {
-        self.state
-            .borrow()
+        let state = self.state.borrow();
+        let font = state
             .font_style
             .clone()
-            .unwrap_or_else(|| ServoArc::new(Font::initial_values()))
+            .unwrap_or_else(|| ServoArc::new(Font::initial_values()));
+        // Partii: fontStretch and fontVariantCaps override the font's own values when set.
+        let width = match state.font_stretch {
+            CanvasFontStretch::Normal => None,
+            CanvasFontStretch::Ultra_condensed => Some(FontWidth::ULTRA_CONDENSED),
+            CanvasFontStretch::Extra_condensed => Some(FontWidth::EXTRA_CONDENSED),
+            CanvasFontStretch::Condensed => Some(FontWidth::CONDENSED),
+            CanvasFontStretch::Semi_condensed => Some(FontWidth::SEMI_CONDENSED),
+            CanvasFontStretch::Semi_expanded => Some(FontWidth::SEMI_EXPANDED),
+            CanvasFontStretch::Expanded => Some(FontWidth::EXPANDED),
+            CanvasFontStretch::Extra_expanded => Some(FontWidth::EXTRA_EXPANDED),
+            CanvasFontStretch::Ultra_expanded => Some(FontWidth::ULTRA_EXPANDED),
+        };
+        // Servo's stylo only has normal and small-caps; the other caps values are stored, not applied.
+        let small_caps = state.font_variant_caps == CanvasFontVariantCaps::Small_caps;
+        if width.is_none() && !small_caps {
+            return font;
+        }
+        let mut font = (*font).clone();
+        if let Some(width) = width {
+            font.font_width = width;
+        }
+        if small_caps {
+            font.font_variant_caps = FontVariantCaps::SmallCaps;
+        }
+        font.compute_font_hash();
+        ServoArc::new(font)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-font>
@@ -1818,6 +1874,72 @@ impl CanvasState {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-direction>
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-letterspacing>
+    pub(super) fn letter_spacing(&self) -> DOMString {
+        DOMString::from(self.state.borrow().letter_spacing.to_css_string())
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-letterspacing>
+    pub(super) fn set_letter_spacing(&self, value: DOMString) {
+        if let Some(length) = parse_canvas_spacing(&value.str()) {
+            self.state.borrow_mut().letter_spacing = length;
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-wordspacing>
+    pub(super) fn word_spacing(&self) -> DOMString {
+        DOMString::from(self.state.borrow().word_spacing.to_css_string())
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-wordspacing>
+    pub(super) fn set_word_spacing(&self, value: DOMString) {
+        if let Some(length) = parse_canvas_spacing(&value.str()) {
+            self.state.borrow_mut().word_spacing = length;
+        }
+    }
+
+    pub(super) fn font_kerning(&self) -> CanvasFontKerning {
+        self.state.borrow().font_kerning
+    }
+
+    pub(super) fn set_font_kerning(&self, value: CanvasFontKerning) {
+        self.state.borrow_mut().font_kerning = value;
+    }
+
+    pub(super) fn font_stretch(&self) -> CanvasFontStretch {
+        self.state.borrow().font_stretch
+    }
+
+    pub(super) fn set_font_stretch(&self, value: CanvasFontStretch) {
+        self.state.borrow_mut().font_stretch = value;
+    }
+
+    pub(super) fn font_variant_caps(&self) -> CanvasFontVariantCaps {
+        self.state.borrow().font_variant_caps
+    }
+
+    pub(super) fn set_font_variant_caps(&self, value: CanvasFontVariantCaps) {
+        self.state.borrow_mut().font_variant_caps = value;
+    }
+
+    pub(super) fn text_rendering(&self) -> CanvasTextRendering {
+        self.state.borrow().text_rendering
+    }
+
+    pub(super) fn set_text_rendering(&self, value: CanvasTextRendering) {
+        self.state.borrow_mut().text_rendering = value;
+    }
+
+    /// The letterSpacing, wordSpacing and fontKerning state used when shaping text.
+    fn text_spacing(&self) -> TextSpacing {
+        let state = self.state.borrow();
+        TextSpacing {
+            letter: state.letter_spacing,
+            word: state.word_spacing,
+            no_kerning: state.font_kerning == CanvasFontKerning::None,
+        }
+    }
+
     pub(super) fn direction(&self) -> CanvasDirection {
         self.state.borrow().direction
     }
@@ -2509,6 +2631,7 @@ impl CanvasState {
         };
 
         let runs = self.build_unshaped_text_runs(font_context, &text, &font_group);
+        let spacing = self.text_spacing();
 
         // TODO: This doesn't do any kind of line layout at all. In particular, there needs
         // to be some alignment along a baseline and also support for bidi text.
@@ -2516,7 +2639,7 @@ impl CanvasState {
         let mut shaped_runs: Vec<_> = runs
             .into_iter()
             .filter_map(|unshaped_text_run| {
-                let text_run = unshaped_text_run.into_shaped_text_run(total_advance)?;
+                let text_run = unshaped_text_run.into_shaped_text_run(total_advance, &spacing)?;
                 total_advance += text_run.advance;
                 Some(text_run)
             })
@@ -2705,16 +2828,21 @@ impl UnshapedTextRun<'_> {
         }
     }
 
-    fn into_shaped_text_run(self, previous_advance: f32) -> Option<TextRun> {
+    fn into_shaped_text_run(self, previous_advance: f32, spacing: &TextSpacing) -> Option<TextRun> {
         debug_assert!(!self.string.is_empty() && self.font.is_some());
         let font = self.font?;
 
+        let metrics = font.metrics();
         let options = ShapingOptions {
-            letter_spacing: Au::zero(),
-            word_spacing: Au::zero(),
+            letter_spacing: Au::from_f64_px(spacing_to_px(&spacing.letter, metrics)),
+            word_spacing: Au::from_f64_px(spacing_to_px(&spacing.word, metrics)),
             script: self.script,
             language: self.language,
-            flags: ShapingFlags::empty(),
+            flags: if spacing.no_kerning {
+                ShapingFlags::DISABLE_KERNING_SHAPING_FLAG
+            } else {
+                ShapingFlags::empty()
+            },
             ligatures: FontVariantLigatures::NORMAL,
             numeric: FontVariantNumeric::NORMAL,
             east_asian: FontVariantEastAsian::NORMAL,
@@ -2931,4 +3059,68 @@ fn replace_ascii_whitespace(text: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+/// Partii: the letterSpacing / wordSpacing / fontKerning state for shaping canvas text.
+struct TextSpacing {
+    letter: NoCalcLength,
+    word: NoCalcLength,
+    no_kerning: bool,
+}
+
+/// <https://html.spec.whatwg.org/multipage/#dom-context-2d-letterspacing>: parse as a CSS `<length>`;
+/// anything else (other dimensions, keywords, percentages, NaN) leaves the value unchanged. Viewport and
+/// container units have no meaning on a canvas and are refused too; `calc()` is not supported yet.
+fn parse_canvas_spacing(value: &str) -> Option<NoCalcLength> {
+    use cssparser::Token;
+    let mut parser = Parser::new(value);
+    let length = parser
+        .parse_entirely(
+            |input| -> Result<NoCalcLength, cssparser::ParseError<'_, ()>> {
+                let location = input.current_source_location();
+                match *input.next()? {
+                    Token::Number { value, .. } if value == 0. => Ok(NoCalcLength::from_px(0.)),
+                    Token::Dimension {
+                        value, ref unit, ..
+                    } => {
+                        let unit = LengthUnit::from_str(unit)
+                            .map_err(|()| location.new_custom_error(()))?;
+                        if !(unit.is_absolute() || unit.is_font_relative()) || !value.is_finite() {
+                            return Err(location.new_custom_error(()));
+                        }
+                        Ok(NoCalcLength::new(unit, value))
+                    },
+                    _ => Err(location.new_custom_error(())),
+                }
+            },
+        )
+        .ok()?;
+    Some(length)
+}
+
+/// A spacing length in px for a font: absolute units directly, font-relative ones against the font.
+fn spacing_to_px(length: &NoCalcLength, metrics: &FontMetrics) -> f64 {
+    if let Some(px) = length.to_px_if_absolute() {
+        return px as f64;
+    }
+    let em = metrics.em_size.to_f64_px();
+    let value = length.unitless_value() as f64;
+    let factor = match length.length_unit() {
+        LengthUnit::Em => em,
+        LengthUnit::Ex => metrics.x_height.to_f64_px(),
+        LengthUnit::Ch => metrics
+            .zero_horizontal_advance
+            .map_or(em / 2., |advance| advance.to_f64_px()),
+        LengthUnit::Ic => metrics
+            .ic_horizontal_advance
+            .map_or(em, |advance| advance.to_f64_px()),
+        LengthUnit::Cap => metrics.ascent.to_f64_px() * 0.7,
+        LengthUnit::Lh => em * 1.2,
+        // Root-relative units: against the initial font (16px), as on a page with no author styles.
+        LengthUnit::Rem | LengthUnit::Rch | LengthUnit::Ric => 16.,
+        LengthUnit::Rex | LengthUnit::Rcap => 8.,
+        LengthUnit::Rlh => 16. * 1.2,
+        _ => 0.,
+    };
+    value * factor
 }

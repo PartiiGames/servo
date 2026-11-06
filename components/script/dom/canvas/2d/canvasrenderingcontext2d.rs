@@ -14,9 +14,10 @@ use webrender_api::ImageKey;
 use super::canvas_state::CanvasState;
 use crate::canvas_context::{CanvasContext, CanvasHelpers, HTMLCanvasElementOrOffscreenCanvas};
 use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
-    CanvasColorType, CanvasDirection, CanvasFillRule, CanvasImageSource, CanvasLineCap,
-    CanvasLineJoin, CanvasRenderingContext2DMethods, CanvasRenderingContext2DSettings,
-    CanvasTextAlign, CanvasTextBaseline, PredefinedColorSpace,
+    CanvasColorType, CanvasDirection, CanvasFillRule, CanvasFontKerning, CanvasFontStretch,
+    CanvasFontVariantCaps, CanvasImageSource, CanvasLineCap, CanvasLineJoin,
+    CanvasRenderingContext2DMethods, CanvasRenderingContext2DSettings, CanvasTextAlign,
+    CanvasTextBaseline, CanvasTextRendering, PredefinedColorSpace,
 };
 use crate::dom::bindings::codegen::Bindings::DOMMatrixBinding::DOMMatrix2DInit;
 use crate::dom::bindings::codegen::UnionTypes::{
@@ -455,6 +456,66 @@ impl CanvasRenderingContext2DMethods<crate::DomTypeHolder> for CanvasRenderingCo
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-direction>
     fn SetDirection(&self, value: CanvasDirection) {
         self.canvas_state.set_direction(value)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-letterspacing>
+    fn LetterSpacing(&self) -> DOMString {
+        self.canvas_state.letter_spacing()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-letterspacing>
+    fn SetLetterSpacing(&self, value: DOMString) {
+        self.canvas_state.set_letter_spacing(value)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-wordspacing>
+    fn WordSpacing(&self) -> DOMString {
+        self.canvas_state.word_spacing()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-wordspacing>
+    fn SetWordSpacing(&self, value: DOMString) {
+        self.canvas_state.set_word_spacing(value)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-fontkerning>
+    fn FontKerning(&self) -> CanvasFontKerning {
+        self.canvas_state.font_kerning()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-fontkerning>
+    fn SetFontKerning(&self, value: CanvasFontKerning) {
+        self.canvas_state.set_font_kerning(value)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-fontstretch>
+    fn FontStretch(&self) -> CanvasFontStretch {
+        self.canvas_state.font_stretch()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-fontstretch>
+    fn SetFontStretch(&self, value: CanvasFontStretch) {
+        self.canvas_state.set_font_stretch(value)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-fontvariantcaps>
+    fn FontVariantCaps(&self) -> CanvasFontVariantCaps {
+        self.canvas_state.font_variant_caps()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-fontvariantcaps>
+    fn SetFontVariantCaps(&self, value: CanvasFontVariantCaps) {
+        self.canvas_state.set_font_variant_caps(value)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-textrendering>
+    fn TextRendering(&self) -> CanvasTextRendering {
+        self.canvas_state.text_rendering()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-textrendering>
+    fn SetTextRendering(&self, value: CanvasTextRendering) {
+        self.canvas_state.set_text_rendering(value)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage>
