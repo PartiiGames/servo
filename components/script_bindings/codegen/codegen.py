@@ -1077,6 +1077,7 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
             unwrapFailureCode = failureCode
 
         typeName = type.unroll().name  # unroll because it may be nullable
+        typeModule, typeName = typed_array_rust_path(type.unroll(), typeName)
 
         # For safety, we want to return types that are already rooted so callers
         # don't have to think about it.
@@ -1090,7 +1091,7 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
 
         templateBody = fill(
             f"""
-            match typedarray::${{ty}}::from($${{val}}.get().to_object()){map_call} {{
+            match {typeModule}::${{ty}}::from($${{val}}.get().to_object()){map_call} {{
                 Ok(val) => val,
                 Err(()) => {{
                     $*{{failureCode}}
@@ -1101,7 +1102,7 @@ def getJSToNativeConversionInfo(type: IDLType, descriptorProvider: DescriptorPro
             failureCode=f"{unwrapFailureCode}\n",
         )
 
-        declType = CGGeneric(f"typedarray::{typeName}")
+        declType = CGGeneric(f"{typeModule}::{typeName}")
         if require_heap_root:
             declType = CGWrapper(declType, pre="RootedTraceableBox<", post=">")
 
@@ -5574,7 +5575,8 @@ def getUnionTypeTemplateVars(type: IDLType, descriptorProvider: DescriptorProvid
         typeName = "Heap<*mut JSObject>"
     elif is_typed_array(type):
         name = type.name
-        typeName = f"typedarray::Heap{name}"
+        typeModule, rustName = typed_array_rust_path(type, name)
+        typeName = f"{typeModule}::Heap{rustName}"
     elif type.isCallback():
         name = type.name
         typeName = f"{name}<D>"
@@ -8406,6 +8408,18 @@ def is_typed_array(t: IDLType) -> bool:
     assert isinstance(t, IDLObject), (t, type(t))
 
     return t.isTypedArray() or t.isArrayBuffer() or t.isArrayBufferView()
+
+
+def typed_array_rust_path(t: IDLType, name: str) -> tuple[str, str]:
+    """
+    The module and (non-Heap) type name of the Rust type for a typed array IDL type.
+    An [AllowShared] ArrayBuffer also takes a SharedArrayBuffer
+    (crate::buffer_source::ArrayBufferMaybeShared). ArrayBufferViews and typed arrays keep
+    their js::typedarray types: those already unwrap views of shared memory.
+    """
+    if t.isArrayBuffer() and t.hasAllowShared():
+        return ("crate::buffer_source", "ArrayBufferMaybeShared")
+    return ("typedarray", name)
 
 
 def type_needs_auto_root(t: IDLType) -> bool:

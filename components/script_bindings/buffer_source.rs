@@ -5,7 +5,7 @@
 #![expect(unsafe_code)]
 
 use std::marker::PhantomData;
-use std::ptr;
+use std::ptr::{self, NonNull};
 
 use js::context::{JSContext, NoGC};
 use js::jsapi::{
@@ -33,7 +33,9 @@ use js::typedarray::{
     TypedArrayElement, TypedArrayElementCreator,
 };
 
-use crate::codegen::GenericUnionTypes::ArrayBufferViewOrArrayBuffer;
+use crate::codegen::GenericUnionTypes::{
+    ArrayBufferViewOrArrayBuffer, MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer,
+};
 use crate::error::{Error, Fallible};
 use crate::trace::RootedTraceableBox;
 
@@ -125,27 +127,80 @@ pub fn get_buffer_source_copy(source: ArrayBufferViewOrArrayBufferRef<'_>) -> Ve
     .unwrap_or(vec![])
 }
 
+/// The element kind of an `[AllowShared] ArrayBuffer`: an ArrayBuffer or a SharedArrayBuffer.
+/// mozjs's `ArrayBufferU8` unwraps with `UnwrapArrayBuffer`, which rejects SharedArrayBuffers.
+/// Codegen uses this for `[AllowShared]` ArrayBuffers (see `typed_array_rust_path`).
+pub struct ArrayBufferMaybeSharedU8;
+
+impl TypedArrayElement for ArrayBufferMaybeSharedU8 {
+    type Element = u8;
+
+    unsafe fn unwrap_array(obj: *mut JSObject) -> *mut JSObject {
+        unsafe { js::jsapi::UnwrapArrayBufferMaybeShared(obj) }
+    }
+
+    unsafe fn length_and_data(obj: *mut JSObject) -> Option<NonNull<[u8]>> {
+        let (mut len, mut shared, mut data) = (0usize, false, ptr::null_mut());
+        // As in every engine, another agent may write shared memory while it is being read.
+        unsafe {
+            js::jsapi::GetArrayBufferMaybeSharedLengthAndData(obj, &mut len, &mut shared, &mut data)
+        };
+        NonNull::new(data).map(|data| NonNull::slice_from_raw_parts(data, len))
+    }
+}
+
+pub type ArrayBufferMaybeShared = TypedArray<ArrayBufferMaybeSharedU8, *mut JSObject>;
+pub type HeapArrayBufferMaybeShared =
+    TypedArray<ArrayBufferMaybeSharedU8, Box<Heap<*mut JSObject>>>;
+
+/// A buffer source union whose bytes can be borrowed: `BufferSource` and
+/// `[AllowShared] BufferSource`.
+pub trait BufferSourceBytes {
+    fn bytes<'a>(&'a self, no_gc: &'a NoGC) -> &'a [u8];
+}
+
+impl BufferSourceBytes for ArrayBufferViewOrArrayBuffer {
+    fn bytes<'a>(&'a self, no_gc: &'a NoGC) -> &'a [u8] {
+        match self {
+            ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => array_buffer_view_slice(&**view),
+            ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => {
+                buffer.as_slice_safe(no_gc).unwrap_or(&[])
+            },
+        }
+    }
+}
+
+impl BufferSourceBytes for MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer {
+    fn bytes<'a>(&'a self, no_gc: &'a NoGC) -> &'a [u8] {
+        match self {
+            MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer::ArrayBufferView(view) => {
+                array_buffer_view_slice(&**view)
+            },
+            MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer::ArrayBuffer(buffer) => {
+                buffer.as_slice_safe(no_gc).unwrap_or(&[])
+            },
+        }
+    }
+}
+
+fn array_buffer_view_slice<S: JSObjectStorage>(view: &TypedArray<ArrayBufferViewU8, S>) -> &[u8] {
+    let (data, len) = array_buffer_view_raw(view);
+    if data.is_null() {
+        return &[];
+    }
+    // SAFETY: as in `array_buffer_view_bytes`.
+    unsafe { std::slice::from_raw_parts(data, len) }
+}
+
 /// Returns a slice referencing the bytes in the buffer source, without copying.
 ///
 /// Use this instead of [`get_buffer_source_copy`] when the data is consumed
 /// synchronously — it avoids the allocation of a `Vec<u8>`.
 pub fn get_buffer_source_slice<'a>(
-    source: &'a ArrayBufferViewOrArrayBuffer,
+    source: &'a impl BufferSourceBytes,
     no_gc: &'a NoGC,
 ) -> &'a [u8] {
-    match source {
-        ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => {
-            let (data, len) = array_buffer_view_raw(&**view);
-            if data.is_null() {
-                return &[];
-            }
-            // SAFETY: as in `array_buffer_view_bytes`.
-            unsafe { std::slice::from_raw_parts(data, len) }
-        },
-        ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => {
-            buffer.as_slice_safe(no_gc).unwrap_or(&[])
-        },
-    }
+    source.bytes(no_gc)
 }
 
 /// The data pointer and byte length of an ArrayBufferView, which may be backed by a
