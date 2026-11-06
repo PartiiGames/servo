@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 #![expect(unsafe_code)]
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -85,6 +85,8 @@ pub(crate) struct GLContextData {
     /// The context should be removed, but the [`WebGLThread`] is currently waiting on
     /// WebRender to finish rendering to the context in order to delete it.
     marked_for_deletion: bool,
+    /// Partii: frame pacing (see [`FramePacing`]).
+    pacing: FramePacing,
 }
 
 #[derive(Debug)]
@@ -876,6 +878,7 @@ impl WebGLThread {
             eprintln!("partii-webgl-stats: create {webgl_version:?} {}x{} msaa={msaa_samples} {}", size.width, size.height, line.join(" "));
         }
 
+        let pacing = FramePacing::new(&gl);
         self.contexts.insert(
             context_id,
             GLContextData {
@@ -885,6 +888,7 @@ impl WebGLThread {
                 state,
                 attributes,
                 marked_for_deletion: false,
+                pacing,
             },
         );
 
@@ -1037,7 +1041,7 @@ impl WebGLThread {
         &mut self,
         canvas_epoch: Option<Epoch>,
         context_ids: Vec<WebGLContextId>,
-        _sent_time: u64,
+        sent_time: u64,
     ) {
         debug!("handle_swap_buffers()");
         for context_id in context_ids {
@@ -1115,6 +1119,10 @@ impl WebGLThread {
                 "... rebound framebuffer {:?}, new back buffer surface is {:?}",
                 framebuffer_object, id
             );
+
+            // Backpressure: wait here until the GPU has finished all but the last few frames. The
+            // page's next animation frame waits for this swap's image update, so it waits too.
+            data.pacing.end_frame(&data.gl, sent_time);
 
             let has_alpha = data
                 .state
@@ -5065,6 +5073,142 @@ fn msaa_enabled(gl: &Gl) -> bool {
             .iter()
             .any(|software| renderer.contains(software))
     })
+}
+
+/// Partii (w4): frame pacing for a context's swaps, as browsers do. GL calls only queue work; on a
+/// slow GPU or a software rasterizer (llvmpipe) the queue can grow without bound when nothing waits
+/// for it: the compositor's lock of the front buffer then waits behind it (WebRender's update step
+/// grew to minutes per frame in the lx soaks) and the queued work holds GBs of native memory. Each
+/// swap inserts a fence; before the swap's image update goes out (which lets the page's next
+/// requestAnimationFrame run) it waits until at most `max_pending` earlier frames are unfinished.
+///
+/// `PARTII_WEBGL_PENDING_FRAMES`: the number of unfinished frames allowed (default 1: the GPU works
+/// on frame N while the page builds N+1); `off` turns waiting off (frames are only counted).
+/// `PARTII_WEBGL_FRAME_STATS` set: every 300 swaps one stderr line per context with the waits and
+/// the backlog (unfinished frames).
+struct FramePacing {
+    fences: VecDeque<gl::Fence>,
+    supported: bool,
+    swaps: u64,
+    waited: std::time::Duration,
+    max_wait: std::time::Duration,
+    waits: u64,
+    max_backlog: usize,
+    max_lag_ms: f64,
+}
+
+impl FramePacing {
+    /// Fences kept when waiting is off, to count the backlog (older ones are dropped).
+    const MAX_TRACKED: usize = 512;
+
+    fn new(gl: &Gl) -> Self {
+        let version = gl.version();
+        let supported = if version.is_embedded {
+            version.major >= 3
+        } else {
+            (version.major, version.minor) >= (3, 2) ||
+                gl.supported_extensions().contains("GL_ARB_sync")
+        };
+        Self {
+            fences: VecDeque::new(),
+            supported,
+            swaps: 0,
+            waited: Default::default(),
+            max_wait: Default::default(),
+            waits: 0,
+            max_backlog: 0,
+            max_lag_ms: 0.0,
+        }
+    }
+
+    fn max_pending() -> Option<usize> {
+        static MAX: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        *MAX.get_or_init(
+            || match std::env::var("PARTII_WEBGL_PENDING_FRAMES").as_deref() {
+                Ok("off") => None,
+                Ok(n) => Some(n.parse().unwrap_or(1)),
+                Err(_) => Some(1),
+            },
+        )
+    }
+
+    fn stats_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("PARTII_WEBGL_FRAME_STATS").is_some())
+    }
+
+    fn end_frame(&mut self, gl: &Gl, sent_time: u64) {
+        let max_pending = Self::max_pending();
+        let stats = Self::stats_enabled();
+        if !self.supported || (max_pending.is_none() && !stats) {
+            return;
+        }
+        self.swaps += 1;
+        if sent_time != 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64);
+            let lag_ms = now.saturating_sub(sent_time) as f64 / 1e6;
+            self.max_lag_ms = self.max_lag_ms.max(lag_ms);
+        }
+        let Ok(fence) = (unsafe { gl.fence_sync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0) }) else {
+            return;
+        };
+        unsafe { gl.flush() };
+        self.fences.push_back(fence);
+        // Drop the frames the GPU has finished.
+        while let Some(&oldest) = self.fences.front() {
+            if unsafe { gl.get_sync_status(oldest) } != gl::SIGNALED {
+                break;
+            }
+            unsafe { gl.delete_sync(oldest) };
+            self.fences.pop_front();
+        }
+        // The current frame is unfinished by definition; count only the earlier ones.
+        let backlog = self.fences.len().saturating_sub(1);
+        self.max_backlog = self.max_backlog.max(backlog);
+        match max_pending {
+            Some(max_pending) => {
+                if self.fences.len() > max_pending {
+                    let start = std::time::Instant::now();
+                    while self.fences.len() > max_pending {
+                        let oldest = self.fences.pop_front().unwrap();
+                        // glow takes the timeout as i32 nanoseconds: wait in 1 s steps.
+                        while unsafe { gl.client_wait_sync(oldest, 0, 1_000_000_000) } ==
+                            gl::TIMEOUT_EXPIRED
+                        {}
+                        unsafe { gl.delete_sync(oldest) };
+                    }
+                    let waited = start.elapsed();
+                    self.waits += 1;
+                    self.waited += waited;
+                    self.max_wait = self.max_wait.max(waited);
+                }
+            },
+            None => {
+                while self.fences.len() > Self::MAX_TRACKED {
+                    let oldest = self.fences.pop_front().unwrap();
+                    unsafe { gl.delete_sync(oldest) };
+                }
+            },
+        }
+        if stats && self.swaps.is_multiple_of(300) {
+            eprintln!(
+                "[webgl-frames] swaps={} pending_limit={} backlog_now={} backlog_max={} waits={} wait_total_ms={:.0} wait_max_ms={:.1} lag_max_ms={:.1}",
+                self.swaps,
+                max_pending.map_or("off".to_owned(), |n| n.to_string()),
+                backlog,
+                self.max_backlog,
+                self.waits,
+                self.waited.as_secs_f64() * 1e3,
+                self.max_wait.as_secs_f64() * 1e3,
+                self.max_lag_ms,
+            );
+            self.max_backlog = 0;
+            self.max_wait = Default::default();
+            self.max_lag_ms = 0.0;
+        }
+    }
 }
 
 /// Partii (perf): texImage2D(null) clears colour-renderable levels instead of uploading zeros, unless
