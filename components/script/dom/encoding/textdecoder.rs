@@ -15,7 +15,7 @@ use crate::dom::bindings::codegen::Bindings::TextDecoderBinding;
 use crate::dom::bindings::codegen::Bindings::TextDecoderBinding::{
     TextDecodeOptions, TextDecoderMethods,
 };
-use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
+use crate::dom::bindings::codegen::UnionTypes::MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::{DOMString, USVString};
@@ -109,7 +109,7 @@ impl TextDecoderMethods<crate::DomTypeHolder> for TextDecoder {
     fn Decode(
         &self,
         cx: &mut JSContext,
-        input: Option<ArrayBufferViewOrArrayBuffer>,
+        input: Option<MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer>,
         options: &TextDecodeOptions,
     ) -> Fallible<USVString> {
         // Step 1. If this’s do not flush is false, then set this’s decoder to a new

@@ -14,7 +14,7 @@ use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use crate::DomTypes;
 use crate::dom::bindings::codegen::Bindings::TextDecoderBinding;
 use crate::dom::bindings::codegen::Bindings::TextDecoderStreamBinding::TextDecoderStreamMethods;
-use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
+use crate::dom::bindings::codegen::UnionTypes::MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
@@ -32,10 +32,14 @@ pub(crate) fn decode_and_enqueue_a_chunk(
     controller: &TransformStreamDefaultController,
 ) -> Fallible<()> {
     // Step 1. Let bufferSource be the result of converting chunk to an AllowSharedBufferSource.
-    let conversion_result =
-        ArrayBufferViewOrArrayBuffer::from_jsval(cx, chunk, ()).map_err(|_| {
-            Error::Type(c"Unable to convert chunk into ArrayBuffer or ArrayBufferView".to_owned())
-        })?;
+    let conversion_result = MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer::from_jsval(
+        cx,
+        chunk,
+        (),
+    )
+    .map_err(|_| {
+        Error::Type(c"Unable to convert chunk into ArrayBuffer or ArrayBufferView".to_owned())
+    })?;
     let buffer_source = conversion_result.get_success_value().ok_or_else(|| {
         Error::Type(c"Unable to convert chunk into ArrayBuffer or ArrayBufferView".to_owned())
     })?;

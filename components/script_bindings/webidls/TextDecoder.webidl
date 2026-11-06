@@ -17,6 +17,6 @@ interface TextDecoder {
   [Throws] constructor(optional DOMString label = "utf-8", optional TextDecoderOptions options = {});
 
   [Throws]
-  USVString decode(optional BufferSource input, optional TextDecodeOptions options = {});
+  USVString decode(optional AllowSharedBufferSource input, optional TextDecodeOptions options = {});
 };
 TextDecoder includes TextDecoderCommon;

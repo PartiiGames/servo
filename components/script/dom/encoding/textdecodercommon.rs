@@ -8,7 +8,7 @@ use encoding_rs::{Decoder, DecoderResult, Encoding};
 use js::context::NoGC;
 
 use crate::dom::bindings::buffer_source::get_buffer_source_slice;
-use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
+use crate::dom::bindings::codegen::UnionTypes::MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer;
 use crate::dom::bindings::error::{Error, Fallible};
 
 /// The shared part of `TextDecoder` and `TextDecoderStream`
@@ -95,7 +95,7 @@ impl TextDecoderCommon {
     pub(crate) fn decode(
         &self,
         no_gc: &NoGC,
-        input: Option<&ArrayBufferViewOrArrayBuffer>,
+        input: Option<&MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer>,
         last: bool,
     ) -> Fallible<String> {
         // <https://encoding.spec.whatwg.org/#dom-textdecoder-decode>
