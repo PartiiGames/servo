@@ -172,18 +172,22 @@ pub unsafe fn is_marked_any(obj: *mut JSObject) -> bool {
     }
 }
 
-#[cfg(not(windows))]
+/// Whether the C++ barrier tracer was built (it needs SpiderMonkey's headers, which mozjs_sys's
+/// prebuilt archive lacks). Without it `black_remark` does nothing and sweeping in slices is off.
+pub const BLACK_REMARK: bool = cfg!(partii_gc_shim);
+
+#[cfg(partii_gc_shim)]
 unsafe extern "C" {
     fn partii_barrier_tracer_new(cx: *mut js::jsapi::JSContext) -> *mut JSTracer;
     fn partii_barrier_tracer_finish(trc: *mut JSTracer) -> usize;
 }
 
-#[cfg(windows)]
+#[cfg(not(partii_gc_shim))]
 unsafe fn partii_barrier_tracer_new(_: *mut js::jsapi::JSContext) -> *mut JSTracer {
     std::ptr::null_mut()
 }
 
-#[cfg(windows)]
+#[cfg(not(partii_gc_shim))]
 unsafe fn partii_barrier_tracer_finish(_: *mut JSTracer) -> usize {
     0
 }
@@ -542,6 +546,12 @@ mod tests {
     /// run) it is normally collected, which shows the test exercises the hazard.
     #[test]
     fn black_remark_catches_a_moved_edge() {
+        if !BLACK_REMARK {
+            eprintln!(
+                "black_remark_catches_a_moved_edge: skipped, built without the barrier tracer shim"
+            );
+            return;
+        }
         let engine = JSEngine::init().unwrap();
         let mut runtime = Runtime::new(engine.handle());
         let cx = runtime.cx();

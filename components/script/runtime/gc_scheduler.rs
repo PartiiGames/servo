@@ -638,6 +638,11 @@ pub(crate) unsafe fn init_runtime(
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, sm_budget);
         let raw = cx.raw_cx();
         SetGrayGCRootsTracer(raw, Some(gray_roots), roots_data);
+        if config().incremental_sweep && !incremental_gc::BLACK_REMARK {
+            eprintln!(
+                "[gc-sched] PARTII_GC_INCREMENTAL_SWEEP=1 ignored: built without the barrier tracer shim (prebuilt mozjs)"
+            );
+        }
         RAW_CX.with(|c| c.set(raw));
         if budget_layout_ok() {
             // SpiderMonkey's own slices: the black remark first, then its budget.
@@ -651,7 +656,9 @@ pub(crate) unsafe fn init_runtime(
 /// Whether sweeping runs in slices with script in between (stage 2; needs budgeted SM slices, else
 /// SpiderMonkey's first slice of its own would sweep everything anyway).
 fn incremental_sweep() -> bool {
-    config().incremental_sweep && sm_slices()
+    // Sweeping in slices relies on the black remark (the C++ barrier tracer); builds that link
+    // mozjs_sys's prebuilt archive have no headers to build it with, and keep sweeping in one slice.
+    config().incremental_sweep && sm_slices() && incremental_gc::BLACK_REMARK
 }
 
 /// Whether SpiderMonkey's own slices are budgeted (and its GCs incremental).

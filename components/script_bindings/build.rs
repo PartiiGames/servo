@@ -151,8 +151,12 @@ fn find_python() -> Command {
 /// remark) against the SpiderMonkey headers of the mozjs_sys build next to ours. mozjs_sys doesn't
 /// export its include directory, so it is found among the sibling build directories (this crate
 /// depends on mozjs_sys directly, so its build script has run). With several, the newest wins.
+/// Without headers (mozjs_sys linked from its prebuilt archive, which ships none) the shim is left
+/// out: `partii_gc_shim` stays unset, the black remark is a no-op and incremental sweeping stays
+/// off, so such builds keep stage-1 behaviour instead of failing.
 fn build_incremental_gc_shim() {
     println!("cargo::rerun-if-changed=incremental_gc_shim.cpp");
+    println!("cargo::rustc-check-cfg=cfg(partii_gc_shim)");
     if env::var("CARGO_CFG_WINDOWS").is_ok() {
         return;
     }
@@ -182,10 +186,12 @@ fn build_incremental_gc_shim() {
         .collect();
     found.sort();
     let Some((_, build_dir)) = found.pop() else {
-        panic!(
-            "incremental_gc_shim: no mozjs_sys build with headers under {}",
+        println!(
+            "cargo::warning=incremental_gc_shim: no SpiderMonkey headers under {} (prebuilt mozjs archive?); \
+             built without the black remark (MOZJS_FROM_SOURCE=1 builds it)",
             build_root.display()
         );
+        return;
     };
     println!(
         "cargo::warning=incremental_gc_shim: SpiderMonkey headers from {}",
@@ -213,4 +219,5 @@ fn build_incremental_gc_shim() {
             .define("JS_DEBUG", None);
     }
     cc.compile("partii_incremental_gc_shim");
+    println!("cargo::rustc-cfg=partii_gc_shim");
 }
