@@ -208,8 +208,9 @@ pub fn get_buffer_source_slice<'a>(
 /// that the buffer is not shared, so with SharedArrayBuffer exposed (this fork does) a page could
 /// panic the script thread by passing a shared view; read views through these helpers instead.
 /// As in every engine, another agent may write shared memory while it is being read.
-fn array_buffer_view_raw<S: JSObjectStorage>(
-    view: &TypedArray<ArrayBufferViewU8, S>,
+/// Typed arrays are ArrayBufferViews too, so this takes any of them.
+fn array_buffer_view_raw<T: TypedArrayElement, S: JSObjectStorage>(
+    view: &TypedArray<T, S>,
 ) -> (*mut u8, usize) {
     let (mut len, mut shared, mut data) = (0usize, false, ptr::null_mut());
     unsafe {
@@ -243,6 +244,20 @@ pub fn array_buffer_view_bytes_mut<'a>(
         return &mut [];
     }
     // SAFETY: as above; `&mut view` keeps other Rust borrows of this view away.
+    unsafe { std::slice::from_raw_parts_mut(data, len) }
+}
+
+/// The bytes of a typed array (for example an `[AllowShared] Uint8Array`), shared or not, for
+/// writing. mozjs's `as_mut_slice_safe` asserts the buffer is not shared.
+pub fn typed_array_bytes_mut<'a, T: TypedArrayElement, S: JSObjectStorage>(
+    array: &mut TypedArray<T, S>,
+    _no_gc: &'a NoGC,
+) -> &'a mut [u8] {
+    let (data, len) = array_buffer_view_raw(array);
+    if data.is_null() {
+        return &mut [];
+    }
+    // SAFETY: as in `array_buffer_view_bytes_mut`.
     unsafe { std::slice::from_raw_parts_mut(data, len) }
 }
 

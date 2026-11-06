@@ -140,7 +140,7 @@ pub(crate) mod buffer_source {
         array_buffer_view_bytes_mut, byte_size, create_array_buffer_with_size,
         create_buffer_source, create_buffer_source_with_constructor,
         create_heap_buffer_source_with_length, get_buffer_source_copy, get_buffer_source_slice,
-        typed_array_to_vec,
+        typed_array_bytes_mut, typed_array_to_vec,
     };
 }
 pub(crate) mod cell;

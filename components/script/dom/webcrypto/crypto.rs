@@ -7,7 +7,7 @@ use js::context::JSContext;
 use js::jsapi::Type;
 use js::rust::CustomAutoRooterGuard;
 use js::typedarray::{ArrayBufferView, HeapArrayBufferView};
-use script_bindings::buffer_source::HeapBufferSource;
+use script_bindings::buffer_source::{HeapBufferSource, array_buffer_view_bytes_mut};
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use script_bindings::trace::RootedTraceableBox;
 use uuid::Uuid;
@@ -77,7 +77,8 @@ impl CryptoMethods<crate::DomTypeHolder> for Crypto {
         // Step 3. If byteLength is greater than 65536, throw a QuotaExceededError and terminate the
         // algorithm.
         // Step 4. Let bytes be a byte sequence of length byteLength.
-        let bytes = array.as_mut_slice_safe(cx.no_gc()).unwrap_or_default();
+        // The array may be backed by a SharedArrayBuffer ([AllowShared]).
+        let bytes = array_buffer_view_bytes_mut(&mut array, cx.no_gc());
         let byte_length = bytes.len();
         if byte_length > 65536 {
             return Err(Error::QuotaExceeded {

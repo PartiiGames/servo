@@ -14,7 +14,7 @@ use js::typedarray::HeapUint8Array;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use script_bindings::trace::RootedTraceableBox;
 
-use crate::dom::bindings::buffer_source::create_buffer_source;
+use crate::dom::bindings::buffer_source::{create_buffer_source, typed_array_bytes_mut};
 use crate::dom::bindings::codegen::Bindings::TextEncoderBinding::{
     TextEncoderEncodeIntoResult, TextEncoderMethods,
 };
@@ -76,7 +76,8 @@ impl TextEncoderMethods<crate::DomTypeHolder> for TextEncoder {
         source: USVString,
         mut destination: CustomAutoRooterGuard<typedarray::Uint8Array>,
     ) -> TextEncoderEncodeIntoResult {
-        let dest = destination.as_mut_slice_safe(no_gc).unwrap_or(&mut []);
+        // [AllowShared]: the destination may be backed by a SharedArrayBuffer.
+        let dest = typed_array_bytes_mut(&mut destination, no_gc);
 
         let available = dest.len();
 
