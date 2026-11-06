@@ -40,11 +40,18 @@
 //! **Incremental marking** (`PARTII_GC_INCREMENTAL=1`, default off; not on Windows): a periodic GC
 //! marks in slices of `PARTII_GC_SLICE_MS` (default 5) at most every `PARTII_GC_SLICE_GAP_MS`
 //! (default 10), from the event loops, and sweeps in one pause: as soon as sweeping starts the GC is
-//! finished before any script runs again. SpiderMonkey's own GCs stay non-incremental (their slice
-//! budget is unlimited). The DOM's Rust edges have no write barriers, so `script_bindings::
+//! finished before any script runs again. The DOM's Rust edges have no write barriers, so `script_bindings::
 //! incremental_gc` shades every reflector Rust hands out while marking, and re-traces the Rust roots
 //! and every marked reflector's Rust fields when marking ends (SpiderMonkey's gray-roots hook).
 //! The slices have a wall-clock budget, so a preempted slice still ends near its deadline.
+//!
+//! SpiderMonkey runs slices of its own too (when a background task it waited for is done, or when
+//! the page allocates past a trigger). With `PARTII_GC_SM_SLICES=1` (the default with incremental
+//! on) those get the same time budget (`JSGC_SLICE_TIME_BUDGET_MS`) instead of an unlimited one,
+//! the GCs SpiderMonkey starts by itself are incremental as well (the scheduler adopts them and
+//! drives their slices), and the gray-roots hook turns the budget of the slice that starts sweeping
+//! unlimited, so sweeping still never interleaves with script. `PARTII_GC_SM_SLICES=0` keeps
+//! SpiderMonkey's slices unlimited (then its first continuation slice usually finishes our GC).
 
 #![allow(unsafe_code)]
 
@@ -90,6 +97,8 @@ struct Config {
     slice_gap: Duration,
     /// An incremental GC still running after this long is finished in one go.
     incremental_max: Duration,
+    /// SpiderMonkey's own slices get the slice budget too (not unlimited).
+    sm_slices: bool,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -124,6 +133,7 @@ fn config() -> &'static Config {
         slice: env_ms("PARTII_GC_SLICE_MS", 5),
         slice_gap: env_ms("PARTII_GC_SLICE_GAP_MS", 10),
         incremental_max: env_ms("PARTII_GC_INCREMENTAL_MAX_MS", 2000),
+        sm_slices: !matches!(std::env::var("PARTII_GC_SM_SLICES").as_deref(), Ok("0")),
     })
 }
 
@@ -158,9 +168,10 @@ struct State {
     incremental: Cell<Option<IncrementalGc>>,
 }
 
-/// An incremental GC the scheduler started.
+/// An incremental GC the scheduler drives (it started it, or adopted one SpiderMonkey started).
 #[derive(Clone, Copy)]
 struct IncrementalGc {
+    adopted: bool,
     started: Instant,
     before: u32,
     slices: u32,
@@ -184,8 +195,13 @@ thread_local! {
     };
     /// Set from the gray-roots hook: sweeping began in the current GC.
     static SWEEP_STARTED: Cell<bool> = const { Cell::new(false) };
-    /// Whether the current GC is one of our incremental ones (the remark runs only then).
-    static IN_INCREMENTAL: Cell<bool> = const { Cell::new(false) };
+    /// Whether the scheduler itself is running a slice (else a slice is SpiderMonkey's own).
+    static OUR_SLICE: Cell<bool> = const { Cell::new(false) };
+    /// When SpiderMonkey's own slice in progress began.
+    static SM_SLICE_BEGAN: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// SpiderMonkey's own slices in the current GC: count, longest, total.
+    static SM_SLICES: Cell<(u32, Duration, Duration)> =
+        const { Cell::new((0, Duration::ZERO, Duration::ZERO)) };
     /// The Rust roots tracer and its data, for the remark.
     static ROOTS_TRACER: Cell<Option<(RootsTracer, *mut c_void)>> = const { Cell::new(None) };
     /// The GC slice callback that was installed before ours.
@@ -451,6 +467,16 @@ unsafe extern "C" {
         link_name = "\u{1}_ZN2JS11SliceBudgetC1ENS_10TimeBudgetEPN7mozilla6AtomicIbLNS2_14MemoryOrderingE0EvEE"
     )]
     fn SliceBudgetFromTime(this: *mut SliceBudget, time: TimeBudget, interrupt: *mut c_void);
+    /// `JS::SliceBudget::SliceBudget(JS::WorkBudget)`, used once to check the budget's layout.
+    #[cfg_attr(
+        target_vendor = "apple",
+        link_name = "\u{1}__ZN2JS11SliceBudgetC1ENS_10WorkBudgetE"
+    )]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        link_name = "\u{1}_ZN2JS11SliceBudgetC1ENS_10WorkBudgetE"
+    )]
+    fn SliceBudgetFromWork(this: *mut SliceBudget, work: i64);
     /// `mozilla::TimeStamp::Now(bool)`: SpiderMonkey's clock, in its own ticks.
     #[cfg_attr(
         target_vendor = "apple",
@@ -479,6 +505,52 @@ unsafe fn SliceBudgetFromTime(_: *mut SliceBudget, _: TimeBudget, _: *mut c_void
 #[cfg(windows)]
 unsafe fn TimeStampNow(_: bool) -> u64 {
     unreachable!()
+}
+
+#[cfg(windows)]
+unsafe fn SliceBudgetFromWork(_: *mut SliceBudget, _: i64) {
+    unreachable!()
+}
+
+/// Byte offset of the `mozilla::Variant` tag inside `SliceBudget::budget` (after its 16 bytes of
+/// storage); the alternatives are TimeBudget (0), WorkBudget (1), UnlimitedBudget (2).
+const BUDGET_TAG_OFFSET: usize = 16;
+const UNLIMITED_TAG: u8 = 2;
+
+unsafe fn budget_tag(budget: *mut SliceBudget) -> *mut u8 {
+    unsafe {
+        std::ptr::addr_of_mut!((*budget).budget)
+            .cast::<u8>()
+            .add(BUDGET_TAG_OFFSET)
+    }
+}
+
+/// Whether `SliceBudget` is laid out as `unlimit_budget` assumes: checked once on budgets built by
+/// SpiderMonkey's own constructors.
+fn budget_layout_ok() -> bool {
+    static OK: OnceLock<bool> = OnceLock::new();
+    *OK.get_or_init(|| unsafe {
+        let mut work = std::mem::MaybeUninit::<SliceBudget>::zeroed();
+        SliceBudgetFromWork(work.as_mut_ptr(), 1234);
+        let mut time = time_budget(Duration::from_millis(5));
+        let work_ok = (*work.as_ptr()).counter == 1234 && *budget_tag(work.as_mut_ptr()) == 1;
+        let time_ok = time.counter == 1000 && *budget_tag(&mut time) == 0;
+        let ok = std::mem::size_of::<SliceBudget>() == 48 && work_ok && time_ok;
+        if !ok {
+            eprintln!("[gc-sched] SliceBudget layout is not the expected one: SpiderMonkey's slices stay unlimited");
+        }
+        ok
+    })
+}
+
+/// Makes a slice's budget unlimited from inside the slice (`SliceBudget::unlimited()`'s fields).
+unsafe fn unlimit_budget(budget: *mut SliceBudget) {
+    unsafe {
+        (*budget).counter = i64::MAX;
+        (*budget).interruptRequested = std::ptr::null_mut();
+        (*budget).interrupted = false;
+        *budget_tag(budget) = UNLIMITED_TAG;
+    }
 }
 
 /// `JS::TimeBudget` as passed by value: a `mozilla::TimeDuration` (ticks) and a `TimeStamp`.
@@ -536,9 +608,14 @@ pub(crate) unsafe fn init_runtime(
     ROOTS_TRACER.with(|r| r.set(roots.map(|f| (f, roots_data))));
     unsafe {
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED, 1);
-        // SpiderMonkey's own GCs (and any slice it runs by itself) get an unlimited budget: only
-        // ours are incremental, so sweeping never interleaves with script.
-        JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, 0);
+        // SpiderMonkey's own slices get our slice budget (the gray-roots hook makes the one that
+        // starts sweeping unlimited), or an unlimited one with PARTII_GC_SM_SLICES=0.
+        let sm_budget = if sm_slices() {
+            config.slice.as_millis().max(1) as u32
+        } else {
+            0
+        };
+        JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, sm_budget);
         let raw = cx.raw_cx();
         SetGrayGCRootsTracer(raw, Some(gray_roots), roots_data);
         let previous = SetGCSliceCallback(cx, Some(slice_callback));
@@ -546,16 +623,22 @@ pub(crate) unsafe fn init_runtime(
     }
 }
 
+/// Whether SpiderMonkey's own slices are budgeted (and its GCs incremental).
+fn sm_slices() -> bool {
+    config().sm_slices && budget_layout_ok()
+}
+
 /// SpiderMonkey calls this when marking of a sweep group is done, before it sweeps it: the remark.
+/// From here on the slice runs to the end of the GC (sweeping in one pause).
 unsafe extern "C" fn gray_roots(
     trc: *mut JSTracer,
-    _budget: *mut SliceBudget,
+    budget: *mut SliceBudget,
     _data: *mut c_void,
 ) -> bool {
-    if !IN_INCREMENTAL.with(Cell::get) {
-        return true;
-    }
     SWEEP_STARTED.with(|s| s.set(true));
+    if sm_slices() && !budget.is_null() {
+        unsafe { unlimit_budget(budget) };
+    }
     if let Some((roots, data)) = ROOTS_TRACER.with(Cell::get) {
         unsafe { roots(trc, data) };
     }
@@ -574,15 +657,33 @@ unsafe extern "C" fn slice_callback(
     desc: *const GCDescription,
 ) {
     match progress {
-        GCProgress::GC_CYCLE_BEGIN | GCProgress::GC_SLICE_BEGIN => {
-            incremental_gc::set_marking(false)
+        GCProgress::GC_CYCLE_BEGIN => {
+            incremental_gc::set_marking(false);
+            SWEEP_STARTED.with(|s| s.set(false));
+        },
+        GCProgress::GC_SLICE_BEGIN => {
+            incremental_gc::set_marking(false);
+            if !OUR_SLICE.with(Cell::get) {
+                SM_SLICE_BEGAN.with(|b| b.set(Some(Instant::now())));
+            }
+        },
+        GCProgress::GC_SLICE_END => {
+            if let Some(began) = SM_SLICE_BEGAN.with(Cell::take) {
+                let pause = began.elapsed();
+                SM_SLICES.with(|s| {
+                    let (n, max, total) = s.get();
+                    s.set((n + 1, max.max(pause), total + pause));
+                });
+            }
+            // Between slices of a GC that is still marking, Rust's reads of reflectors shade them.
+            let marking = !SWEEP_STARTED.with(Cell::get)
+                && unsafe { js::jsapi::IsIncrementalGCInProgress(cx) };
+            incremental_gc::set_marking(marking);
         },
         GCProgress::GC_CYCLE_END => {
             incremental_gc::set_marking(false);
-            IN_INCREMENTAL.with(|i| i.set(false));
             SWEEP_STARTED.with(|s| s.set(false));
         },
-        GCProgress::GC_SLICE_END => {},
     }
     if let Some(previous) = PREVIOUS_SLICE_CALLBACK.with(Cell::get) {
         unsafe { previous(cx, progress, desc) };
@@ -596,14 +697,14 @@ fn start_incremental(cx: &mut JSContext, state: &State, kind: Kind) {
         script_bindings::take_finalize_stats();
     }
     let started = Instant::now();
-    IN_INCREMENTAL.with(|i| i.set(true));
-    SWEEP_STARTED.with(|s| s.set(false));
+    SM_SLICES.with(|s| s.set(Default::default()));
     let budget = time_budget(config().slice);
-    unsafe {
+    our_slice(|| unsafe {
         PrepareForFullGC(cx);
         StartIncrementalGC(cx, GCOptions::Normal, GCReason::FULL_GC_TIMER, &budget);
-    }
+    });
     let gc = IncrementalGc {
+        adopted: false,
         started,
         before,
         slices: 0,
@@ -617,11 +718,25 @@ fn start_incremental(cx: &mut JSContext, state: &State, kind: Kind) {
 /// Runs the next slice of our incremental GC if one is due. Returns whether a GC is in progress
 /// (then nothing else should be scheduled this turn).
 fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant) -> bool {
+    let in_progress = unsafe { IsIncrementalGCInProgress(cx) };
     let Some(gc) = state.incremental.get() else {
+        if in_progress && sm_slices() {
+            // SpiderMonkey started one by itself (allocation trigger): drive it like ours.
+            state.incremental.set(Some(IncrementalGc {
+                adopted: true,
+                started: now,
+                before: param(cx, JSGCParamKey::JSGC_BYTES),
+                slices: 0,
+                last_slice: now,
+                max_slice: Duration::ZERO,
+                total: Duration::ZERO,
+            }));
+            return true;
+        }
         return false;
     };
-    if !unsafe { IsIncrementalGCInProgress(cx) } {
-        // SpiderMonkey finished it (a GC of its own with an unlimited budget).
+    if !in_progress {
+        // SpiderMonkey finished it in a slice of its own.
         finish_log(cx, state, kind, gc, "finished by SpiderMonkey");
         return false;
     }
@@ -630,7 +745,7 @@ fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant)
     }
     let started = Instant::now();
     if started - gc.started > config().incremental_max {
-        unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) };
+        our_slice(|| unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) });
         let mut gc = gc;
         gc.slices += 1;
         let pause = Instant::now() - started;
@@ -640,9 +755,16 @@ fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant)
         return true;
     }
     let budget = time_budget(config().slice);
-    unsafe { IncrementalGCSlice(cx, GCReason::FULL_GC_TIMER, &budget) };
+    our_slice(|| unsafe { IncrementalGCSlice(cx, GCReason::FULL_GC_TIMER, &budget) });
     after_slice(cx, state, kind, gc, started);
     true
+}
+
+/// Runs a GC call of the scheduler's (its slices aren't counted as SpiderMonkey's).
+fn our_slice(f: impl FnOnce()) {
+    OUR_SLICE.with(|o| o.set(true));
+    f();
+    OUR_SLICE.with(|o| o.set(false));
 }
 
 /// After a slice: finishes the GC if sweeping started, else turns the expose barrier on.
@@ -654,7 +776,7 @@ fn after_slice(
     started: Instant,
 ) {
     if unsafe { IsIncrementalGCInProgress(cx) } && SWEEP_STARTED.with(Cell::get) {
-        unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) };
+        our_slice(|| unsafe { FinishIncrementalGC(cx, GCReason::FULL_GC_TIMER) });
     }
     let now = Instant::now();
     let pause = now - started;
@@ -675,7 +797,8 @@ fn finish_log(cx: &JSContext, state: &State, kind: Kind, gc: IncrementalGc, how:
     state.incremental.set(None);
     incremental_gc::set_marking(false);
     let now = Instant::now();
-    state.last_pause.set(gc.max_slice);
+    let (sm_n, sm_max, sm_total) = SM_SLICES.with(|s| s.replace(Default::default()));
+    state.last_pause.set(gc.max_slice.max(sm_max));
     state
         .major_number
         .set(param(cx, JSGCParamKey::JSGC_MAJOR_GC_NUMBER));
@@ -691,16 +814,24 @@ fn finish_log(cx: &JSContext, state: &State, kind: Kind, gc: IncrementalGc, how:
             String::new()
         };
         eprintln!(
-            "[gc-sched] {} incremental GC {}: {} slices, max {:.2} ms, total {:.2} ms over {} ms, {} -> {} KB{}{}",
+            "[gc-sched] {} incremental GC{} {}: {} slices, max {:.2} ms, total {:.2} ms; SpiderMonkey's {} slices, max {:.2} ms, total {:.2} ms; over {} ms, {} -> {} KB{}{}",
             if kind == Kind::Worker {
                 "worker"
             } else {
                 "window"
             },
+            if gc.adopted {
+                " (started by SpiderMonkey)"
+            } else {
+                ""
+            },
             how,
             gc.slices,
             gc.max_slice.as_secs_f64() * 1000.,
             gc.total.as_secs_f64() * 1000.,
+            sm_n,
+            sm_max.as_secs_f64() * 1000.,
+            sm_total.as_secs_f64() * 1000.,
             (now - gc.started).as_millis(),
             gc.before / 1024,
             after / 1024,
