@@ -130,40 +130,49 @@ fn codec_supported(codec: &str) -> bool {
 }
 
 pub fn can_play_type(media_type: &str) -> SupportsMediaType {
-    let Ok(mime) = media_type.parse::<mime::Mime>() else {
+    // Partii: parse leniently ("audio/ogg;", "audio/ogg;codecs", "audio/ogg;codecs=" are the bare
+    // type, as in Chromium and Gecko); the mime crate rejects those.
+    let mut parts = media_type.split(';');
+    let essence = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    if essence.split('/').count() != 2 || essence.split('/').any(|part| part.is_empty()) {
         return SupportsMediaType::No;
-    };
-    let essence = format!("{}/{}", mime.type_(), mime.subtype()).to_ascii_lowercase();
+    }
+    let codecs = parts.find_map(|param| {
+        let (name, value) = param.split_once('=')?;
+        name.trim()
+            .eq_ignore_ascii_case("codecs")
+            .then(|| value.trim().trim_matches('"').trim().to_owned())
+    });
     let container_ok = matches!(
         essence.as_str(),
-        "audio/ogg"
-            | "application/ogg"
-            | "audio/vorbis"
-            | "audio/mpeg"
-            | "audio/mp3"
-            | "audio/mpeg3"
-            | "audio/x-mpeg"
-            | "audio/wav"
-            | "audio/wave"
-            | "audio/x-wav"
-            | "audio/vnd.wave"
-            | "audio/flac"
-            | "audio/x-flac"
-            | "audio/mp4"
-            | "audio/x-m4a"
-            | "audio/m4a"
-            | "audio/aac"
-            | "audio/x-aac"
-            | "audio/webm"
-            | "audio/x-matroska"
+        "audio/ogg" |
+            "application/ogg" |
+            "audio/vorbis" |
+            "audio/mpeg" |
+            "audio/mp3" |
+            "audio/mpeg3" |
+            "audio/x-mpeg" |
+            "audio/wav" |
+            "audio/wave" |
+            "audio/x-wav" |
+            "audio/vnd.wave" |
+            "audio/flac" |
+            "audio/x-flac" |
+            "audio/mp4" |
+            "audio/x-m4a" |
+            "audio/m4a" |
+            "audio/aac" |
+            "audio/x-aac" |
+            "audio/webm" |
+            "audio/x-matroska"
     );
     if !container_ok {
         return SupportsMediaType::No;
     }
-    match mime.get_param("codecs") {
+    match codecs.filter(|codecs| !codecs.is_empty()) {
         None => SupportsMediaType::Maybe,
         Some(codecs) => {
-            if codecs.as_str().split(',').all(codec_supported) {
+            if codecs.split(',').all(codec_supported) {
                 SupportsMediaType::Probably
             } else {
                 SupportsMediaType::No
@@ -337,5 +346,16 @@ mod tests {
         );
         assert_eq!(can_play_type("video/mp4"), SupportsMediaType::No);
         assert_eq!(can_play_type("audio/mpeg"), SupportsMediaType::Maybe);
+        assert_eq!(can_play_type("audio/ogg;"), SupportsMediaType::Maybe);
+        assert_eq!(can_play_type("audio/ogg;codecs"), SupportsMediaType::Maybe);
+        assert_eq!(can_play_type("audio/ogg;codecs="), SupportsMediaType::Maybe);
+        assert_eq!(
+            can_play_type("audio/webm; codecs=\"vorbis\""),
+            SupportsMediaType::Probably
+        );
+        assert_eq!(
+            can_play_type("application/octet-stream"),
+            SupportsMediaType::No
+        );
     }
 }
