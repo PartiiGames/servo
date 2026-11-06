@@ -944,7 +944,12 @@ impl WebGLRenderingContext {
 
     /// The size of the framebuffer copies and readPixels read from.
     pub(crate) fn read_framebuffer_size(&self) -> (i32, i32) {
-        match self.bound_read_framebuffer.get() {
+        // WebGL 1 has one framebuffer binding, kept in the draw slot.
+        let fb = match self.webgl_version() {
+            WebGLVersion::WebGL1 => self.bound_draw_framebuffer.get(),
+            WebGLVersion::WebGL2 => self.bound_read_framebuffer.get(),
+        };
+        match fb {
             Some(fb) => fb.size().unwrap_or((0, 0)),
             None => (self.DrawingBufferWidth(), self.DrawingBufferHeight()),
         }
