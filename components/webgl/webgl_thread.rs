@@ -127,6 +127,16 @@ pub struct GLState {
     /// (only texture parameter, binding and pixel store commands since). generateMipmap on it
     /// allocates zeroed levels instead of running the GL's downsampling (see zero_mipmaps).
     zero_level0: Option<ZeroLevel0>,
+    /// Partii (perf): renderbufferStorage calls not yet made, by renderbuffer name (target, format,
+    /// width, height). A renderbuffer's storage is made when a framebuffer it was attached to is
+    /// bound for a command that may draw to, clear or read it (see lazy_renderbuffers): Phaser's boot
+    /// makes dozens of depth-stencil targets it never draws to, and llvmpipe zeroes each on allocation.
+    pending_renderbuffers: FxHashMap<u32, (u32, u32, i32, i32)>,
+    /// Partii (perf): renderbuffers ever attached to each framebuffer (by name), while it exists.
+    framebuffer_renderbuffers: FxHashMap<u32, Vec<u32>>,
+    /// Partii (perf): the framebuffer names bound to DRAW_FRAMEBUFFER and READ_FRAMEBUFFER (0: the
+    /// canvas's own), as the content bound them.
+    bound_framebuffers: (u32, u32),
 }
 
 /// Partii (perf): see GLState::zero_level0.
@@ -251,6 +261,9 @@ impl Default for GLState {
             transform_feedback_active: false,
             incomplete_textures: (None, None),
             zero_level0: None,
+            pending_renderbuffers: FxHashMap::default(),
+            framebuffer_renderbuffers: FxHashMap::default(),
+            bound_framebuffers: (0, 0),
             color_write_mask: [true, true, true, true],
             clear_color: (0., 0., 0., 0.),
             scissor_test_enabled: false,
@@ -1204,6 +1217,10 @@ impl WebGLImpl {
             state.zero_level0 = None;
         }
 
+        if !state.pending_renderbuffers.is_empty() {
+            Self::make_pending_renderbuffers(gl, state, &command);
+        }
+
         match command {
             WebGLCommand::GetContextAttributes(ref sender) => sender.send(*attributes).unwrap(),
             WebGLCommand::ActiveTexture(target) => unsafe { gl.active_texture(target) },
@@ -1358,6 +1375,17 @@ impl WebGLImpl {
                 _ => unsafe { gl.enable(cap) },
             },
             WebGLCommand::FramebufferRenderbuffer(target, attachment, renderbuffertarget, rb) => {
+                if let Some(rb) = rb.filter(|_| lazy_renderbuffers_enabled()) {
+                    let framebuffer = if target == gl::READ_FRAMEBUFFER {
+                        state.bound_framebuffers.1
+                    } else {
+                        state.bound_framebuffers.0
+                    };
+                    let attached = state.framebuffer_renderbuffers.entry(framebuffer).or_default();
+                    if !attached.contains(&rb.glow().0.get()) {
+                        attached.push(rb.glow().0.get());
+                    }
+                }
                 let attach = |attachment| unsafe {
                     gl.framebuffer_renderbuffer(
                         target,
@@ -1444,8 +1472,16 @@ impl WebGLImpl {
                     glow::PixelPackData::BufferOffset(offset as u32),
                 );
             },
-            WebGLCommand::RenderbufferStorage(target, format, width, height) => unsafe {
-                gl.renderbuffer_storage(target, format, width, height)
+            WebGLCommand::RenderbufferStorage(target, format, width, height) => {
+                let bound = unsafe { gl.get_parameter_i32(gl::RENDERBUFFER_BINDING) } as u32;
+                if lazy_renderbuffers_enabled() && bound != 0 {
+                    state
+                        .pending_renderbuffers
+                        .insert(bound, (target, format, width, height));
+                } else {
+                    state.pending_renderbuffers.remove(&bound);
+                    unsafe { gl.renderbuffer_storage(target, format, width, height) }
+                }
             },
             WebGLCommand::RenderbufferStorageMultisample(
                 target,
@@ -1453,8 +1489,10 @@ impl WebGLImpl {
                 format,
                 width,
                 height,
-            ) => unsafe {
-                gl.renderbuffer_storage_multisample(target, samples, format, width, height)
+            ) => {
+                let bound = unsafe { gl.get_parameter_i32(gl::RENDERBUFFER_BINDING) } as u32;
+                state.pending_renderbuffers.remove(&bound);
+                unsafe { gl.renderbuffer_storage_multisample(target, samples, format, width, height) }
             },
             WebGLCommand::SampleCoverage(value, invert) => unsafe {
                 gl.sample_coverage(value, invert)
@@ -1630,8 +1668,14 @@ impl WebGLImpl {
                 Self::create_shader(gl, shader_type, chan)
             },
             WebGLCommand::DeleteBuffer(id) => unsafe { gl.delete_buffer(id.glow()) },
-            WebGLCommand::DeleteFramebuffer(id) => unsafe { gl.delete_framebuffer(id.glow()) },
-            WebGLCommand::DeleteRenderbuffer(id) => unsafe { gl.delete_renderbuffer(id.glow()) },
+            WebGLCommand::DeleteFramebuffer(id) => {
+                state.framebuffer_renderbuffers.remove(&id.glow().0.get());
+                unsafe { gl.delete_framebuffer(id.glow()) }
+            },
+            WebGLCommand::DeleteRenderbuffer(id) => {
+                state.pending_renderbuffers.remove(&id.glow().0.get());
+                unsafe { gl.delete_renderbuffer(id.glow()) }
+            },
             WebGLCommand::DeleteTexture(id) => unsafe { gl.delete_texture(id.glow()) },
             WebGLCommand::DeleteProgram(id) => unsafe { gl.delete_program(id.glow()) },
             WebGLCommand::DeleteShader(id) => unsafe { gl.delete_shader(id.glow()) },
@@ -3306,6 +3350,62 @@ impl WebGLImpl {
         true
     }
 
+    /// Partii (perf): before `command` runs, makes the storage of the pending renderbuffers (see
+    /// GLState::pending_renderbuffers) it may touch: those attached to the bound draw / read
+    /// framebuffers, unless the command only sets up objects; all of them for a renderbuffer query.
+    fn make_pending_renderbuffers(gl: &Gl, state: &mut GLState, command: &WebGLCommand) {
+        let names: Vec<u32> = match command {
+            WebGLCommand::BindFramebuffer(..) |
+            WebGLCommand::BindRenderbuffer(..) |
+            WebGLCommand::BindTexture(..) |
+            WebGLCommand::ActiveTexture(..) |
+            WebGLCommand::FramebufferRenderbuffer(..) |
+            WebGLCommand::FramebufferTexture2D(..) |
+            WebGLCommand::RenderbufferStorage(..) |
+            WebGLCommand::TexImage2D { .. } |
+            WebGLCommand::TexParameteri(..) |
+            WebGLCommand::TexParameterf(..) |
+            WebGLCommand::TexParameter { .. } |
+            WebGLCommand::GenerateMipmap(..) |
+            WebGLCommand::PixelStorei(..) |
+            WebGLCommand::GenObjectNames(..) |
+            WebGLCommand::CreateFramebuffer(..) |
+            WebGLCommand::CreateRenderbuffer(..) |
+            WebGLCommand::CreateTexture(..) |
+            WebGLCommand::DeleteFramebuffer(..) |
+            WebGLCommand::DeleteRenderbuffer(..) |
+            WebGLCommand::DeleteTexture(..) => return,
+            WebGLCommand::GetRenderbufferParameter(..) => {
+                state.pending_renderbuffers.keys().copied().collect()
+            },
+            _ => {
+                let (draw, read) = state.bound_framebuffers;
+                let mut names = Vec::new();
+                for framebuffer in [draw, read] {
+                    if let Some(attached) = state.framebuffer_renderbuffers.get(&framebuffer) {
+                        names.extend(attached.iter().filter(|rb| state.pending_renderbuffers.contains_key(rb)));
+                    }
+                }
+                names
+            },
+        };
+        if names.is_empty() {
+            return;
+        }
+        unsafe {
+            let bound = gl.get_parameter_i32(gl::RENDERBUFFER_BINDING) as u32;
+            for name in names {
+                let Some((target, format, width, height)) = state.pending_renderbuffers.remove(&name) else {
+                    continue;
+                };
+                let renderbuffer = NonZeroU32::new(name).map(glow::NativeRenderbuffer);
+                gl.bind_renderbuffer(gl::RENDERBUFFER, renderbuffer);
+                gl.renderbuffer_storage(target, format, width, height);
+            }
+            gl.bind_renderbuffer(gl::RENDERBUFFER, NonZeroU32::new(bound).map(glow::NativeRenderbuffer));
+        }
+    }
+
     fn initialize_framebuffer(gl: &Gl, state: &GLState, color: bool, depth: bool, stencil: bool) {
         let bits = [
             (color, gl::COLOR_BUFFER_BIT),
@@ -3612,6 +3712,16 @@ impl WebGLImpl {
 
         debug!("WebGLImpl::bind_framebuffer: {:?}", id);
         unsafe { gl.bind_framebuffer(target, id) };
+        let name = match request {
+            WebGLFramebufferBindingRequest::Explicit(id) => id.glow().0.get(),
+            WebGLFramebufferBindingRequest::Default => 0,
+        };
+        if target != gl::READ_FRAMEBUFFER {
+            state.bound_framebuffers.0 = name;
+        }
+        if target != gl::DRAW_FRAMEBUFFER {
+            state.bound_framebuffers.1 = name;
+        }
 
         if (target == gl::FRAMEBUFFER) || (target == gl::DRAW_FRAMEBUFFER) {
             state.drawing_to_default_framebuffer =
@@ -4644,6 +4754,13 @@ unsafe fn copy_tex_image_2d(
         gl.pixel_store_i32(gl::PACK_ALIGNMENT, pack_alignment);
         gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpack_alignment);
     }
+}
+
+/// Partii (perf): renderbufferStorage is put off until the renderbuffer may be used, unless
+/// `PARTII_WEBGL_LAZY_RB=0` (A/B switch).
+fn lazy_renderbuffers_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_LAZY_RB").map_or(true, |v| v != "0"))
 }
 
 /// Partii (perf): generateMipmap on a still-zero texImage2D(null) level allocates zeroed levels instead
