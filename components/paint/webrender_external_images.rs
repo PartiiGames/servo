@@ -20,7 +20,11 @@ pub struct WebGLExternalImages {
     rendering_context: Rc<dyn RenderingContext>,
     swap_chains: SwapChains<WebGLContextId, Device>,
     busy_webgl_context_map: WebGLContextBusyMap,
-    locked_front_buffers: FxHashMap<WebGLContextId, SurfaceTexture>,
+    /// The front buffer of each locked context, its GL texture and size, and how many times
+    /// it is locked: WebRender can lock one context more than once in a frame (a canvas
+    /// promoted to a compositor surface and also drawn into a backdrop-filter's underlay),
+    /// and only the first lock can take the front buffer from the swap chain.
+    locked_front_buffers: FxHashMap<WebGLContextId, (SurfaceTexture, u32, Size2D<i32>, usize)>,
 }
 
 impl WebGLExternalImages {
@@ -42,6 +46,11 @@ impl WebGLExternalImages {
     fn lock_swap_chain(&mut self, id: WebGLContextId) -> Option<(u32, Size2D<i32>)> {
         debug!("... locking chain {:?}", id);
 
+        if let Some((_, gl_texture, size, locks)) = self.locked_front_buffers.get_mut(&id) {
+            *locks += 1;
+            return Some((*gl_texture, *size));
+        }
+
         {
             let mut busy_webgl_context_map = self.busy_webgl_context_map.write();
             *busy_webgl_context_map.entry(id).or_default() += 1;
@@ -50,7 +59,7 @@ impl WebGLExternalImages {
         let front_buffer = self.swap_chains.get(id)?.take_surface()?;
         let (surface_texture, gl_texture, size) =
             self.rendering_context.create_texture(front_buffer)?;
-        self.locked_front_buffers.insert(id, surface_texture);
+        self.locked_front_buffers.insert(id, (surface_texture, gl_texture, size, 1));
 
         Some((gl_texture, size))
     }
@@ -58,7 +67,14 @@ impl WebGLExternalImages {
     fn unlock_swap_chain(&mut self, id: WebGLContextId) -> Option<()> {
         debug!("... unlocked chain {:?}", id);
 
-        if let Some(locked_front_buffer) = self.locked_front_buffers.remove(&id) &&
+        if let Some((_, _, _, locks)) = self.locked_front_buffers.get_mut(&id) &&
+            *locks > 1
+        {
+            *locks -= 1;
+            return Some(());
+        }
+
+        if let Some((locked_front_buffer, ..)) = self.locked_front_buffers.remove(&id) &&
             let Some(locked_front_buffer) =
                 self.rendering_context.destroy_texture(locked_front_buffer)
         {
