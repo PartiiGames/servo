@@ -174,6 +174,10 @@ pub struct Image {
     pub color: ColorU,
     pub image_rendering: ImageRendering,
     pub alpha_type: AlphaType,
+    /// Partii: set on a backdrop underlay (see `SceneBuilder::partii_add_backdrop_underlay`):
+    /// the prim instance index of the compositor-surface candidate this re-draws. It is drawn
+    /// only when that surface is promoted this frame.
+    pub partii_underlay_of: Option<u32>,
 }
 
 pub type ImageKey = PrimKey<Image>;
@@ -202,6 +206,7 @@ pub struct ImageData {
     pub color: ColorF,
     pub image_rendering: ImageRendering,
     pub alpha_type: AlphaType,
+    pub partii_underlay_of: Option<u32>,
 }
 
 impl From<Image> for ImageData {
@@ -213,6 +218,7 @@ impl From<Image> for ImageData {
             tile_spacing: image.tile_spacing.into(),
             image_rendering: image.image_rendering,
             alpha_type: image.alpha_type,
+            partii_underlay_of: image.partii_underlay_of,
         }
     }
 }
@@ -783,6 +789,7 @@ impl CreateShadow for Image {
             image_rendering: self.image_rendering,
             alpha_type: self.alpha_type,
             color: shadow.color.into(),
+            partii_underlay_of: None,
         }
     }
 }

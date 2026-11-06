@@ -120,6 +120,8 @@ pub struct TileCacheBuilder {
     root_spatial_node_index: SpatialNodeIndex,
     /// Debug flags to provide to our TileCacheInstances.
     debug_flags: DebugFlags,
+    /// Partii: see `partii_set_slice_node`.
+    partii_slice_node: Option<SpatialNodeIndex>,
 }
 
 /// The output of a tile cache builder, containing all details needed to construct the
@@ -149,6 +151,7 @@ impl TileCacheBuilder {
         debug_flags: DebugFlags,
     ) -> Self {
         TileCacheBuilder {
+            partii_slice_node: None,
             primary_slices: vec![PrimarySlice::new(SliceFlags::empty(), None, background_color)],
             prev_scroll_root_cache: (SpatialNodeIndex::INVALID, SpatialNodeIndex::INVALID),
             root_spatial_node_index,
@@ -161,6 +164,22 @@ impl TileCacheBuilder {
             .last_mut()
             .unwrap()
             .merge();
+    }
+
+    /// Partii: for a non-atomic current slice, (index of the current slice, number of its
+    /// secondary slices). None for an atomic slice.
+    pub fn partii_slice_position(&self) -> Option<(usize, usize)> {
+        match self.primary_slices.last()?.kind {
+            SliceKind::Default { ref secondary_slices } => {
+                Some((self.primary_slices.len() - 1, secondary_slices.len()))
+            }
+            SliceKind::Atomic { .. } => None,
+        }
+    }
+
+    /// Partii: while set, prims are put in secondary slices as if on this spatial node.
+    pub fn partii_set_slice_node(&mut self, node: Option<SpatialNodeIndex>) {
+        self.partii_slice_node = node;
     }
 
     /// Returns true if the current slice has no primitives added yet
@@ -293,11 +312,16 @@ impl TileCacheBuilder {
                 );
             }
             SliceKind::Default { ref mut secondary_slices } => {
-                assert_ne!(spatial_node_index, SpatialNodeIndex::UNKNOWN);
+                // Partii: a backdrop-filter in a non-atomic slice and its underlay (see
+                // `SceneBuilder::partii_add_backdrop_underlay`) are sliced as the element
+                // with the backdrop-filter would be; the chain's UNKNOWN spatial node is
+                // resolved to the slice's in `finalize_picture`.
+                let slice_node = self.partii_slice_node.unwrap_or(spatial_node_index);
+                assert_ne!(slice_node, SpatialNodeIndex::UNKNOWN);
 
                 // Check if we want to create a new slice based on the current / next scroll root
                 let scroll_root = find_scroll_root(
-                    spatial_node_index,
+                    slice_node,
                     &mut self.prev_scroll_root_cache,
                     spatial_tree,
                     // Allow sticky frames as scroll roots, unless our quality settings prefer
