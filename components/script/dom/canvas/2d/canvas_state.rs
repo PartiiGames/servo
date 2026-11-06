@@ -35,7 +35,6 @@ use servo_canvas_traits::canvas::{
 };
 use servo_constellation_traits::ScriptToConstellationMessage;
 use servo_url::{ImmutableOrigin, ServoUrl};
-use style::Zero;
 use style::color::{AbsoluteColor, ColorFlags, ColorSpace};
 use style::computed_values::font_variant_position::T as FontVariantPosition;
 use style::properties::longhands::font_variant_caps::computed_value::T as FontVariantCaps;
@@ -140,8 +139,10 @@ pub(super) struct CanvasContextState {
     direction: CanvasDirection,
     /// Partii: letterSpacing / wordSpacing as CSS lengths (absolute or font-relative).
     #[no_trace]
+    #[ignore_malloc_size_of = "plain data"]
     letter_spacing: NoCalcLength,
     #[no_trace]
+    #[ignore_malloc_size_of = "plain data"]
     word_spacing: NoCalcLength,
     font_kerning: CanvasFontKerning,
     font_stretch: CanvasFontStretch,
@@ -3074,28 +3075,18 @@ struct TextSpacing {
 fn parse_canvas_spacing(value: &str) -> Option<NoCalcLength> {
     use cssparser::Token;
     let mut parser = Parser::new(value);
-    let length = parser
-        .parse_entirely(
-            |input| -> Result<NoCalcLength, cssparser::ParseError<'_, ()>> {
-                let location = input.current_source_location();
-                match *input.next()? {
-                    Token::Number { value, .. } if value == 0. => Ok(NoCalcLength::from_px(0.)),
-                    Token::Dimension {
-                        value, ref unit, ..
-                    } => {
-                        let unit = LengthUnit::from_str(unit)
-                            .map_err(|()| location.new_custom_error(()))?;
-                        if !(unit.is_absolute() || unit.is_font_relative()) || !value.is_finite() {
-                            return Err(location.new_custom_error(()));
-                        }
-                        Ok(NoCalcLength::new(unit, value))
-                    },
-                    _ => Err(location.new_custom_error(())),
-                }
-            },
-        )
-        .ok()?;
-    Some(length)
+    let length = match parser.next().ok()?.clone() {
+        Token::Number { value, .. } if value == 0. => NoCalcLength::from_px(0.),
+        Token::Dimension { value, unit, .. } => {
+            let unit = LengthUnit::from_str(&unit).ok()?;
+            if !(unit.is_absolute() || unit.is_font_relative()) || !value.is_finite() {
+                return None;
+            }
+            NoCalcLength::new(unit, value)
+        },
+        _ => return None,
+    };
+    parser.is_exhausted().then_some(length)
 }
 
 /// A spacing length in px for a font: absolute units directly, font-relative ones against the font.
