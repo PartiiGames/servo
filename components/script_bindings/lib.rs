@@ -104,5 +104,6 @@ pub mod codegen {
 pub(crate) use js::gc::Traceable as JSTraceable;
 
 pub use crate::codegen::DomTypes::DomTypes;
+pub use crate::finalize::{set_finalize_stats, take_finalize_stats};
 pub(crate) use crate::reflector::{DomObject, MutDomObject, Reflector};
 pub(crate) use crate::trace::CustomTraceable;
