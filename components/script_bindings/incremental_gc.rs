@@ -21,8 +21,10 @@
 //!   reflectors are skipped: tracing them would mark themselves through their own `reflector`
 //!   field.
 //!
-//! Sweeping isn't incremental (the driver finishes the GC as soon as sweeping starts), so nothing
-//! here has to deal with objects that are about to be finalized.
+//! By default sweeping isn't incremental (the driver finishes the GC as soon as sweeping starts).
+//! With `PARTII_GC_INCREMENTAL_SWEEP=1` it is, and script can run while some zones are being swept.
+//! A dead DOM object then still exists until its zone's finalizers run, and the only way Rust can
+//! reach one is a `WeakRef`: `about_to_be_finalized` lets `WeakRef` treat it as already gone.
 
 #![allow(unsafe_code)]
 
@@ -38,6 +40,8 @@ thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     /// Whether an incremental GC is marking and the mutator is running (between slices).
     static MARKING: Cell<bool> = const { Cell::new(false) };
+    /// Whether an incremental GC is sweeping and the mutator is running (between slices).
+    static SWEEPING: Cell<bool> = const { Cell::new(false) };
     /// Every registered reflector's object slot, and its registry index slot (for swap-remove).
     static REGISTRY: RefCell<Vec<(*const Heap<*mut JSObject>, *const Cell<usize>)>> =
         const { RefCell::new(Vec::new()) };
@@ -57,6 +61,37 @@ pub fn is_enabled() -> bool {
 /// Turns the expose barrier on (between marking slices) or off (in a slice, and outside a GC).
 pub fn set_marking(marking: bool) {
     MARKING.with(|m| m.set(marking));
+}
+
+/// Set while script runs between the slices of an incremental GC that is sweeping.
+pub fn set_sweeping(sweeping: bool) {
+    SWEEPING.with(|s| s.set(sweeping));
+}
+
+#[cfg(not(windows))]
+unsafe extern "C" {
+    /// `js::gc::IsAboutToBeFinalizedInternal<JSObject>`: unmarked in a zone that is being swept.
+    #[cfg_attr(
+        target_vendor = "apple",
+        link_name = "\u{1}__ZN2js2gc28IsAboutToBeFinalizedInternalI8JSObjectEEbPT_"
+    )]
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        link_name = "\u{1}_ZN2js2gc28IsAboutToBeFinalizedInternalI8JSObjectEEbPT_"
+    )]
+    fn IsAboutToBeFinalized(obj: *mut JSObject) -> bool;
+}
+
+#[cfg(windows)]
+unsafe fn IsAboutToBeFinalized(_: *mut JSObject) -> bool {
+    false
+}
+
+/// Whether `obj` is dead and only waiting for its zone's sweep to finalize it (possible only while
+/// an incremental GC sweeps in slices). One TLS load otherwise.
+#[inline]
+pub fn about_to_be_finalized(obj: *mut JSObject) -> bool {
+    !obj.is_null() && SWEEPING.with(Cell::get) && unsafe { IsAboutToBeFinalized(obj) }
 }
 
 /// The expose barrier: shades `obj` if an incremental GC is marking.

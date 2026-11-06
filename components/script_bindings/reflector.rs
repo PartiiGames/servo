@@ -83,6 +83,13 @@ impl<T> Reflector<T> {
         unsafe { HandleObject::from_raw(self.object.handle()) }
     }
 
+    /// The reflector object, without the incremental GC's expose barrier (for checks that don't
+    /// hand it out).
+    #[inline]
+    pub fn get_jsobject_unbarriered(&self) -> *mut JSObject {
+        self.object.get()
+    }
+
     /// Get the cached prototype ID.
     #[inline]
     pub fn proto_id(&self) -> u16 {
