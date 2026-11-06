@@ -241,11 +241,20 @@ impl Painter {
                 resource_override_path: opts::get().shaders_path.clone(),
                 // Partii (perf, measurement builds): PARTII_WR_PROMO_LOG logs why WebRender declines a
                 // compositor surface (with RUST_LOG=webrender=warn).
-                debug_flags: if std::env::var_os("PARTII_WR_PROMO_LOG").is_some() {
+                debug_flags: (if std::env::var_os("PARTII_WR_PROMO_LOG").is_some() {
                     webrender::DebugFlags::SURFACE_PROMOTION_LOGGING
                 } else {
                     webrender::DebugFlags::empty()
-                },
+                }) | webrender::DebugFlags::from_bits_truncate(
+                    // PARTII_WR_DEBUG=<bits>: any WebRender debug flags (measurement only).
+                    std::env::var("PARTII_WR_DEBUG")
+                        .ok()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(0),
+                ),
+                // PARTII_WR_TILES=1: WebRender fills per-tile picture cache debug info, which
+                // PARTII_FRAME_PROF=trace prints per slice (measurement only).
+                testing: std::env::var_os("PARTII_WR_TILES").is_some(),
                 precache_flags: if pref!(gfx_precache_shaders) {
                     ShaderPrecacheFlags::FULL_COMPILE
                 } else {
@@ -459,7 +468,13 @@ impl Painter {
                     let t3 = std::time::Instant::now();
                     // Partii (perf, measurement builds): PARTII_FRAME_PROF=trace logs renders of 20 ms or more.
                     if std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace") &&
-                        t3 - t0 >= std::time::Duration::from_millis(20)
+                        t3 - t0 >=
+                            std::time::Duration::from_millis(
+                                std::env::var("PARTII_FRAME_PROF_MS")
+                                    .ok()
+                                    .and_then(|v| v.parse().ok())
+                                    .unwrap_or(20),
+                            )
                     {
                         let d = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -478,6 +493,32 @@ impl Painter {
                             st.map_or(0., |s| s.frame_build_time),
                             st.is_some_and(|s| s.full_paint),
                         );
+                        if let Some(r) = results.as_ref() {
+                            let mut slices: Vec<_> = r.picture_cache_debug.slices.iter().collect();
+                            slices.sort_by_key(|(k, _)| **k);
+                            let mut line = String::new();
+                            for (k, s) in slices {
+                                let mut dirty = 0;
+                                let mut valid = 0;
+                                let mut other = 0;
+                                let mut area = 0.0f32;
+                                for t in s.tiles.values() {
+                                    match t {
+                                        webrender::TileDebugInfo::Dirty(d) => {
+                                            dirty += 1;
+                                            area += d.local_dirty_rect.area();
+                                        },
+                                        webrender::TileDebugInfo::Valid => valid += 1,
+                                        _ => other += 1,
+                                    }
+                                }
+                                line.push_str(&format!(
+                                    " s{k}:d{dirty}/v{valid}/o{other}/a{:.0}k",
+                                    area / 1000.0
+                                ));
+                            }
+                            eprintln!("partii-trace tiles{line}");
+                        }
                     }
                     paint_stats::record(t1 - t0, t2 - t1, t3 - t2, results.as_ref());
                 }
