@@ -9,6 +9,7 @@ pub(crate) mod closeevent;
 pub(crate) mod commandevent;
 pub(crate) mod compositionevent;
 pub(crate) mod customevent;
+pub(crate) mod dragevent;
 pub(crate) mod errorevent;
 #[expect(clippy::module_inception, reason = "The interface name is Event")]
 pub(crate) mod event;

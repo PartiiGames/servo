@@ -93,9 +93,9 @@ impl PointerEvent {
         cancelable: EventCancelable,
         view: Option<&Window>,
         detail: i32,
-        screen_point: Point2D<i32, CSSPixel>,
-        client_point: Point2D<i32, CSSPixel>,
-        page_point: Point2D<i32, CSSPixel>,
+        screen_point: Point2D<f64, CSSPixel>,
+        client_point: Point2D<f64, CSSPixel>,
+        page_point: Point2D<f64, CSSPixel>,
         modifiers: Modifiers,
         button: MouseButton,
         buttons: MouseButtons,
@@ -160,9 +160,9 @@ impl PointerEvent {
         cancelable: EventCancelable,
         view: Option<&Window>,
         detail: i32,
-        screen_point: Point2D<i32, CSSPixel>,
-        client_point: Point2D<i32, CSSPixel>,
-        page_point: Point2D<i32, CSSPixel>,
+        screen_point: Point2D<f64, CSSPixel>,
+        client_point: Point2D<f64, CSSPixel>,
+        page_point: Point2D<f64, CSSPixel>,
         modifiers: Modifiers,
         button: MouseButton,
         buttons: MouseButtons,
@@ -236,8 +236,8 @@ impl PointerEventMethods<crate::DomTypeHolder> for PointerEvent {
         let cancelable = EventCancelable::from(init.parent.parent.parent.parent.cancelable);
         let scroll_offset = window.scroll_offset();
         let page_point = Point2D::new(
-            scroll_offset.x as i32 + init.parent.clientX,
-            scroll_offset.y as i32 + init.parent.clientY,
+            scroll_offset.x as f64 + *init.parent.clientX,
+            scroll_offset.y as f64 + *init.parent.clientY,
         );
         let event = PointerEvent::new_with_proto(
             cx,
@@ -248,8 +248,8 @@ impl PointerEventMethods<crate::DomTypeHolder> for PointerEvent {
             cancelable,
             init.parent.parent.parent.view.as_deref(),
             init.parent.parent.parent.detail,
-            Point2D::new(init.parent.screenX, init.parent.screenY),
-            Point2D::new(init.parent.clientX, init.parent.clientY),
+            Point2D::new(*init.parent.screenX, *init.parent.screenY),
+            Point2D::new(*init.parent.clientX, *init.parent.clientY),
             page_point,
             init.parent.parent.modifiers(),
             init.parent.button.into(),

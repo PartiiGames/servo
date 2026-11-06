@@ -10,7 +10,6 @@ use html5ever::{LocalName, Prefix, local_name};
 use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
 use net_traits::blob_url_store::UrlWithBlobClaim;
-use num_traits::ToPrimitive;
 use script_bindings::cell::DomRefCell;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
@@ -376,8 +375,8 @@ impl Activatable for HTMLAnchorElement {
             let rect = target_node.border_box().unwrap_or_default();
             ismap_suffix = Some(format!(
                 "?{},{}",
-                mouse_event.ClientX().to_f32().unwrap() - rect.origin.x.to_f32_px(),
-                mouse_event.ClientY().to_f32().unwrap() - rect.origin.y.to_f32_px()
+                *mouse_event.ClientX() as f32 - rect.origin.x.to_f32_px(),
+                *mouse_event.ClientY() as f32 - rect.origin.y.to_f32_px()
             ))
         }
 

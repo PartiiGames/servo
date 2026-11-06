@@ -175,9 +175,9 @@ impl Touch {
             cancelable,
             Some(window),
             0, // detail
-            Point2D::new(*self.ScreenX() as i32, *self.ScreenY() as i32),
-            Point2D::new(*self.ClientX() as i32, *self.ClientY() as i32),
-            Point2D::new(*self.PageX() as i32, *self.PageY() as i32),
+            Point2D::new(*self.ScreenX(), *self.ScreenY()),
+            Point2D::new(*self.ClientX(), *self.ClientY()),
+            Point2D::new(*self.PageX(), *self.PageY()),
             modifiers,
             button,
             buttons,

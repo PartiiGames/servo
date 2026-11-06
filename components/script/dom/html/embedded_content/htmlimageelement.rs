@@ -22,7 +22,6 @@ use net_traits::request::{CorsSettings, Destination, Initiator, RequestId};
 use net_traits::{
     FetchMetadata, FetchResponseMsg, NetworkError, ReferrerPolicy, ResourceFetchTiming,
 };
-use num_traits::ToPrimitive;
 use pixels::{CorsStatus, ImageMetadata, Snapshot};
 use script_bindings::cell::DomRefCell;
 use servo_base::cross_process_instant::CrossProcessInstant;
@@ -1858,10 +1857,8 @@ impl VirtualMethods for HTMLImageElement {
             return;
         };
 
-        let click_location = Point2D::new(
-            mouse_event.ClientX().to_f32().unwrap(),
-            mouse_event.ClientY().to_f32().unwrap(),
-        );
+        let click_location =
+            Point2D::new(*mouse_event.ClientX() as f32, *mouse_event.ClientY() as f32);
         let bounding_rectangle = self.upcast::<Element>().GetBoundingClientRect(cx);
         let image_extents =
             Point2D::new(bounding_rectangle.X() as f32, bounding_rectangle.Y() as f32);
