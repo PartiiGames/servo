@@ -137,6 +137,8 @@ pub struct GLState {
     /// Partii (perf): the framebuffer names bound to DRAW_FRAMEBUFFER and READ_FRAMEBUFFER (0: the
     /// canvas's own), as the content bound them.
     bound_framebuffers: (u32, u32),
+    /// Partii: the multisampled stand-in for the default framebuffer's drawing (antialias: true).
+    msaa: Option<MsaaFramebuffer>,
 }
 
 /// Partii (perf): see GLState::zero_level0.
@@ -177,6 +179,67 @@ impl GLState {
             !self
                 .requested_flags
                 .contains(ContextAttributeFlags::STENCIL)
+    }
+
+    /// Clears the multisampled default framebuffer the way the swap chain clears the surface
+    /// (colour 0,0,0 with alpha 1 when alpha: false, depth 1, stencil 0), then puts the
+    /// content's state back.
+    fn clear_msaa(&self, gl: &Gl) {
+        let Some(msaa) = &self.msaa else {
+            return;
+        };
+        let alpha = self.requested_flags.contains(ContextAttributeFlags::ALPHA);
+        unsafe {
+            let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(msaa.framebuffer));
+            gl.disable(gl::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            gl.depth_mask(true);
+            gl.stencil_mask(u32::MAX);
+            gl.clear_color(0., 0., 0., !alpha as u32 as f32);
+            gl.clear_depth(1.);
+            gl.clear_stencil(0);
+            gl.clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
+        }
+        self.restore_invariant(gl);
+    }
+
+    /// Resolves what was drawn into the multisampled default framebuffer since the last
+    /// resolve into the surface, which is what reads, copies and the compositor see.
+    fn resolve_msaa(&mut self, gl: &Gl, surface: Option<gl::NativeFramebuffer>) {
+        let Some(msaa) = self.msaa.as_mut() else {
+            return;
+        };
+        if !msaa.dirty {
+            return;
+        }
+        msaa.dirty = false;
+        let (width, height) = (msaa.size.width, msaa.size.height);
+        unsafe {
+            let read = gl.get_parameter_framebuffer(gl::READ_FRAMEBUFFER_BINDING);
+            let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
+            gl.bind_framebuffer(gl::READ_FRAMEBUFFER, Some(msaa.framebuffer));
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, surface);
+            // Only the pixel ownership and scissor tests (and sRGB encoding, not used by
+            // these linear images) apply to a blit.
+            gl.disable(gl::SCISSOR_TEST);
+            gl.blit_framebuffer(
+                0,
+                0,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+                gl::COLOR_BUFFER_BIT,
+                gl::NEAREST,
+            );
+            gl.bind_framebuffer(gl::READ_FRAMEBUFFER, read);
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
+        }
+        self.restore_scissor_invariant(gl);
     }
 
     // We maintain invariants between the GLState object and the GL state.
@@ -277,6 +340,7 @@ impl Default for GLState {
             depth_clear_value: 1.,
             default_vao: None,
             drawing_to_default_framebuffer: true,
+            msaa: None,
         }
     }
 }
@@ -774,22 +838,41 @@ impl WebGLThread {
             }
         }
 
+        // Partii: antialias: true draws into a multisampled framebuffer that stands in for the
+        // default one (surfman surfaces are single-sampled) and is resolved into the surface
+        // before reads and swaps. PARTII_WEBGL_MSAA=0 turns it off.
+        let msaa = if attributes.antialias && msaa_enabled() {
+            let msaa = unsafe { MsaaFramebuffer::new(&gl, size.to_i32()) };
+            if msaa.is_none() {
+                warn!("antialias: no multisampled default framebuffer, drawing without it");
+            }
+            msaa
+        } else {
+            None
+        };
+        if let Some(msaa) = &msaa {
+            unsafe { gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(msaa.framebuffer)) };
+        }
+
         let state = GLState {
             _gl_version: gl_version,
             _webgl_version: webgl_version,
             requested_flags,
             default_vao,
             emulate_luminance: webgl_version == WebGLVersion::WebGL2 && api_type == GlType::Gl,
+            msaa,
             ..Default::default()
         };
         debug!("Created state {:?}", state);
+        state.clear_msaa(&gl);
 
         state.restore_invariant(&gl);
         debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
         mark(&mut stats, "resize+clear+state");
         if let Some((_, steps)) = &stats {
             let line: Vec<String> = steps.iter().map(|(k, v)| format!("{k}={v:.2}")).collect();
-            eprintln!("partii-webgl-stats: create {webgl_version:?} {}x{} {}", size.width, size.height, line.join(" "));
+            let msaa_samples = state.msaa.as_ref().map_or(0, |msaa| msaa.samples);
+            eprintln!("partii-webgl-stats: create {webgl_version:?} {}x{} msaa={msaa_samples} {}", size.width, size.height, line.join(" "));
         }
 
         self.contexts.insert(
@@ -852,6 +935,11 @@ impl WebGLThread {
         } else {
             error!("Failed to find swap chain");
         }
+        if let Some(msaa) = data.state.msaa.as_mut() {
+            unsafe { msaa.allocate(&data.gl, size.to_i32()) };
+            msaa.dirty = false;
+        }
+        data.state.clear_msaa(&data.gl);
 
         // Reset framebuffer bindings as appropriate.
         framebuffer_rebinding_info.apply(&data.device, &data.ctx, &data.gl);
@@ -963,6 +1051,10 @@ impl WebGLThread {
             // Ensure there are no pending GL errors from other parts of the pipeline.
             debug_assert_eq!(unsafe { data.gl.get_error() }, gl::NO_ERROR);
 
+            // The compositor shows the surface: resolve the multisampled drawing into it.
+            let surface = surface_framebuffer(&data.device, &data.ctx);
+            data.state.resolve_msaa(&data.gl, surface);
+
             // Check to see if any of the current framebuffer bindings are the surface we're about
             // to swap out. If so, we'll have to reset them after destroying the surface.
             let framebuffer_rebinding_info =
@@ -999,6 +1091,7 @@ impl WebGLThread {
                 swap_chain
                     .clear_surface(&data.device, &mut data.ctx, &data.gl, clear_color)
                     .unwrap();
+                data.state.clear_msaa(&data.gl);
                 debug_assert_eq!(unsafe { data.gl.get_error() }, gl::NO_ERROR);
             }
 
@@ -1218,6 +1311,41 @@ impl WebGLImpl {
 
         if !state.pending_renderbuffers.is_empty() {
             Self::make_pending_renderbuffers(gl, state, &command);
+        }
+
+        if state.msaa.is_some() {
+            let reads = matches!(
+                command,
+                WebGLCommand::ReadPixels(..) |
+                    WebGLCommand::ReadPixelsPP(..) |
+                    WebGLCommand::CopyTexImage2D { .. } |
+                    WebGLCommand::CopyTexSubImage2D(..) |
+                    WebGLCommand::CopyTexSubImage3D(..) |
+                    WebGLCommand::BlitFrameBuffer(..)
+            );
+            if reads && state.bound_framebuffers.1 == 0 {
+                state.resolve_msaa(gl, surface_framebuffer(device, ctx));
+            }
+            let writes = matches!(
+                command,
+                WebGLCommand::Clear(..) |
+                    WebGLCommand::ClearBufferfv(..) |
+                    WebGLCommand::ClearBufferiv(..) |
+                    WebGLCommand::ClearBufferuiv(..) |
+                    WebGLCommand::ClearBufferfi(..) |
+                    WebGLCommand::BlitFrameBuffer(..) |
+                    WebGLCommand::DrawArrays { .. } |
+                    WebGLCommand::DrawArraysInstanced { .. } |
+                    WebGLCommand::DrawElements { .. } |
+                    WebGLCommand::DrawElementsInstanced { .. } |
+                    WebGLCommand::DrawArraysInstancedBaseInstance { .. } |
+                    WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance { .. }
+            );
+            if writes && state.drawing_to_default_framebuffer {
+                if let Some(msaa) = state.msaa.as_mut() {
+                    msaa.dirty = true;
+                }
+            }
         }
 
         match command {
@@ -3122,7 +3250,21 @@ impl WebGLImpl {
                 };
                 unsafe { gl.read_buffer(buffer) }
             },
-            WebGLCommand::DrawBuffers(ref buffers) => unsafe { gl.draw_buffers(buffers) },
+            WebGLCommand::DrawBuffers(ref buffers) => {
+                // The default framebuffer is a framebuffer object here (surfman's, or the
+                // multisampled one), whose colour image is COLOR_ATTACHMENT0, not BACK.
+                let buffers: Vec<u32> = buffers
+                    .iter()
+                    .map(|&buffer| {
+                        if buffer == gl::BACK && state.drawing_to_default_framebuffer {
+                            gl::COLOR_ATTACHMENT0
+                        } else {
+                            buffer
+                        }
+                    })
+                    .collect();
+                unsafe { gl.draw_buffers(&buffers) }
+            },
         }
 
         // If debug asertions are enabled, then check the error state.
@@ -3735,6 +3877,13 @@ impl WebGLImpl {
         }
         if target != gl::DRAW_FRAMEBUFFER {
             state.bound_framebuffers.1 = name;
+        }
+        // With a multisampled default framebuffer, drawing goes to it; reads stay on the
+        // surface, which it is resolved into first.
+        if let (WebGLFramebufferBindingRequest::Default, Some(msaa)) = (request, &state.msaa) {
+            if target == gl::FRAMEBUFFER || target == gl::DRAW_FRAMEBUFFER {
+                unsafe { gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(msaa.framebuffer)) };
+            }
         }
 
         if (target == gl::FRAMEBUFFER) || (target == gl::DRAW_FRAMEBUFFER) {
@@ -4782,6 +4931,126 @@ fn lazy_renderbuffers_enabled() -> bool {
 fn zero_mip_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PARTII_WEBGL_ZERO_MIP").map_or(true, |v| v != "0"))
+}
+
+/// Partii: the multisampled framebuffer that stands in for the default framebuffer's drawing
+/// when the context asked for antialias: true. Its object stays the same across resizes (only
+/// the storage is reallocated), so bindings to it survive like bindings to content
+/// framebuffers do.
+#[derive(Debug)]
+struct MsaaFramebuffer {
+    framebuffer: gl::NativeFramebuffer,
+    color: gl::NativeRenderbuffer,
+    depth_stencil: gl::NativeRenderbuffer,
+    samples: i32,
+    size: Size2D<i32>,
+    /// Drawn into since the last resolve into the surface.
+    dirty: bool,
+}
+
+impl MsaaFramebuffer {
+    /// Creates the framebuffer with RGBA8 and DEPTH24_STENCIL8 storage (the context always has
+    /// alpha, depth and stencil; WebGL's missing ones are faked by masks), up to 4 samples.
+    unsafe fn new(gl: &Gl, size: Size2D<i32>) -> Option<MsaaFramebuffer> {
+        unsafe {
+            while gl.get_error() != gl::NO_ERROR {}
+            let max_samples = gl.get_parameter_i32(gl::MAX_SAMPLES);
+            if max_samples < 2 {
+                return None;
+            }
+            let framebuffer = gl.create_framebuffer().ok()?;
+            let color = gl.create_renderbuffer().ok()?;
+            let depth_stencil = gl.create_renderbuffer().ok()?;
+            let mut msaa = MsaaFramebuffer {
+                framebuffer,
+                color,
+                depth_stencil,
+                samples: max_samples.min(4),
+                size,
+                dirty: false,
+            };
+            let renderbuffer = gl.get_parameter_renderbuffer(gl::RENDERBUFFER_BINDING);
+            let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(framebuffer));
+            gl.bind_renderbuffer(gl::RENDERBUFFER, Some(color));
+            gl.framebuffer_renderbuffer(
+                gl::DRAW_FRAMEBUFFER,
+                gl::COLOR_ATTACHMENT0,
+                gl::RENDERBUFFER,
+                Some(color),
+            );
+            gl.bind_renderbuffer(gl::RENDERBUFFER, Some(depth_stencil));
+            gl.framebuffer_renderbuffer(
+                gl::DRAW_FRAMEBUFFER,
+                gl::DEPTH_ATTACHMENT,
+                gl::RENDERBUFFER,
+                Some(depth_stencil),
+            );
+            gl.framebuffer_renderbuffer(
+                gl::DRAW_FRAMEBUFFER,
+                gl::STENCIL_ATTACHMENT,
+                gl::RENDERBUFFER,
+                Some(depth_stencil),
+            );
+            gl.bind_renderbuffer(gl::RENDERBUFFER, renderbuffer);
+            let allocated = msaa.allocate(gl, size);
+            let complete =
+                gl.check_framebuffer_status(gl::DRAW_FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
+            if !allocated || !complete || gl.get_error() != gl::NO_ERROR {
+                gl.delete_framebuffer(framebuffer);
+                gl.delete_renderbuffer(color);
+                gl.delete_renderbuffer(depth_stencil);
+                return None;
+            }
+            msaa.size = size;
+            Some(msaa)
+        }
+    }
+
+    /// (Re)allocates the storage at `size`. Returns false on a GL error.
+    unsafe fn allocate(&mut self, gl: &Gl, size: Size2D<i32>) -> bool {
+        unsafe {
+            while gl.get_error() != gl::NO_ERROR {}
+            let renderbuffer = gl.get_parameter_renderbuffer(gl::RENDERBUFFER_BINDING);
+            for (renderbuffer, format) in [
+                (self.color, gl::RGBA8),
+                (self.depth_stencil, gl::DEPTH24_STENCIL8),
+            ] {
+                gl.bind_renderbuffer(gl::RENDERBUFFER, Some(renderbuffer));
+                gl.renderbuffer_storage_multisample(
+                    gl::RENDERBUFFER,
+                    self.samples,
+                    format,
+                    size.width,
+                    size.height,
+                );
+            }
+            gl.bind_renderbuffer(gl::RENDERBUFFER, renderbuffer);
+            self.size = size;
+            let ok = gl.get_error() == gl::NO_ERROR;
+            if !ok {
+                warn!("antialias: multisampled storage {size:?} failed");
+            }
+            ok
+        }
+    }
+}
+
+/// The framebuffer object of the context's surface (WebGL's default framebuffer for reads).
+fn surface_framebuffer(device: &Device, ctx: &Context) -> Option<gl::NativeFramebuffer> {
+    device
+        .context_surface_info(ctx)
+        .ok()
+        .flatten()
+        .and_then(|info| info.framebuffer_object)
+}
+
+/// Partii: `PARTII_WEBGL_MSAA=0` turns off the multisampled default framebuffer for
+/// antialias: true (A/B switch; then the default framebuffer is single-sampled as before).
+fn msaa_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_MSAA").map_or(true, |v| v != "0"))
 }
 
 /// Partii (perf): texImage2D(null) clears colour-renderable levels instead of uploading zeros, unless
