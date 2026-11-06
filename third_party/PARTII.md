@@ -16,3 +16,10 @@ Patches on top of 0.22.0:
   siblings only (`break`), not the whole upward walk (`return`), so `:has(~ div .test)` still
   finds its anchor when `.test` sits in a later sibling of a child of `div` (WPT
   has-in-sibling-position / has-in-adjacent-position).
+
+`webrender/` is crates.io `webrender 0.70.0` (the version Servo 0.7.0 locks; MPL-2.0, `webrender/LICENSE`),
+patched in the same way. The vendoring commit copies the published crate unchanged (without the registry's
+`.cargo_vcs_info.json`, `Cargo.toml.orig` and `Cargo.lock`), so `git diff <that commit> -- third_party/webrender`
+shows every Partii patch. `webrender_api` and `webrender_build` stay on crates.io.
+
+Patches on top of webrender 0.70.0:
