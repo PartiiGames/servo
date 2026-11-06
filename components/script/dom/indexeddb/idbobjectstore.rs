@@ -23,7 +23,9 @@ use storage_traits::indexeddb::{
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
 use crate::dom::bindings::codegen::Bindings::IDBDatabaseBinding::IDBObjectStoreParameters;
-use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBObjectStoreMethods;
+use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::{
+    IDBGetAllOptions, IDBObjectStoreMethods,
+};
 use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::{
     IDBTransactionMethods, IDBTransactionMode,
 };
@@ -43,9 +45,17 @@ use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::key::{
-    ExtractionResult, can_inject_key_into_value, convert_value_to_key, convert_value_to_key_range,
-    extract_key, index_keys_for_value, inject_key_into_value, is_valid_key_path,
+    ExtractionResult, GetAllArguments, can_inject_key_into_value, convert_value_to_key,
+    convert_value_to_key_range, extract_key, get_all_arguments, get_all_options_arguments,
+    index_keys_for_value, inject_key_into_value, is_valid_key_path,
 };
+
+/// Partii: <https://w3c.github.io/IndexedDB/#create-a-request-to-retrieve-multiple-items> kind.
+pub(crate) enum GetAllKind {
+    Value,
+    Key,
+    Record,
+}
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 pub enum KeyPath {
@@ -355,6 +365,75 @@ impl IDBObjectStore {
         Ok(())
     }
 
+    /// Partii: <https://w3c.github.io/IndexedDB/#create-a-request-to-retrieve-multiple-items>
+    /// step 10 onwards, reading this store or one of its indexes. The caller has already checked
+    /// that the source exists and the transaction is active.
+    pub(crate) fn get_all_request(
+        &self,
+        cx: &mut JSContext,
+        index: Option<&IDBIndex>,
+        kind: GetAllKind,
+        arguments: GetAllArguments,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        let GetAllArguments {
+            range,
+            count,
+            direction,
+        } = arguments;
+        let index_name = index.map(|index| String::from(index.name()));
+        let request = match kind {
+            GetAllKind::Value => IDBRequest::execute_async(
+                cx,
+                self,
+                |callback| {
+                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
+                        callback,
+                        key_range: range,
+                        count,
+                        index_name,
+                        direction,
+                    })
+                },
+                None,
+                None,
+            ),
+            GetAllKind::Key => IDBRequest::execute_async(
+                cx,
+                self,
+                |callback| {
+                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
+                        callback,
+                        key_range: range,
+                        count,
+                        index_name,
+                        direction,
+                    })
+                },
+                None,
+                None,
+            ),
+            GetAllKind::Record => IDBRequest::execute_async(
+                cx,
+                self,
+                |callback| {
+                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllRecords {
+                        callback,
+                        key_range: range,
+                        count,
+                        index_name,
+                        direction,
+                    })
+                },
+                None,
+                None,
+            ),
+        }?;
+        if let Some(index) = index {
+            request.set_index_source(index);
+        }
+        Ok(request)
+    }
+
     /// Checks if the transaction is active, throwing a "TransactionInactiveError" DOMException if not.
     fn check_transaction_active(&self) -> Fallible<()> {
         // Let transaction be this object store handle's transaction.
@@ -595,6 +674,8 @@ impl IDBObjectStore {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    index_name: None,
+                    key_only,
                 })
             },
             None,
@@ -765,6 +846,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                         callback,
                         key_range: q,
+                        index_name: None,
                     })
                 },
                 None,
@@ -797,6 +879,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetKey {
                         callback,
                         key_range: q,
+                        index_name: None,
                     })
                 },
                 None,
@@ -809,76 +892,42 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
     fn GetAll(
         &self,
         cx: &mut JSContext,
-        query: HandleValue,
+        query_or_options: HandleValue,
         count: Option<u32>,
     ) -> Fallible<DomRoot<IDBRequest>> {
-        // Step 1. Let transaction be this’s transaction.
-        // Step 2. Let store be this's object store.
-        // Step 3. If store has been deleted, throw an "InvalidStateError" DOMException.
+        // Partii: <https://w3c.github.io/IndexedDB/#create-a-request-to-retrieve-multiple-items>
+        // with kind "value".
         self.verify_not_deleted()?;
-
-        // Step 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
         self.check_transaction_active()?;
-
-        // Step 5. Let range be the result of converting a value to a key range with query and true. Rethrow any exceptions.
-        let serialized_query = convert_value_to_key_range(cx, query, None);
-
-        // Step 6. Run the steps to asynchronously execute a request and return the IDBRequest created by these steps.
-        // The steps are run with this object store handle as source and the steps to retrieve a key from an object
-        // store as operation, using store and range.
-        serialized_query.and_then(|q| {
-            IDBRequest::execute_async(
-                cx,
-                self,
-                |callback| {
-                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
-                        callback,
-                        key_range: q,
-                        count,
-                    })
-                },
-                None,
-                None,
-            )
-        })
+        let arguments = get_all_arguments(cx, query_or_options, count)?;
+        self.get_all_request(cx, None, GetAllKind::Value, arguments)
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbobjectstore-getallkeys>
     fn GetAllKeys(
         &self,
         cx: &mut JSContext,
-        query: HandleValue,
+        query_or_options: HandleValue,
         count: Option<u32>,
     ) -> Fallible<DomRoot<IDBRequest>> {
-        // Step 1. Let transaction be this’s transaction.
-        // Step 2. Let store be this's object store.
-        // Step 3. If store has been deleted, throw an "InvalidStateError" DOMException.
+        // Partii: create a request to retrieve multiple items with kind "key".
         self.verify_not_deleted()?;
-
-        // Step 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
         self.check_transaction_active()?;
+        let arguments = get_all_arguments(cx, query_or_options, count)?;
+        self.get_all_request(cx, None, GetAllKind::Key, arguments)
+    }
 
-        // Step 5. Let range be the result of converting a value to a key range with query and true. Rethrow any exceptions.
-        let serialized_query = convert_value_to_key_range(cx, query, None);
-
-        // Step 6. Run the steps to asynchronously execute a request and return the IDBRequest created by these steps.
-        // The steps are run with this object store handle as source and the steps to retrieve a key from an object
-        // store as operation, using store and range.
-        serialized_query.and_then(|q| {
-            IDBRequest::execute_async(
-                cx,
-                self,
-                |callback| {
-                    AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
-                        callback,
-                        key_range: q,
-                        count,
-                    })
-                },
-                None,
-                None,
-            )
-        })
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-getallrecords>
+    fn GetAllRecords(
+        &self,
+        cx: &mut JSContext,
+        options: &IDBGetAllOptions,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        // Create a request to retrieve multiple items with kind "record".
+        self.verify_not_deleted()?;
+        self.check_transaction_active()?;
+        let arguments = get_all_options_arguments(cx, options)?;
+        self.get_all_request(cx, None, GetAllKind::Record, arguments)
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbobjectstore-count>
@@ -904,6 +953,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {
                         callback,
                         key_range: q,
+                        index_name: None,
                     })
                 },
                 None,

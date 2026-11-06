@@ -6,15 +6,18 @@ use js::context::JSContext;
 use js::conversions::ToJSValConvertible;
 use js::gc::MutableHandleValue;
 use js::rust::HandleValue;
+use profile_traits::generic_callback::GenericCallback;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::IDBIndexBinding::IDBIndexMethods;
 use script_bindings::codegen::GenericBindings::IDBTransactionBinding::IDBTransactionMode;
 use script_bindings::error::{Error, ErrorResult, Fallible};
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use script_bindings::str::DOMString;
-use storage_traits::indexeddb::{AsyncOperation, AsyncReadOnlyOperation};
+use serde::{Deserialize, Serialize};
+use storage_traits::indexeddb::{AsyncOperation, AsyncReadOnlyOperation, BackendResult};
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
+use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBGetAllOptions;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -22,9 +25,11 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::idbobjectstore::KeyPath;
 use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrIndex};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
-use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
-use crate::dom::indexeddb::idbrequest::IDBRequest;
-use crate::dom::indexeddb::key::convert_value_to_key_range;
+use crate::dom::indexeddb::idbobjectstore::{GetAllKind, IDBObjectStore};
+use crate::dom::indexeddb::idbrequest::{IDBRequest, IdbResult};
+use crate::dom::indexeddb::key::{
+    convert_value_to_key_range, get_all_arguments, get_all_options_arguments,
+};
 
 #[dom_struct]
 pub(crate) struct IDBIndex {
@@ -131,6 +136,9 @@ impl IDBIndex {
                 "Index or its object store has been deleted".to_owned(),
             )));
         }
+        // Partii: release the name borrow before running script (key range conversion).
+        let index_name = String::from(stored_name.clone());
+        drop(stored_name);
 
         // Step 3. If transaction is not active, throw a "TransactionInactiveError" DOMException.
         if !transaction.is_active() || !transaction.is_usable() {
@@ -182,12 +190,55 @@ impl IDBIndex {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    index_name: Some(index_name),
+                    key_only,
                 })
             },
             None,
             Some(iteration_param),
         )
-        .inspect(|request| cursor.set_request(request))
+        .inspect(|request| {
+            request.set_index_source(self);
+            cursor.set_request(request)
+        })
+    }
+
+    /// Partii: the checks every index read starts with. Step 1 to 4 of the IDBIndex get(),
+    /// getKey(), count() and "create a request to retrieve multiple items" algorithms: the index
+    /// and its object store exist, and the transaction is active.
+    fn check_readable(&self) -> ErrorResult {
+        self.verify_not_deleted()?;
+        let transaction = self.object_store.transaction();
+        if !transaction.is_active() || !transaction.is_usable() {
+            return Err(Error::TransactionInactive(Some(
+                "Transaction is not active".to_owned(),
+            )));
+        }
+        Ok(())
+    }
+
+    /// Partii: a get(), getKey() or count() request on this index.
+    fn read_request<T>(
+        &self,
+        cx: &mut JSContext,
+        operation: impl FnOnce(
+            GenericCallback<BackendResult<T>>,
+            Option<String>,
+        ) -> AsyncReadOnlyOperation,
+    ) -> Fallible<DomRoot<IDBRequest>>
+    where
+        T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
+    {
+        let index_name = Some(String::from(self.name()));
+        let request = IDBRequest::execute_async(
+            cx,
+            &self.object_store,
+            |callback| AsyncOperation::ReadOnly(operation(callback, index_name)),
+            None,
+            None,
+        )?;
+        request.set_index_source(self);
+        Ok(request)
     }
 }
 
@@ -277,6 +328,86 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
                 sequence.to_jsval(cx, retval);
             },
         }
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbindex-get>
+    fn Get(&self, cx: &mut JSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+        // Step 1-4. The index exists and the transaction is active.
+        self.check_readable()?;
+        // Step 5. Let range be the result of converting a value to a key range with query and
+        // true. Rethrow any exceptions.
+        let key_range = convert_value_to_key_range(cx, query, Some(true))?;
+        // Step 6. Let operation be an algorithm to run retrieve a referenced value from an index
+        // with the current Realm record, index, and range.
+        // Step 7. Return the result (an IDBRequest) of running asynchronously execute a request
+        // with this and operation.
+        self.read_request(cx, |callback, index_name| AsyncReadOnlyOperation::GetItem {
+            callback,
+            key_range,
+            index_name,
+        })
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbindex-getkey>
+    fn GetKey(&self, cx: &mut JSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+        self.check_readable()?;
+        let key_range = convert_value_to_key_range(cx, query, Some(true))?;
+        // Retrieve a value from an index: the primary key of the first record in range.
+        self.read_request(cx, |callback, index_name| AsyncReadOnlyOperation::GetKey {
+            callback,
+            key_range,
+            index_name,
+        })
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbindex-getall>
+    fn GetAll(
+        &self,
+        cx: &mut JSContext,
+        query_or_options: HandleValue,
+        count: Option<u32>,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        self.check_readable()?;
+        let arguments = get_all_arguments(cx, query_or_options, count)?;
+        self.object_store
+            .get_all_request(cx, Some(self), GetAllKind::Value, arguments)
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbindex-getallkeys>
+    fn GetAllKeys(
+        &self,
+        cx: &mut JSContext,
+        query_or_options: HandleValue,
+        count: Option<u32>,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        self.check_readable()?;
+        let arguments = get_all_arguments(cx, query_or_options, count)?;
+        self.object_store
+            .get_all_request(cx, Some(self), GetAllKind::Key, arguments)
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbindex-getallrecords>
+    fn GetAllRecords(
+        &self,
+        cx: &mut JSContext,
+        options: &IDBGetAllOptions,
+    ) -> Fallible<DomRoot<IDBRequest>> {
+        self.check_readable()?;
+        let arguments = get_all_options_arguments(cx, options)?;
+        self.object_store
+            .get_all_request(cx, Some(self), GetAllKind::Record, arguments)
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbindex-count>
+    fn Count(&self, cx: &mut JSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+        self.check_readable()?;
+        // Step 5. Let range be the result of converting a value to a key range with query.
+        let key_range = convert_value_to_key_range(cx, query, None)?;
+        self.read_request(cx, |callback, index_name| AsyncReadOnlyOperation::Count {
+            callback,
+            key_range,
+            index_name,
+        })
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbindex-opencursor>

@@ -175,6 +175,14 @@ impl IDBCursor {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#cursor-effective-object-store>
+    /// Partii: the name of the index this cursor iterates, if its source is an index.
+    fn source_index_name(&self) -> Option<String> {
+        match &self.source {
+            ObjectStoreOrIndex::ObjectStore(_) => None,
+            ObjectStoreOrIndex::Index(index) => Some(String::from(index.name())),
+        }
+    }
+
     pub(crate) fn effective_object_store(&self) -> DomRoot<IDBObjectStore> {
         match &self.source {
             ObjectStoreOrIndex::ObjectStore(store) => store.as_rooted(),
@@ -326,6 +334,8 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    index_name: self.source_index_name(),
+                    key_only: self.key_only,
                 })
             },
             Some(request),
@@ -420,6 +430,8 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    index_name: self.source_index_name(),
+                    key_only: self.key_only,
                 })
             },
             Some(request),
@@ -566,6 +578,8 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    index_name: self.source_index_name(),
+                    key_only: self.key_only,
                 })
             },
             Some(request),

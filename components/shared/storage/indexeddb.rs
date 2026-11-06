@@ -290,49 +290,95 @@ pub enum PutItemResult {
 /// <https://w3c.github.io/IndexedDB/#store-a-record-into-an-object-store> step 5.
 pub type IndexKeys = Vec<(String, Vec<IndexedDBKeyType>)>;
 
+/// Partii: <https://w3c.github.io/IndexedDB/#enumdef-idbcursordirection>, the order of the
+/// records a get all request returns.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub enum IndexedDBDirection {
+    #[default]
+    Next,
+    NextUnique,
+    Prev,
+    PrevUnique,
+}
+
+/// Partii: every read names an optional index. When `index_name` is set the request reads that
+/// index of the object store: `key_range` applies to the index keys, records come in (index key,
+/// primary key) order, and keys returned by GetKey and GetAllKeys are primary keys.
 #[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
 pub enum AsyncReadOnlyOperation {
     /// Gets the value associated with the given key in the associated idb data
     GetKey {
         callback: GenericCallback<BackendResult<Option<IndexedDBKeyType>>>,
         key_range: IndexedDBKeyRange,
+        index_name: Option<String>,
     },
     GetItem {
         callback: GenericCallback<BackendResult<Option<Vec<u8>>>>,
         key_range: IndexedDBKeyRange,
+        index_name: Option<String>,
     },
 
     GetAllKeys {
         callback: GenericCallback<BackendResult<Vec<IndexedDBKeyType>>>,
         key_range: IndexedDBKeyRange,
         count: Option<u32>,
+        index_name: Option<String>,
+        direction: IndexedDBDirection,
     },
     GetAllItems {
         callback: GenericCallback<BackendResult<Vec<Vec<u8>>>>,
         key_range: IndexedDBKeyRange,
         count: Option<u32>,
+        index_name: Option<String>,
+        direction: IndexedDBDirection,
+    },
+    /// Partii: <https://w3c.github.io/IndexedDB/#dom-idbobjectstore-getallrecords>
+    GetAllRecords {
+        callback: GenericCallback<BackendResult<Vec<IndexedDBRecord>>>,
+        key_range: IndexedDBKeyRange,
+        count: Option<u32>,
+        index_name: Option<String>,
+        direction: IndexedDBDirection,
     },
 
     Count {
         callback: GenericCallback<BackendResult<u64>>,
         key_range: IndexedDBKeyRange,
+        index_name: Option<String>,
     },
     Iterate {
         callback: GenericCallback<BackendResult<Vec<IndexedDBRecord>>>,
         key_range: IndexedDBKeyRange,
+        index_name: Option<String>,
+        /// Partii: a key cursor; the records' values are left empty.
+        key_only: bool,
     },
 }
 
 impl AsyncReadOnlyOperation {
-    fn notify_error(&self, error: BackendError) {
+    pub fn notify_error(&self, error: BackendError) {
         let _ = match self {
             Self::GetKey { callback, .. } => callback.send(Err(error)),
             Self::GetItem { callback, .. } => callback.send(Err(error)),
             Self::GetAllKeys { callback, .. } => callback.send(Err(error)),
             Self::GetAllItems { callback, .. } => callback.send(Err(error)),
+            Self::GetAllRecords { callback, .. } => callback.send(Err(error)),
             Self::Count { callback, .. } => callback.send(Err(error)),
             Self::Iterate { callback, .. } => callback.send(Err(error)),
         };
+    }
+
+    /// Partii: the index the request reads, if it doesn't read the object store itself.
+    pub fn index_name(&self) -> Option<&str> {
+        match self {
+            Self::GetKey { index_name, .. } |
+            Self::GetItem { index_name, .. } |
+            Self::GetAllKeys { index_name, .. } |
+            Self::GetAllItems { index_name, .. } |
+            Self::GetAllRecords { index_name, .. } |
+            Self::Count { index_name, .. } |
+            Self::Iterate { index_name, .. } => index_name.as_deref(),
+        }
     }
 }
 

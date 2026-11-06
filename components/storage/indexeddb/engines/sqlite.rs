@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use log::{info, warn};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, Error, OptionalExtension, params};
 use sea_query::{Condition, Expr, ExprTrait, IntoCondition, SqliteQueryBuilder};
 use sea_query_rusqlite::RusqliteBinder;
 use servo_base::threadpool::ThreadPool;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, AsyncSchemaOperation,
-    BackendError, CreateObjectResult, IndexKeys, IndexedDBIndex, IndexedDBKeyRange,
-    IndexedDBKeyType, IndexedDBRecord, IndexedDBTxnMode, KeyPath, PutItemResult,
+    BackendError, CreateObjectResult, IndexKeys, IndexedDBDirection, IndexedDBIndex,
+    IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord, IndexedDBTxnMode, KeyPath, PutItemResult,
 };
 
 use crate::indexeddb::IndexedDBDescription;
@@ -62,6 +63,60 @@ fn range_to_query(range: IndexedDBKeyRange) -> Condition {
         condition = condition.add(part);
     }
     condition
+}
+
+/// Partii: one record read from an object store or an index, with its keys still encoded.
+struct RawRecord {
+    key: Vec<u8>,
+    primary_key: Vec<u8>,
+    value: Vec<u8>,
+}
+
+/// Partii: the SQL condition ` AND column >= ? AND column < ?` for `range`; the encoded bounds go
+/// to `params`.
+fn range_condition(range: &IndexedDBKeyRange, column: &str, params: &mut Vec<SqlValue>) -> String {
+    let mut condition = String::new();
+    if let Some(lower) = &range.lower {
+        let op = if range.lower_open { ">" } else { ">=" };
+        condition.push_str(&format!(" AND {column} {op} ?"));
+        params.push(SqlValue::Blob(encoding::serialize(lower)));
+    }
+    if let Some(upper) = &range.upper {
+        let op = if range.upper_open { "<" } else { "<=" };
+        condition.push_str(&format!(" AND {column} {op} ?"));
+        params.push(SqlValue::Blob(encoding::serialize(upper)));
+    }
+    condition
+}
+
+/// Partii: the table holding the records of `index`.
+fn index_table(index: &object_store_index_model::Model) -> &'static str {
+    if index.unique_index {
+        "unique_index_data"
+    } else {
+        "index_data"
+    }
+}
+
+fn decode_key(bytes: &[u8]) -> Result<IndexedDBKeyType, Error> {
+    encoding::deserialize(bytes).ok_or_else(|| engine_error("Undecodable IndexedDB key"))
+}
+
+fn decode_records(records: Vec<RawRecord>) -> Result<Vec<IndexedDBRecord>, Error> {
+    records
+        .into_iter()
+        .map(|record| {
+            Ok(IndexedDBRecord {
+                key: decode_key(&record.key)?,
+                primary_key: decode_key(&record.primary_key)?,
+                value: record.value,
+            })
+        })
+        .collect()
+}
+
+fn backend_error(error: Error) -> BackendError {
+    BackendError::DbErr(format!("{error:?}"))
 }
 
 /// Partii: how many finished write transactions an engine remembers, so that a request batch that
@@ -290,46 +345,6 @@ impl SqliteEngine {
         Ok(connection)
     }
 
-    fn get(
-        connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-    ) -> Result<Option<object_data_model::Model>, Error> {
-        let query = range_to_query(key_range);
-        let (sql, values) = sea_query::Query::select()
-            .from(object_data_model::Column::Table)
-            .columns(vec![
-                object_data_model::Column::ObjectStoreId,
-                object_data_model::Column::Key,
-                object_data_model::Column::Data,
-            ])
-            .and_where(query.and(Expr::col(object_data_model::Column::ObjectStoreId).is(store.id)))
-            .limit(1)
-            .build_rusqlite(SqliteQueryBuilder);
-        connection
-            .prepare(&sql)?
-            .query_one(&*values.as_params(), |row| {
-                object_data_model::Model::try_from(row)
-            })
-            .optional()
-    }
-
-    fn get_key(
-        connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        Self::get(connection, store, key_range).map(|opt| opt.map(|model| model.key))
-    }
-
-    fn get_item(
-        connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        Self::get(connection, store, key_range).map(|opt| opt.map(|model| model.data))
-    }
-
     fn get_all(
         connection: &Connection,
         store: object_store_model::Model,
@@ -367,26 +382,6 @@ impl SqliteEngine {
     ) -> Result<Vec<Vec<u8>>, Error> {
         Self::get_all(connection, store, key_range, count)
             .map(|models| models.into_iter().map(|m| m.key).collect())
-    }
-
-    fn get_all_items(
-        connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-        count: Option<u32>,
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        Self::get_all(connection, store, key_range, count)
-            .map(|models| models.into_iter().map(|m| m.data).collect())
-    }
-
-    #[expect(clippy::type_complexity)]
-    fn get_all_records(
-        connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
-        Self::get_all(connection, store, key_range, None)
-            .map(|models| models.into_iter().map(|m| (m.key, m.data)).collect())
     }
 
     /// <https://w3c.github.io/IndexedDB/#store-a-record-into-an-object-store>
@@ -602,21 +597,251 @@ impl SqliteEngine {
         )
     }
 
-    fn count(
+    /// Partii: the records of the object store `store_id`, or of `index` in it, with keys in
+    /// `range`, in `direction` order, at most `count` (0 or none means all) of them. An index
+    /// record's key is its index key; its value is read from the object store record it
+    /// references. `with_values` false leaves the values empty.
+    ///
+    /// <https://w3c.github.io/IndexedDB/#retrieve-multiple-items-from-an-object-store> and
+    /// <https://w3c.github.io/IndexedDB/#retrieve-multiple-items-from-an-index>: "nextunique"
+    /// and "prevunique" keep, for each index key, the record with the lowest primary key.
+    #[allow(clippy::too_many_arguments)]
+    fn read_records(
         connection: &Connection,
-        store: object_store_model::Model,
-        key_range: IndexedDBKeyRange,
-    ) -> Result<usize, Error> {
-        let query = range_to_query(key_range);
-        let (sql, values) = sea_query::Query::select()
-            .expr(Expr::col(object_data_model::Column::Key).count())
-            .from(object_data_model::Column::Table)
-            .and_where(query.and(Expr::col(object_data_model::Column::ObjectStoreId).is(store.id)))
-            .build_rusqlite(SqliteQueryBuilder);
+        store_id: i32,
+        index: Option<&object_store_index_model::Model>,
+        range: &IndexedDBKeyRange,
+        direction: IndexedDBDirection,
+        count: Option<u32>,
+        with_values: bool,
+    ) -> Result<Vec<RawRecord>, Error> {
+        let count = count.filter(|count| *count > 0);
+        // A store has one record per key, so its unique directions are plain ones.
+        let unique = index.is_some() &&
+            matches!(
+                direction,
+                IndexedDBDirection::NextUnique | IndexedDBDirection::PrevUnique
+            );
+        let descending = match direction {
+            IndexedDBDirection::Next | IndexedDBDirection::NextUnique => false,
+            IndexedDBDirection::Prev => true,
+            // Read ascending to find each key's lowest primary key, then reverse.
+            IndexedDBDirection::PrevUnique => !unique,
+        };
+        let order = if descending { "DESC" } else { "ASC" };
+        let mut sql_params = vec![];
+        let sql = match index {
+            None => {
+                sql_params.push(SqlValue::Integer(store_id.into()));
+                let condition = range_condition(range, "key", &mut sql_params);
+                let value = if with_values { "data" } else { "x''" };
+                format!(
+                    "SELECT key, key, {value} FROM object_data \
+                     WHERE object_store_id = ?{condition} ORDER BY key {order}"
+                )
+            },
+            Some(index) => {
+                sql_params.push(SqlValue::Integer(index.id.into()));
+                let condition = range_condition(range, "i.value", &mut sql_params);
+                let table = index_table(index);
+                let (value, join) = if with_values {
+                    (
+                        "d.data",
+                        " JOIN object_data d \
+                         ON d.object_store_id = i.object_store_id AND d.key = i.object_data_key",
+                    )
+                } else {
+                    ("x''", "")
+                };
+                format!(
+                    "SELECT i.value, i.object_data_key, {value} FROM {table} i{join} \
+                     WHERE i.index_id = ?{condition} \
+                     ORDER BY i.value {order}, i.object_data_key {order}"
+                )
+            },
+        };
+        let sql = match count {
+            Some(count) if !unique => {
+                sql_params.push(SqlValue::Integer(count.into()));
+                format!("{sql} LIMIT ?")
+            },
+            _ => sql,
+        };
+        let mut statement = connection.prepare(&sql)?;
+        let mut records = statement
+            .query_map(rusqlite::params_from_iter(sql_params), |row| {
+                Ok(RawRecord {
+                    key: row.get(0)?,
+                    primary_key: row.get(1)?,
+                    value: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if unique {
+            // `dedup_by` keeps the first record of each run of equal keys.
+            records.dedup_by(|later, earlier| later.key == earlier.key);
+            if direction == IndexedDBDirection::PrevUnique {
+                records.reverse();
+            }
+            if let Some(count) = count {
+                records.truncate(count as usize);
+            }
+        }
+        Ok(records)
+    }
+
+    /// Partii: <https://w3c.github.io/IndexedDB/#count-the-records-in-a-range>, of an object
+    /// store or an index.
+    fn count_records(
+        connection: &Connection,
+        store_id: i32,
+        index: Option<&object_store_index_model::Model>,
+        range: &IndexedDBKeyRange,
+    ) -> Result<u64, Error> {
+        let mut sql_params = vec![];
+        let sql = match index {
+            None => {
+                sql_params.push(SqlValue::Integer(store_id.into()));
+                let condition = range_condition(range, "key", &mut sql_params);
+                format!("SELECT COUNT(*) FROM object_data WHERE object_store_id = ?{condition}")
+            },
+            Some(index) => {
+                sql_params.push(SqlValue::Integer(index.id.into()));
+                let condition = range_condition(range, "value", &mut sql_params);
+                let table = index_table(index);
+                format!("SELECT COUNT(*) FROM {table} WHERE index_id = ?{condition}")
+            },
+        };
         connection
-            .prepare(&sql)?
-            .query_row(&*values.as_params(), |row| row.get(0))
-            .map(|count: i64| count as usize)
+            .query_row(&sql, rusqlite::params_from_iter(sql_params), |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as u64)
+    }
+
+    /// Partii: run a read request against the object store or the index it names.
+    fn execute_read(
+        connection: &Connection,
+        store: &object_store_model::Model,
+        operation: AsyncReadOnlyOperation,
+    ) {
+        let index = match operation.index_name() {
+            None => None,
+            Some(name) => match Self::index_by_name(connection, store.id, name) {
+                Ok(Some(index)) => Some(index),
+                Ok(None) => {
+                    operation.notify_error(BackendError::DbErr(format!("No index named {name}")));
+                    return;
+                },
+                Err(error) => {
+                    operation.notify_error(BackendError::DbErr(format!("{error:?}")));
+                    return;
+                },
+            },
+        };
+        let index = index.as_ref();
+        let first = |key_range: &IndexedDBKeyRange, with_values| {
+            Self::read_records(
+                connection,
+                store.id,
+                index,
+                key_range,
+                IndexedDBDirection::Next,
+                Some(1),
+                with_values,
+            )
+            .map(|records| records.into_iter().next())
+        };
+        let all = |key_range: &IndexedDBKeyRange, direction, count, with_values| {
+            Self::read_records(
+                connection,
+                store.id,
+                index,
+                key_range,
+                direction,
+                count,
+                with_values,
+            )
+        };
+        let _ = match operation {
+            AsyncReadOnlyOperation::GetKey {
+                callback,
+                key_range,
+                ..
+            } => callback.send(
+                first(&key_range, false)
+                    .and_then(|record| {
+                        record
+                            .map(|record| decode_key(&record.primary_key))
+                            .transpose()
+                    })
+                    .map_err(backend_error),
+            ),
+            AsyncReadOnlyOperation::GetItem {
+                callback,
+                key_range,
+                ..
+            } => callback.send(
+                first(&key_range, true)
+                    .map(|record| record.map(|record| record.value))
+                    .map_err(backend_error),
+            ),
+            AsyncReadOnlyOperation::GetAllKeys {
+                callback,
+                key_range,
+                count,
+                direction,
+                ..
+            } => callback.send(
+                all(&key_range, direction, count, false)
+                    .and_then(|records| {
+                        records
+                            .iter()
+                            .map(|record| decode_key(&record.primary_key))
+                            .collect()
+                    })
+                    .map_err(backend_error),
+            ),
+            AsyncReadOnlyOperation::GetAllItems {
+                callback,
+                key_range,
+                count,
+                direction,
+                ..
+            } => callback.send(
+                all(&key_range, direction, count, true)
+                    .map(|records| records.into_iter().map(|record| record.value).collect())
+                    .map_err(backend_error),
+            ),
+            AsyncReadOnlyOperation::GetAllRecords {
+                callback,
+                key_range,
+                count,
+                direction,
+                ..
+            } => callback.send(
+                all(&key_range, direction, count, true)
+                    .and_then(decode_records)
+                    .map_err(backend_error),
+            ),
+            AsyncReadOnlyOperation::Count {
+                callback,
+                key_range,
+                ..
+            } => callback.send(
+                Self::count_records(connection, store.id, index, &key_range).map_err(backend_error),
+            ),
+            AsyncReadOnlyOperation::Iterate {
+                callback,
+                key_range,
+                key_only,
+                ..
+            } => callback.send(
+                all(&key_range, IndexedDBDirection::Next, None, !key_only)
+                    .and_then(decode_records)
+                    .map_err(backend_error),
+            ),
+        };
     }
 
     fn create_store(
@@ -856,39 +1081,8 @@ impl SqliteEngine {
                     .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                 );
             },
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
-                callback,
-                key_range,
-            }) => {
-                let _ = callback.send(
-                    Self::get_item(connection, object_store, key_range)
-                        .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                );
-            },
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
-                callback,
-                key_range,
-                count,
-            }) => {
-                let _ = callback.send(
-                    Self::get_all_keys(connection, object_store, key_range, count)
-                        .map(|keys| {
-                            keys.into_iter()
-                                .map(|k| encoding::deserialize(&k).unwrap())
-                                .collect()
-                        })
-                        .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                );
-            },
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
-                callback,
-                key_range,
-                count,
-            }) => {
-                let _ = callback.send(
-                    Self::get_all_items(connection, object_store, key_range, count)
-                        .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                );
+            AsyncOperation::ReadOnly(operation) => {
+                Self::execute_read(connection, &object_store, operation);
             },
             AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
                 callback,
@@ -899,48 +1093,9 @@ impl SqliteEngine {
                         .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                 );
             },
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {
-                callback,
-                key_range,
-            }) => {
-                let _ = callback.send(
-                    Self::count(connection, object_store, key_range)
-                        .map(|r| r as u64)
-                        .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                );
-            },
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
-                callback,
-                key_range,
-            }) => {
-                let _ = callback.send(
-                    Self::get_all_records(connection, object_store, key_range)
-                        .map(|records| {
-                            records
-                                .into_iter()
-                                .map(|(key, data)| IndexedDBRecord {
-                                    key: encoding::deserialize(&key).unwrap(),
-                                    primary_key: encoding::deserialize(&key).unwrap(),
-                                    value: data,
-                                })
-                                .collect()
-                        })
-                        .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                );
-            },
             AsyncOperation::ReadWrite(AsyncReadWriteOperation::Clear(sender)) => {
                 let _ = sender.send(
                     Self::clear(connection, object_store)
-                        .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
-                );
-            },
-            AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetKey {
-                callback,
-                key_range,
-            }) => {
-                let _ = callback.send(
-                    Self::get_key(connection, object_store, key_range)
-                        .map(|key| key.map(|k| encoding::deserialize(&k).unwrap()))
                         .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                 );
             },
@@ -1245,11 +1400,12 @@ mod tests {
     };
     use storage_traits::indexeddb::{
         AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, BackendResult,
-        CreateObjectResult, IndexKeys, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBTxnMode,
-        KeyPath, PutItemResult,
+        CreateObjectResult, IndexKeys, IndexedDBDirection, IndexedDBKeyRange, IndexedDBKeyType,
+        IndexedDBTxnMode, KeyPath, PutItemResult,
     };
     use url::Host;
 
+    use super::decode_records;
     use crate::ClientStorageThreadFactory;
     use crate::indexeddb::IndexedDBDescription;
     use crate::indexeddb::engines::sqlite::encoding;
@@ -1643,6 +1799,7 @@ mod tests {
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                             callback: get_callback(get_item_some.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(1.0)),
+                            index_name: None,
                         }),
                     },
                     KvsOperation {
@@ -1650,6 +1807,7 @@ mod tests {
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                             callback: get_callback(get_item_none.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(5.0)),
+                            index_name: None,
                         }),
                     },
                     KvsOperation {
@@ -1661,6 +1819,8 @@ mod tests {
                                 false,
                             ),
                             count: None,
+                            index_name: None,
+                            direction: Default::default(),
                         }),
                     },
                     KvsOperation {
@@ -1668,6 +1828,7 @@ mod tests {
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {
                             callback: get_callback(count.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(1.0)),
+                            index_name: None,
                         }),
                     },
                     KvsOperation {
@@ -2056,5 +2217,99 @@ mod tests {
         db.rollback_transaction(7);
         assert_eq!(record_count(&db), 0);
         assert_eq!(index_row_count(&db), 0);
+    }
+
+    /// Partii: reads through an index come in (index key, primary key) order, honour the range
+    /// and every direction, and return primary keys.
+    #[test]
+    fn test_index_get_all_order() {
+        let (_temp_dir, _proxy_map, _handle, db) = open_engine();
+        db.create_store("store", None, false).unwrap();
+        db.create_index(
+            "store",
+            "by_name".to_owned(),
+            KeyPath::String("name".to_owned()),
+            false,
+            false,
+        )
+        .unwrap();
+        for (key, name) in [(1.0, "b"), (2.0, "a"), (3.0, "b"), (4.0, "a"), (5.0, "c")] {
+            let index_keys = vec![("by_name".to_owned(), vec![string_key(name)])];
+            assert!(matches!(
+                put_with_index_keys(&db, key, index_keys, true),
+                PutItemResult::Key(_)
+            ));
+        }
+        let connection = db.connection();
+        let store = SqliteEngine::object_store_by_name(&connection, "store").unwrap();
+        let index = SqliteEngine::index_by_name(&connection, store.id, "by_name")
+            .unwrap()
+            .unwrap();
+        let read = |range: &IndexedDBKeyRange, direction, count| {
+            decode_records(
+                SqliteEngine::read_records(
+                    &connection,
+                    store.id,
+                    Some(&index),
+                    range,
+                    direction,
+                    count,
+                    true,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|record| {
+                let IndexedDBKeyType::String(name) = record.key else {
+                    panic!("index keys are strings");
+                };
+                let IndexedDBKeyType::Number(primary_key) = record.primary_key else {
+                    panic!("primary keys are numbers");
+                };
+                assert_eq!(record.value, vec![primary_key as u8]);
+                (name, primary_key)
+            })
+            .collect::<Vec<_>>()
+        };
+        let all = IndexedDBKeyRange::default();
+        let pairs = |list: &[(&str, f64)]| {
+            list.iter()
+                .map(|(name, key)| (name.to_string(), *key))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            read(&all, IndexedDBDirection::Next, None),
+            pairs(&[("a", 2.0), ("a", 4.0), ("b", 1.0), ("b", 3.0), ("c", 5.0)])
+        );
+        assert_eq!(
+            read(&all, IndexedDBDirection::Prev, None),
+            pairs(&[("c", 5.0), ("b", 3.0), ("b", 1.0), ("a", 4.0), ("a", 2.0)])
+        );
+        assert_eq!(
+            read(&all, IndexedDBDirection::NextUnique, None),
+            pairs(&[("a", 2.0), ("b", 1.0), ("c", 5.0)])
+        );
+        assert_eq!(
+            read(&all, IndexedDBDirection::PrevUnique, Some(2)),
+            pairs(&[("c", 5.0), ("b", 1.0)])
+        );
+        assert_eq!(
+            read(&all, IndexedDBDirection::Next, Some(3)),
+            pairs(&[("a", 2.0), ("a", 4.0), ("b", 1.0)])
+        );
+        let only_b = IndexedDBKeyRange::only(string_key("b"));
+        assert_eq!(
+            read(&only_b, IndexedDBDirection::Next, Some(0)),
+            pairs(&[("b", 1.0), ("b", 3.0)])
+        );
+        assert_eq!(
+            SqliteEngine::count_records(&connection, store.id, Some(&index), &only_b).unwrap(),
+            2
+        );
+        assert_eq!(
+            SqliteEngine::count_records(&connection, store.id, None, &all).unwrap(),
+            5
+        );
     }
 }

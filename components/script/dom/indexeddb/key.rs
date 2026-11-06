@@ -7,7 +7,9 @@ use std::ptr;
 
 use itertools::Itertools;
 use js::context::JSContext;
-use js::conversions::{ToJSValConvertible, jsstr_to_string};
+use js::conversions::{
+    ConversionResult as JSConversionResult, ToJSValConvertible, jsstr_to_string,
+};
 use js::jsapi::{
     ClippedTime, IsArrayBufferObject, IsDetachedArrayBufferObject, JS_GetArrayBufferViewBuffer,
     JS_GetStringLength, JS_IsArrayBufferViewObject, NewArrayObject1, PropertyKey,
@@ -20,11 +22,15 @@ use js::rust::wrappers2::{
 use js::rust::{HandleValue, MutableHandleValue};
 use js::jsapi::{GetArrayBufferViewLengthAndData, UnwrapArrayBufferView};
 use js::typedarray::{ArrayBuffer, ArrayBufferU8};
-use storage_traits::indexeddb::{BackendError, IndexedDBKeyRange, IndexedDBKeyType};
+use storage_traits::indexeddb::{
+    BackendError, IndexedDBDirection, IndexedDBKeyRange, IndexedDBKeyType,
+};
 
 use crate::dom::bindings::buffer_source::create_buffer_source;
 use crate::dom::bindings::codegen::Bindings::BlobBinding::BlobMethods;
 use crate::dom::bindings::codegen::Bindings::FileBinding::FileMethods;
+use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
+use crate::dom::bindings::codegen::Bindings::IDBObjectStoreBinding::IDBGetAllOptions;
 use crate::dom::bindings::codegen::UnionTypes::StringOrStringSequence as StrOrStringSequence;
 use crate::dom::bindings::conversions::{get_property_jsval, root_from_handlevalue};
 use crate::dom::bindings::error::Error;
@@ -927,4 +933,109 @@ pub(crate) fn index_keys_for_value(
             vec![]
         },
     }
+}
+
+/// Partii: <https://w3c.github.io/IndexedDB/#potentially-valid-key-range>. A value whose type
+/// can be a key or key range: the result does not depend on the value converting cleanly, so no
+/// getters run here.
+#[expect(unsafe_code)]
+pub(crate) fn is_potentially_valid_key_range(
+    cx: &mut JSContext,
+    value: HandleValue,
+) -> Result<bool, Error> {
+    // Step 1. If value is a key range, return true.
+    if root_from_handlevalue::<IDBKeyRange>(cx, value).is_ok() {
+        return Ok(true);
+    }
+    // Step 2. Let key be the result of converting a value to a key with value.
+    // Step 3. If key is "invalid type" return false.
+    // Step 4. Else return true.
+    if value.is_number() || value.is_string() {
+        return Ok(true);
+    }
+    if !value.is_object() {
+        return Ok(false);
+    }
+    rooted!(&in(cx) let object = value.to_object());
+    unsafe {
+        let mut is_date = false;
+        if !ObjectIsDate(cx, object.handle(), &mut is_date) {
+            return Err(Error::JSFailed);
+        }
+        if is_date || IsArrayBufferObject(*object) || JS_IsArrayBufferViewObject(*object) {
+            return Ok(true);
+        }
+        let mut is_array = false;
+        if !IsArrayObject(cx, value, &mut is_array) {
+            return Err(Error::JSFailed);
+        }
+        Ok(is_array)
+    }
+}
+
+/// Partii: the range, count and direction of a request to retrieve multiple items.
+pub(crate) struct GetAllArguments {
+    pub(crate) range: IndexedDBKeyRange,
+    pub(crate) count: Option<u32>,
+    pub(crate) direction: IndexedDBDirection,
+}
+
+pub(crate) fn to_backend_direction(direction: IDBCursorDirection) -> IndexedDBDirection {
+    match direction {
+        IDBCursorDirection::Next => IndexedDBDirection::Next,
+        IDBCursorDirection::Nextunique => IndexedDBDirection::NextUnique,
+        IDBCursorDirection::Prev => IndexedDBDirection::Prev,
+        IDBCursorDirection::Prevunique => IndexedDBDirection::PrevUnique,
+    }
+}
+
+/// Partii: <https://w3c.github.io/IndexedDB/#create-a-request-to-retrieve-multiple-items>
+/// steps 6 to 9 for getAll() and getAllKeys(), whose first argument is a query or an
+/// IDBGetAllOptions dictionary.
+pub(crate) fn get_all_arguments(
+    cx: &mut JSContext,
+    query_or_options: HandleValue,
+    count: Option<u32>,
+) -> Result<GetAllArguments, Error> {
+    // Step 8. If running is a potentially valid key range with queryOrOptions is true, then:
+    // NOTE: undefined and null keep the legacy (query, count) form too, so that a count given
+    // after them still applies; both forms read an unbounded range then.
+    if query_or_options.get().is_null_or_undefined() ||
+        is_potentially_valid_key_range(cx, query_or_options)?
+    {
+        // Step 8.1. Set range to the result of converting a value to a key range with
+        // queryOrOptions. Rethrow any exceptions.
+        let range = convert_value_to_key_range(cx, query_or_options, None)?;
+        // Step 8.2. Set direction to "next".
+        return Ok(GetAllArguments {
+            range,
+            count,
+            direction: IndexedDBDirection::Next,
+        });
+    }
+    // Step 9. Else: queryOrOptions is an IDBGetAllOptions dictionary.
+    let options = match IDBGetAllOptions::new(cx, query_or_options) {
+        Ok(JSConversionResult::Success(options)) => options,
+        Ok(JSConversionResult::Failure(error)) => return Err(Error::Type(error.into_owned())),
+        Err(()) => return Err(Error::JSFailed),
+    };
+    get_all_options_arguments(cx, &options)
+}
+
+/// Partii: <https://w3c.github.io/IndexedDB/#create-a-request-to-retrieve-multiple-items>
+/// step 9, for an IDBGetAllOptions dictionary.
+pub(crate) fn get_all_options_arguments(
+    cx: &mut JSContext,
+    options: &IDBGetAllOptions,
+) -> Result<GetAllArguments, Error> {
+    // Step 9.1. Set range to the result of converting a value to a key range with
+    // queryOrOptions["query"]. Rethrow any exceptions.
+    let range = convert_value_to_key_range(cx, options.query.handle(), None)?;
+    // Step 9.2. Set count to queryOrOptions["count"].
+    // Step 9.3. Set direction to queryOrOptions["direction"].
+    Ok(GetAllArguments {
+        range,
+        count: options.count,
+        direction: to_backend_direction(options.direction),
+    })
 }

@@ -49,6 +49,7 @@ test_interfaces([
   "IDBKeyRange",
   "IDBObjectStore",
   "IDBOpenDBRequest",
+  "IDBRecord",
   "IDBRequest",
   "IDBTransaction",
   "IDBVersionChangeEvent",

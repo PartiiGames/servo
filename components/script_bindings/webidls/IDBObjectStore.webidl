@@ -22,10 +22,11 @@ interface IDBObjectStore {
   [NewObject, Throws] IDBRequest clear();
   [NewObject, Throws] IDBRequest get(any query);
   [NewObject, Throws] IDBRequest getKey(any query);
-  [NewObject, Throws] IDBRequest getAll(optional any query,
+  [NewObject, Throws] IDBRequest getAll(optional any queryOrOptions,
                                 optional [EnforceRange] unsigned long count);
-  [NewObject, Throws] IDBRequest getAllKeys(optional any query,
+  [NewObject, Throws] IDBRequest getAllKeys(optional any queryOrOptions,
                                     optional [EnforceRange] unsigned long count);
+  [NewObject, Throws] IDBRequest getAllRecords(optional IDBGetAllOptions options = {});
   [NewObject, Throws] IDBRequest count(optional any query);
 
   [NewObject, Throws] IDBRequest openCursor(optional any query,
@@ -45,4 +46,11 @@ interface IDBObjectStore {
 dictionary IDBIndexParameters {
   boolean unique = false;
   boolean multiEntry = false;
+};
+
+// https://w3c.github.io/IndexedDB/#dictdef-idbgetalloptions
+dictionary IDBGetAllOptions {
+  any query = null;
+  [EnforceRange] unsigned long count;
+  IDBCursorDirection direction = "next";
 };
