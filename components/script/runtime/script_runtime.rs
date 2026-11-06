@@ -590,6 +590,7 @@ impl Runtime {
         parent: Option<ParentRuntime>,
         script_event_loop_sender: Option<ScriptEventLoopSender>,
     ) -> Runtime {
+        crate::dom::partiihot::run_js_thread_hook();
         let mut runtime = if let Some(parent) = parent {
             unsafe { RustRuntime::create_with_parent(parent) }
         } else {

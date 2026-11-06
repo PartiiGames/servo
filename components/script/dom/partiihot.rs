@@ -51,6 +51,21 @@ pub struct HotFunction {
 }
 
 static REGISTRY: OnceLock<HashMap<String, HotFunction>> = OnceLock::new();
+static JS_THREAD_HOOK: OnceLock<fn()> = OnceLock::new();
+
+/// Partii console sim: `hook` runs on every thread that is about to create a JS runtime (the script
+/// thread, dedicated/shared/service workers, worklets), before the runtime exists. The embedder uses it
+/// to lock JS threads out of executable memory (seccomp) while the GPU driver's threads stay free.
+/// Set once, before any page loads; later calls are ignored (returns false).
+pub fn set_js_thread_hook(hook: fn()) -> bool {
+    JS_THREAD_HOOK.set(hook).is_ok()
+}
+
+pub(crate) fn run_js_thread_hook() {
+    if let Some(hook) = JS_THREAD_HOOK.get() {
+        hook();
+    }
+}
 
 /// Registers the embedder's hot functions, by name (`"<module>.<function>"`). Call once, before any
 /// page runs; later calls are ignored (returns false).
