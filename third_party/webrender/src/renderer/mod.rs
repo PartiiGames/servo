@@ -3907,6 +3907,28 @@ impl Renderer {
             }
         }
 
+        // Partii (measurement): PARTII_WR_TARGET_PROF=1 finishes the GL around every render target
+        // and logs each target's time, kind and size for frames of 8 ms or more.
+        static TARGET_PROF: std::sync::LazyLock<bool> =
+            std::sync::LazyLock::new(|| std::env::var_os("PARTII_WR_TARGET_PROF").is_some());
+        let tprof = *TARGET_PROF;
+        let mut tlog = String::new();
+        let mut ttotal = 0.0f64;
+        let mut tmark = |device: &mut Device, label: std::fmt::Arguments, start: &mut std::time::Instant| {
+            if tprof {
+                device.gl().finish();
+                let now = std::time::Instant::now();
+                let ms = (now - *start).as_secs_f64() * 1000.0;
+                ttotal += ms;
+                tlog.push_str(&format!(" {}={:.2}", label, ms));
+                *start = now;
+            }
+        };
+        let mut tstart = std::time::Instant::now();
+        if tprof {
+            self.device.gl().finish();
+            tstart = std::time::Instant::now();
+        }
         for (_pass_index, pass) in frame.passes.iter_mut().enumerate() {
             #[cfg(not(target_os = "android"))]
             let _gm = self.gpu_profiler.start_marker(&format!("pass {}", _pass_index));
@@ -3924,6 +3946,7 @@ impl Renderer {
                         &frame.render_tasks,
                         &mut results.stats,
                     );
+                    tmark(&mut self.device, format_args!("p{}tc", _pass_index), &mut tstart);
                 }
 
                 if !pass.picture_cache.is_empty() {
@@ -3985,6 +4008,16 @@ impl Renderer {
                         &frame.render_tasks,
                         &mut results.stats,
                     );
+                    tmark(
+                        &mut self.device,
+                        format_args!(
+                            "p{}tile{}x{}",
+                            _pass_index,
+                            picture_target.dirty_rect.width(),
+                            picture_target.dirty_rect.height()
+                        ),
+                        &mut tstart,
+                    );
 
                     // Native OS surfaces must be unbound at the end of drawing to them
                     if let ResolvedSurfaceTexture::Native { .. } = picture_target.surface {
@@ -4009,6 +4042,8 @@ impl Renderer {
                     &frame.render_tasks,
                     &mut results.stats,
                 );
+                let u = target.used_rect.map_or((0, 0), |r| (r.width(), r.height()));
+                tmark(&mut self.device, format_args!("p{}a{}x{}", _pass_index, u.0, u.1), &mut tstart);
             }
 
             for target in &pass.color.targets {
@@ -4018,6 +4053,12 @@ impl Renderer {
                     target,
                     &frame.render_tasks,
                     &mut results.stats,
+                );
+                let u = target.used_rect.map_or((0, 0), |r| (r.width(), r.height()));
+                tmark(
+                    &mut self.device,
+                    format_args!("p{}c{}x{}/{}", _pass_index, u.0, u.1, target.alpha_batch_containers.len()),
+                    &mut tstart,
                 );
             }
 
@@ -4038,6 +4079,10 @@ impl Renderer {
             results,
             present_mode,
         );
+        tmark(&mut self.device, format_args!("composite"), &mut tstart);
+        if tprof && ttotal >= 8.0 {
+            eprintln!("partii-wr-targets total={:.2}{}", ttotal, tlog);
+        }
 
         frame.has_been_rendered = true;
 
