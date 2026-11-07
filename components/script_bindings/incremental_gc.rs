@@ -979,7 +979,17 @@ mod tests {
                 let done = black_remark(cx.raw_cx(), Some((weak_stack_roots, ptr::null_mut())));
                 assert!(done.edges >= 1, "the black remark shaded the held object");
             }
-            FinishIncrementalGC(cx, GCReason::API);
+            // Budgeted slices to the end, not FinishIncrementalGC: SpiderMonkey sets isIncremental
+            // per slice from its budget, and the zeal 11 validator only runs when sweeping starts
+            // in an incremental (budgeted) slice.
+            let mut rest = 0;
+            while IsIncrementalGCInProgress(cx) && rest < 1_000_000 {
+                IncrementalGCSlice(cx, GCReason::API, &work_budget(10_000));
+                rest += 1;
+            }
+            if IsIncrementalGCInProgress(cx) {
+                FinishIncrementalGC(cx, GCReason::API);
+            }
             let finalized = WEAK_FINALIZED.load(Ordering::SeqCst);
             assert_eq!(held.get(), weak);
             WEAK_CX.store(ptr::null_mut(), Ordering::SeqCst);
