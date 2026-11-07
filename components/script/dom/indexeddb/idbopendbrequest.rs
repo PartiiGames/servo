@@ -12,7 +12,7 @@ use script_bindings::reflector::reflect_dom_object_with_cx;
 use servo_base::generic_channel::GenericSend;
 use servo_url::origin::ImmutableOrigin;
 use storage_traits::client_storage::StorageProxyMap;
-use storage_traits::indexeddb::{BackendResult, IndexedDBThreadMsg, SyncOperation};
+use storage_traits::indexeddb::{BackendError, BackendResult, IndexedDBThreadMsg, SyncOperation};
 use stylo_atoms::Atom;
 use uuid::Uuid;
 
@@ -249,7 +249,8 @@ impl IDBOpenDBRequest {
         let callback = GenericCallback::new(move |message| {
             let response_listener = response_listener.clone();
             task_source.queue(task!(request_callback: move |cx| {
-                response_listener.handle_delete_db(cx, message.unwrap());
+                // A reply that didn't arrive whole fails the request rather than crash the page.
+                response_listener.handle_delete_db(cx, message.unwrap_or(Err(BackendError::Abort)));
             }))
         })
         .expect("Could not create delete database callback");

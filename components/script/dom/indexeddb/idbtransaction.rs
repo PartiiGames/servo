@@ -159,7 +159,10 @@ impl IDBTransaction {
         }
     }
 
-    /// Does a blocking call to create a backend transaction and get its id.
+    /// Does a blocking call to create a backend transaction and get its id. Fails with
+    /// "InvalidStateError" when the backend has no such database any more (it was deleted while
+    /// this connection was open): the connection is as good as closed, and
+    /// <https://w3c.github.io/IndexedDB/#dom-idbdatabase-transaction> throws then.
     pub fn new(
         cx: &mut JSContext,
         global: &GlobalScope,
@@ -167,9 +170,10 @@ impl IDBTransaction {
         mode: IDBTransactionMode,
         durability: IDBTransactionDurability,
         scope: &DOMStringList,
-    ) -> DomRoot<IDBTransaction> {
-        let serial_number = IDBTransaction::create_transaction(global, connection, mode, scope);
-        IDBTransaction::new_with_serial(
+    ) -> Fallible<DomRoot<IDBTransaction>> {
+        let serial_number = IDBTransaction::create_transaction(global, connection, mode, scope)
+            .map_err(|_| Error::InvalidState(None))?;
+        Ok(IDBTransaction::new_with_serial(
             cx,
             global,
             connection,
@@ -177,7 +181,7 @@ impl IDBTransaction {
             durability,
             scope,
             serial_number,
-        )
+        ))
     }
 
     pub(crate) fn new_with_serial(
@@ -207,7 +211,7 @@ impl IDBTransaction {
         connection: &IDBDatabase,
         mode: IDBTransactionMode,
         scope: &DOMStringList,
-    ) -> u64 {
+    ) -> BackendResult<u64> {
         let backend_mode = match mode {
             IDBTransactionMode::Readonly => IndexedDBTxnMode::Readonly,
             IDBTransactionMode::Readwrite => IndexedDBTxnMode::Readwrite,
@@ -231,7 +235,8 @@ impl IDBTransaction {
             }))
             .expect("Failed to send IndexedDBThreadMsg::Sync");
 
-        receiver.recv().unwrap().expect("CreateTransaction failed")
+        // No reply (the backend thread is gone) counts as no database.
+        receiver.recv().unwrap_or(Err(BackendError::DbNotFound))
     }
 
     /// <https://w3c.github.io/IndexedDB/#transaction-lifecycle>

@@ -16,7 +16,7 @@ use servo_base::generic_channel::GenericSend;
 use servo_url::origin::ImmutableOrigin;
 use storage_traits::client_storage::{StorageIdentifier, StorageProxyMap, StorageType};
 use storage_traits::indexeddb::{
-    BackendResult, ConnectionMsg, DatabaseInfo, IndexedDBThreadMsg, SyncOperation,
+    BackendError, BackendResult, ConnectionMsg, DatabaseInfo, IndexedDBThreadMsg, SyncOperation,
 };
 use stylo_atoms::Atom;
 use uuid::Uuid;
@@ -679,7 +679,9 @@ impl IDBFactoryMethods<crate::DomTypeHolder> for IDBFactory {
             .database_access_task_source()
             .to_sendable();
         let callback = GenericCallback::new(move |message| {
-            let result: BackendResult<Vec<DatabaseInfo>> = message.unwrap();
+            // A reply that didn't arrive whole rejects the promise rather than crash the page.
+            let result: BackendResult<Vec<DatabaseInfo>> =
+                message.unwrap_or(Err(BackendError::Abort));
             let Some(trusted_promise) = trusted_promise.take() else {
                 return error!("Callback for `DataBases` called twice.");
             };
