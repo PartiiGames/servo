@@ -561,8 +561,7 @@ mod tests {
     unsafe fn trace_heap(trc: *mut JSTracer, heap: &Heap<*mut JSObject>) {
         unsafe { crate::trace::trace_object(trc, "field", heap) };
     }
-    /// How often owner1's trace hook ran: marked isn't scanned (a marked object can wait on the
-    /// mark stack), and the move is only a hazard once owner1's fields have been traced.
+    /// How often owner1's trace hook ran: the control run checks that the GC never traced it.
     static OWNER1_TRACES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     unsafe extern "C" fn trace_owner1(trc: *mut JSTracer, _: *mut JSObject) {
@@ -613,10 +612,10 @@ mod tests {
         oOps: ptr::null(),
     };
 
-    /// owner1 is rooted (scanned early); owner2 sits at the end of a long chain (scanned late)
-    /// and holds the child. Mid-mark the child moves from owner2's Rust field to owner1's with no
-    /// barrier. With the black remark between slices the child survives; without it (the control
-    /// run) it is normally collected, which shows the test exercises the hazard.
+    /// owner2 sits at the end of a long chain (marked late) and holds the child in a Rust field.
+    /// Mid-mark, owner1 is created (allocated black, never traced by this GC) and the child moves
+    /// from owner2's field to owner1's with no barrier. Without the black remark (the control run)
+    /// the child is lost; with it, it survives.
     #[test]
     fn black_remark_catches_a_moved_edge() {
         if !cfg!(partii_gc_shim) {
@@ -653,13 +652,10 @@ mod tests {
                 // it) is garbage now; collect it before the flag is reset.
                 JS_GC(cx, GCReason::API);
                 CHILD_FINALIZED.store(false, Ordering::SeqCst);
-                rooted!(&in(cx) let owner1 = JS_NewObject(cx, &OWNER1_CLASS));
                 rooted!(&in(cx) let mut owner2 = JS_NewObject(cx, &OWNER2_CLASS));
                 let child = JS_NewObject(cx, &CHILD_CLASS);
-                OWNER1.with(|h| h.set(owner1.get()));
                 OWNER2.with(|h| h.set(owner2.get()));
                 FIELD2.with(|h| h.set(child));
-                OWNER1.with(|h| SLOT1.with(|s| register(h, s)));
                 OWNER2.with(|h| SLOT2.with(|s| register(h, s)));
 
                 // owner2 at the end of a 20000-object chain, reachable only through it.
@@ -692,21 +688,29 @@ mod tests {
                 // late (roots are marked in the first slice, the chain one budget at a time).
                 o2.set(js::jsval::UndefinedValue());
                 PrepareForFullGC(cx);
-                let traces_before = OWNER1_TRACES.load(Ordering::SeqCst);
                 StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
-                // A few slices in: owner1 marked, the chain (and so owner2) not reached yet.
+                // A few slices in: the chain (and so owner2) not reached yet.
                 let owner2_ptr = OWNER2.with(|h| h.get());
                 let mut slices = 0;
-                while IsIncrementalGCInProgress(cx)
-                    && OWNER1_TRACES.load(Ordering::SeqCst) == traces_before
-                    && slices < 100_000
-                {
+                while IsIncrementalGCInProgress(cx) && slices < 5 {
                     IncrementalGCSlice(cx, GCReason::API, &work_budget(100));
                     slices += 1;
                 }
                 assert!(
                     IsIncrementalGCInProgress(cx),
                     "the GC ended before the move ({slices} slices)"
+                );
+                // owner1 is created mid-mark, like a DOM object made while a GC is marking: it is
+                // allocated black and its trace hook is never run by this GC (snapshot at the
+                // beginning). So a Rust edge moved into it unbarriered is never seen, unless the
+                // black remark traces it.
+                let traces_before = OWNER1_TRACES.load(Ordering::SeqCst);
+                rooted!(&in(cx) let owner1 = JS_NewObject(cx, &OWNER1_CLASS));
+                OWNER1.with(|h| h.set(owner1.get()));
+                OWNER1.with(|h| SLOT1.with(|s| register(h, s)));
+                assert!(
+                    is_marked_any(owner1.get()),
+                    "allocated black during marking"
                 );
                 let owner2_reached = is_marked_any(owner2_ptr);
                 // The move, with no barrier on either side.
@@ -721,6 +725,13 @@ mod tests {
                     );
                 }
                 FinishIncrementalGC(cx, GCReason::API);
+                if !with_remark {
+                    assert_eq!(
+                        OWNER1_TRACES.load(Ordering::SeqCst),
+                        traces_before,
+                        "the GC traced owner1 after all (not allocated black?)"
+                    );
+                }
                 let died = CHILD_FINALIZED.load(Ordering::SeqCst);
                 outcomes.push((with_remark, owner2_reached, died, slices));
                 if died {
