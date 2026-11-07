@@ -689,6 +689,18 @@ mod tests {
                 o2.set(js::jsval::UndefinedValue());
                 PrepareForFullGC(cx);
                 StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
+                // The first slices can still be preparing (the background unmark task), before
+                // anything is marked or allocated black. Wait, one unit at a time, until a fresh
+                // tenured object comes out black: marking has started.
+                let mut prepare_slices = 0;
+                while IsIncrementalGCInProgress(cx)
+                    && !is_marked_any(JS_NewObject(cx, &FILLER_CLASS))
+                    && prepare_slices < 100_000
+                {
+                    std::thread::sleep(std::time::Duration::from_micros(20));
+                    IncrementalGCSlice(cx, GCReason::API, &work_budget(1));
+                    prepare_slices += 1;
+                }
                 // A few slices in: the chain (and so owner2) not reached yet.
                 let owner2_ptr = OWNER2.with(|h| h.get());
                 let mut slices = 0;
@@ -708,10 +720,13 @@ mod tests {
                 rooted!(&in(cx) let owner1 = JS_NewObject(cx, &OWNER1_CLASS));
                 OWNER1.with(|h| h.set(owner1.get()));
                 OWNER1.with(|h| SLOT1.with(|s| register(h, s)));
-                assert!(
-                    is_marked_any(owner1.get()),
-                    "allocated black during marking"
-                );
+                if !is_marked_any(owner1.get()) {
+                    // Finish first: unwinding mid-GC crashes the runtime's teardown.
+                    FinishIncrementalGC(cx, GCReason::API);
+                    panic!(
+                        "owner1 was not allocated black ({prepare_slices} prepare slices, {slices} slices)"
+                    );
+                }
                 let owner2_reached = is_marked_any(owner2_ptr);
                 // The move, with no barrier on either side.
                 let moved =
