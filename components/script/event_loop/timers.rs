@@ -19,8 +19,9 @@ use js::rust::HandleValue;
 use js::rust::wrappers2::JS_GetScriptedCallerPrivate;
 use net_traits::request::ParserMetadata;
 use rustc_hash::FxHashMap;
-use script_bindings::callback::{RootedCallback, TracedCallback};
+use script_bindings::callback::{HasCallbackHolder, RootedCallback, TracedCallback};
 use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::DomObject;
 use serde::{Deserialize, Serialize};
 use servo_base::id::PipelineId;
 use servo_config::pref;
@@ -303,6 +304,7 @@ impl OneshotTimers {
             script_bindings::incremental_gc::barrier_traceable(&timer);
             timers.insert(insertion_index, timer);
         }
+        self.partii_check("schedule");
 
         if self.is_next_timer(new_handle) {
             self.schedule_timer_call();
@@ -330,7 +332,40 @@ impl OneshotTimers {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#timer-initialisation-steps>
+    /// Diagnosis (PARTII_GC_TIMER_CHECK=1): panics if a timer function in this list, or this
+    /// list's global, is unmarked in a zone being swept: the moment an incremental GC lost it,
+    /// rather than the crash a GC later.
+    fn partii_check(&self, site: &str) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("PARTII_GC_TIMER_CHECK").as_deref() == Ok("1")) {
+            return;
+        }
+        let global = self.global_scope.reflector().get_jsobject().get();
+        let global_dying = script_bindings::incremental_gc::dying(global);
+        let (marking, sweeping) = script_bindings::incremental_gc::flags();
+        let timers = self.timers.borrow();
+        for (i, timer) in timers.iter().enumerate() {
+            if let OneshotTimerCallback::JsTimer(ref task) = timer.callback {
+                if let InternalTimerCallback::FunctionTimerCallback(ref f, _) = task.callback {
+                    let obj = f.callback_holder().get();
+                    if global_dying || script_bindings::incremental_gc::dying(obj) {
+                        panic!(
+                            "partii-gc-timer-check: {site}: timer {i}/{} (handle {:?}, interval {}) \
+                             function {obj:p} dying {}, global {global:p} dying {global_dying}, \
+                             marking {marking}, sweeping {sweeping}",
+                            timers.len(),
+                            timer.handle,
+                            task.is_interval == IsInterval::Interval,
+                            script_bindings::incremental_gc::dying(obj),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn fire_timer(&self, id: TimerEventId, cx: &mut JSContext) {
+        self.partii_check("fire");
         // Step 9.2. If id does not exist in global's map of setTimeout and setInterval IDs, then abort these steps.
         let expected_id = self.expected_event_id.get();
         if expected_id != id {

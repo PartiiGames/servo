@@ -89,6 +89,17 @@ unsafe fn IsAboutToBeFinalized(_: *mut JSObject) -> bool {
     false
 }
 
+/// Diagnosis (PARTII_GC_TIMER_CHECK): whether `obj` is unmarked in a zone being swept, whatever
+/// our flags say (the zone's state decides; false outside a sweep).
+pub fn dying(obj: *mut JSObject) -> bool {
+    !obj.is_null() && unsafe { IsAboutToBeFinalized(obj) }
+}
+
+/// Diagnosis: the barrier flags (marking, sweeping) as this thread has them.
+pub fn flags() -> (bool, bool) {
+    (MARKING.with(Cell::get), SWEEPING.with(Cell::get))
+}
+
 /// Whether `obj` is dead and only waiting for its zone's sweep to finalize it (possible only while
 /// an incremental GC sweeps in slices). One TLS load otherwise.
 #[inline]
