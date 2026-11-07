@@ -648,6 +648,7 @@ pub(crate) unsafe fn init_runtime(
             );
         }
         RAW_CX.with(|c| c.set(raw));
+        incremental_gc::set_context(raw);
         if budget_layout_ok() {
             // SpiderMonkey's own slices: the black remark first, then its budget.
             SetCreateGCSliceBudgetCallback(cx, Some(sm_slice_budget));

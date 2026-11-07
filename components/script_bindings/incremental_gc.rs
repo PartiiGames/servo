@@ -42,6 +42,8 @@ thread_local! {
     static MARKING: Cell<bool> = const { Cell::new(false) };
     /// Whether an incremental GC is sweeping and the mutator is running (between slices).
     static SWEEPING: Cell<bool> = const { Cell::new(false) };
+    /// This thread's context, for `barrier_traceable`'s tracer (set by `set_context`).
+    static CONTEXT: Cell<*mut js::jsapi::JSContext> = const { Cell::new(std::ptr::null_mut()) };
     /// Every registered reflector's object slot, and its registry index slot (for swap-remove).
     static REGISTRY: RefCell<Vec<(*const Heap<*mut JSObject>, *const Cell<usize>)>> =
         const { RefCell::new(Vec::new()) };
@@ -99,6 +101,34 @@ pub fn about_to_be_finalized(obj: *mut JSObject) -> bool {
 pub fn expose(obj: *mut JSObject) {
     if !obj.is_null() && MARKING.with(Cell::get) {
         unsafe { js::jsapi::JS::IncrementalPreWriteBarrier(obj) }
+    }
+}
+
+/// The context `barrier_traceable` uses on this thread. Called when the thread's runtime is set up.
+pub fn set_context(cx: *mut js::jsapi::JSContext) {
+    CONTEXT.with(|c| c.set(cx));
+}
+
+/// The pre-write barrier for Rust edges: shades every GC thing `t` holds, if an incremental GC is
+/// marking. For Rust code that moves JS edges out of a traced container, the way SpiderMonkey's
+/// barrier covers an overwritten JS edge: if the container wasn't scanned yet, its old edges must
+/// still be marked (snapshot at the beginning), wherever they go. A new root is no help, since this
+/// GC scanned its roots at the start.
+pub fn barrier_traceable<T: js::gc::Traceable + ?Sized>(t: &T) {
+    if !MARKING.with(Cell::get) || !black_remark_available() {
+        return;
+    }
+    let cx = CONTEXT.with(Cell::get);
+    if cx.is_null() {
+        return;
+    }
+    unsafe {
+        let trc = partii_barrier_tracer_new(cx);
+        if trc.is_null() {
+            return;
+        }
+        t.trace(trc);
+        partii_barrier_tracer_finish(trc);
     }
 }
 
