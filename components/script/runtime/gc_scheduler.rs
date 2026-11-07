@@ -234,7 +234,8 @@ thread_local! {
     /// Between GC_CYCLE_BEGIN and GC_CYCLE_END. SpiderMonkey also calls the gray-roots hook outside a
     /// GC, from `finishRoots` when a runtime is destroyed, with a tracer that crashes on any edge.
     static IN_CYCLE: Cell<bool> = const { Cell::new(false) };
-    /// Set when a slice of the current GC ends: script may have run since marking began.
+    /// Set when a slice of the current GC ends after marking began: script may have run since the
+    /// roots were marked. (Slices that end while the GC is still preparing don't count.)
     static YIELDED: Cell<bool> = const { Cell::new(false) };
     /// This thread's context, for SpiderMonkey's slice-budget callback (which gets none).
     static RAW_CX: Cell<*mut RawJSContext> = const { Cell::new(std::ptr::null_mut()) };
@@ -820,7 +821,9 @@ unsafe extern "C" fn slice_callback(
             }
         },
         GCProgress::GC_SLICE_END => {
-            YIELDED.with(|y| y.set(true));
+            if !incremental_gc::gc_preparing() {
+                YIELDED.with(|y| y.set(true));
+            }
             if let Some(began) = SM_SLICE_BEGAN.with(Cell::take) {
                 let pause = began.elapsed();
                 SM_SLICES.with(|s| {

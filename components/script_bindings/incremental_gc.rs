@@ -177,6 +177,23 @@ pub fn registered() -> usize {
     REGISTRY.with(|r| r.borrow().len())
 }
 
+/// Whether the GC in progress is still preparing (its zones in the Prepare state: roots not
+/// marked yet), judged from the zone of this thread's first registered reflector. False when it
+/// can't tell (no shim, no reflector, or that zone not in this GC), so callers stay conservative.
+/// Call between slices or from a slice callback, not while the heap is busy.
+pub fn gc_preparing() -> bool {
+    const ZONE_PREPARE: u32 = 1;
+    let obj = REGISTRY.with(|r| {
+        r.borrow()
+            .first()
+            .map(|&(heap, _)| unsafe { (*heap).get() })
+    });
+    match obj {
+        Some(obj) if !obj.is_null() => unsafe { partii_zone_gc_state(obj) == ZONE_PREPARE },
+        _ => false,
+    }
+}
+
 // SpiderMonkey's chunk layout (js/public/HeapAPI.h, SM 153), to read a tenured cell's mark bits.
 const CHUNK_MASK: usize = (1 << 20) - 1;
 const CHUNK_KIND_OFFSET: usize = 16;
@@ -241,11 +258,10 @@ unsafe extern "C" {
     fn partii_barrier_tracer_finish(trc: *mut JSTracer) -> usize;
     fn partii_barrier_tracer_layout(out: *mut usize);
     fn partii_trace_stack_roots(cx: *mut js::jsapi::JSContext, trc: *mut JSTracer);
-    #[cfg(test)]
     fn partii_zone_gc_state(obj: *mut JSObject) -> u32;
 }
 
-#[cfg(all(test, not(partii_gc_shim)))]
+#[cfg(not(partii_gc_shim))]
 unsafe fn partii_zone_gc_state(_: *mut JSObject) -> u32 {
     0
 }
