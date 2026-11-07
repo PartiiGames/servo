@@ -35,6 +35,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{AsHandleValue, Dom};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::csp::CspReporting;
 use crate::dom::document::RefreshRedirectDue;
 use crate::dom::eventsource::EventSourceTimeoutCallback;
@@ -348,7 +349,10 @@ impl OneshotTimers {
 
         // select timers to run to prevent firing timers
         // that were installed during fire of another timer
-        let mut timers_to_run = Vec::new();
+        // Rooted: a TracedCallback is not rooted on its own, so a timer taken out of self.timers must
+        // stay traced until it runs. An earlier timer's script can run a GC (a whole one, or the
+        // slice that ends marking), and an unrooted function waiting here would be collected.
+        let mut timers_to_run = RootedTraceableBox::new(Vec::new());
 
         loop {
             let mut timers = self.timers.borrow_mut();
@@ -360,7 +364,8 @@ impl OneshotTimers {
             timers_to_run.push(timers.pop_back().unwrap());
         }
 
-        for timer in timers_to_run {
+        timers_to_run.reverse();
+        while let Some(timer) = timers_to_run.pop() {
             // Since timers can be coalesced together inside a task,
             // this loop can keep running, including after an interrupt of the JS,
             // and prevent a clean-shutdown of a JS-running thread.
