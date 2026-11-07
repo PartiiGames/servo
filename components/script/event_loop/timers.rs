@@ -361,7 +361,11 @@ impl OneshotTimers {
                 break;
             }
 
-            timers_to_run.push(timers.pop_back().unwrap());
+            // Taken out of self.timers, which an incremental GC may not have scanned yet: shade it,
+            // as it is no longer where that GC will look (timers_to_run is a root it already scanned).
+            let timer = timers.pop_back().unwrap();
+            script_bindings::incremental_gc::barrier_traceable(&timer);
+            timers_to_run.push(timer);
         }
 
         timers_to_run.reverse();
