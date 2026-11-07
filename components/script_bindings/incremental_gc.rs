@@ -857,4 +857,200 @@ mod tests {
             );
         }
     }
+
+    // The weak upgrade: an object only a weak edge leads to, upgraded into a root while marking
+    // runs, as `WeakRef::root` does into a `DomRoot` (Servo's stack roots, which the black remark
+    // traces through `ROOTS_TRACER`; here a `rooted!` local, traced through the JS stack roots).
+    static WEAK_FINALIZED: AtomicBool = AtomicBool::new(false);
+    unsafe extern "C" fn finalize_weak(_: *mut GCContext, _: *mut JSObject) {
+        WEAK_FINALIZED.store(true, Ordering::SeqCst);
+    }
+    static WEAK_OPS: JSClassOps = ops(finalize_weak);
+    static WEAK_CLASS: JSClass = JSClass {
+        name: c"IncrementalGcWeak".as_ptr(),
+        flags: JSCLASS_FOREGROUND_FINALIZE,
+        cOps: &WEAK_OPS,
+        spec: ptr::null(),
+        ext: ptr::null(),
+        oOps: ptr::null(),
+    };
+    static WEAK_CX: std::sync::atomic::AtomicPtr<js::jsapi::JSContext> =
+        std::sync::atomic::AtomicPtr::new(ptr::null_mut());
+    unsafe extern "C" fn weak_stack_roots(trc: *mut JSTracer, _: *mut std::os::raw::c_void) {
+        unsafe { trace_stack_roots(WEAK_CX.load(Ordering::SeqCst), trc) };
+    }
+    /// Set in the child process that runs the control (no remark) under the zeal 11 validator.
+    const WEAK_CHILD_ENV: &str = "PARTII_WEAK_UPGRADE_CHILD";
+    const VALIDATOR_FAILED: &str = "Incremental marking verification failed";
+
+    /// One incremental GC with an object that only a weak edge reaches, upgraded into a root in
+    /// mid-mark. With `with_remark` the black remark runs before the next slice, as the scheduler
+    /// does before every slice. Returns whether the upgraded object was finalized (it is still
+    /// held, so true is a use-after-free in waiting).
+    fn weak_upgrade_mid_mark(with_remark: bool) -> bool {
+        let engine = engine();
+        let mut runtime = Runtime::new(engine.handle());
+        let cx = runtime.cx();
+        enable();
+        unsafe {
+            rooted!(&in(cx) let global = JS_NewGlobalObject(
+                cx,
+                &SIMPLE_GLOBAL_CLASS,
+                ptr::null_mut(),
+                OnNewGlobalHookOption::FireOnNewGlobalHook,
+                &*RealmOptions::default(),
+            ));
+            let mut realm = AutoRealm::new_from_handle(cx, global.handle());
+            let cx = &mut realm;
+            WEAK_CX.store(cx.raw_cx(), Ordering::SeqCst);
+            JS_SetGCParameter(cx, JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED, 1);
+
+            // A long chain from the global, so marking takes many slices.
+            rooted!(&in(cx) let mut chain = js::jsval::UndefinedValue());
+            let options = CompileOptionsWrapper::new(cx, c"chain".to_owned(), 1);
+            assert!(evaluate_script(
+                cx,
+                global.handle(),
+                "var h = {}, c = h; for (var i = 0; i < 20000; i++) { c.n = {}; c = c.n; } globalThis.chain = h; 0",
+                chain.handle_mut(),
+                options,
+            )
+            .is_ok());
+            JS_GC(cx, GCReason::API);
+            WEAK_FINALIZED.store(false, Ordering::SeqCst);
+            // The weakly held object: no strong edge, made before the GC (so not allocated black).
+            let weak: *mut JSObject = JS_NewObject(cx, &WEAK_CLASS);
+
+            PrepareForFullGC(cx);
+            StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
+            const MARK_BLACK_ONLY: u32 = 2;
+            const MARK_BLACK_AND_GRAY: u32 = 3;
+            let mut prepare_slices = 0;
+            while IsIncrementalGCInProgress(cx)
+                && !matches!(
+                    partii_zone_gc_state(global.get()),
+                    MARK_BLACK_ONLY | MARK_BLACK_AND_GRAY
+                )
+                && prepare_slices < 100_000
+            {
+                std::thread::sleep(std::time::Duration::from_micros(20));
+                if !IsIncrementalGCInProgress(cx) {
+                    break;
+                }
+                IncrementalGCSlice(cx, GCReason::API, &work_budget(1));
+                prepare_slices += 1;
+            }
+            let mut slices = 0;
+            while IsIncrementalGCInProgress(cx) && slices < 3 {
+                IncrementalGCSlice(cx, GCReason::API, &work_budget(100));
+                slices += 1;
+            }
+            let marking = IsIncrementalGCInProgress(cx)
+                && matches!(
+                    partii_zone_gc_state(global.get()),
+                    MARK_BLACK_ONLY | MARK_BLACK_AND_GRAY
+                );
+            let weak_marked = is_marked_any(weak);
+            if !marking || weak_marked {
+                FinishIncrementalGC(cx, GCReason::API);
+                panic!(
+                    "no mid-mark window: marking {marking}, weak object marked {weak_marked} ({prepare_slices} prepare slices, {slices} slices)"
+                );
+            }
+            // The upgrade: the weak edge's target goes into a root that marking already scanned.
+            rooted!(&in(cx) let held = weak);
+            if with_remark {
+                let done = black_remark(cx.raw_cx(), Some((weak_stack_roots, ptr::null_mut())));
+                assert!(done.edges >= 1, "the black remark shaded the held object");
+            }
+            FinishIncrementalGC(cx, GCReason::API);
+            let finalized = WEAK_FINALIZED.load(Ordering::SeqCst);
+            assert_eq!(held.get(), weak);
+            WEAK_CX.store(ptr::null_mut(), Ordering::SeqCst);
+            finalized
+        }
+    }
+
+    /// The control for `weak_upgrade_mid_mark_survives_remark`, run by it in a child process.
+    #[test]
+    #[ignore = "run by weak_upgrade_mid_mark_survives_remark in a child process"]
+    fn weak_upgrade_mid_mark_control() {
+        if std::env::var_os(WEAK_CHILD_ENV).is_none() {
+            return;
+        }
+        let finalized = weak_upgrade_mid_mark(false);
+        println!("partii-weak-control: finalized {finalized}");
+    }
+
+    /// A WeakRef upgraded mid-mark survives, and the zeal 11 validator (a full non-incremental
+    /// mark at the end of marking, compared with the incremental one) agrees. The control, with
+    /// no remark, runs in a child process: under zeal 11 the validator must abort it (so the
+    /// hazard is real and the validator really runs in this build); without zeal (release
+    /// SpiderMonkey) the held object must be finalized instead. PARTII_REQUIRE_ZEAL=1 makes a
+    /// build without the validator a failure.
+    #[test]
+    fn weak_upgrade_mid_mark_survives_remark() {
+        if !cfg!(partii_gc_shim) {
+            eprintln!(
+                "weak_upgrade_mid_mark_survives_remark: skipped, built without the barrier tracer shim"
+            );
+            return;
+        }
+        assert!(
+            black_remark_available(),
+            "the shim was built but the black remark is off"
+        );
+        let require_zeal = std::env::var("PARTII_REQUIRE_ZEAL").is_ok_and(|v| v == "1");
+        let name = format!(
+            "{}::weak_upgrade_mid_mark_control",
+            module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, rest)| rest)
+        );
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                name.as_str(),
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(WEAK_CHILD_ENV, "1")
+            .env("JS_GC_ZEAL", "11")
+            .output()
+            .expect("run the control child");
+        let out = String::from_utf8_lossy(&child.stdout);
+        let err = String::from_utf8_lossy(&child.stderr);
+        let validator = err.contains(VALIDATOR_FAILED) || out.contains(VALIDATOR_FAILED);
+        let control_finalized = out.contains("partii-weak-control: finalized true");
+        eprintln!(
+            "weak_upgrade_mid_mark_survives_remark: control child {}, validator abort {validator}, control finalized {control_finalized}",
+            child.status
+        );
+        if validator {
+            assert!(
+                !child.status.success(),
+                "the validator failed but the control exited 0"
+            );
+        } else {
+            assert!(
+                child.status.success() && control_finalized,
+                "the control neither hit the validator nor lost the upgraded object, so the test shows nothing (status {}):\n{out}\n{}",
+                child.status,
+                err.lines().rev().take(20).collect::<Vec<_>>().join("\n")
+            );
+            assert!(
+                !require_zeal,
+                "PARTII_REQUIRE_ZEAL=1 but the validator did not run in the control (no JS_GC_ZEAL in this build?)"
+            );
+        }
+        // The real run, with the same zeal mode: the validator runs here too when it is built in.
+        // Set before the engine starts (each nextest test is its own process).
+        unsafe { std::env::set_var("JS_GC_ZEAL", "11") };
+        let finalized = weak_upgrade_mid_mark(true);
+        assert!(
+            !finalized,
+            "the object upgraded mid-mark was finalized despite the black remark"
+        );
+    }
 }
