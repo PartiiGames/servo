@@ -658,7 +658,7 @@ mod tests {
                 OWNER2.with(|h| SLOT2.with(|s| register(h, s)));
 
                 // owner2 at the end of a 20000-object chain, reachable only through it.
-                rooted!(&in(cx) let o2 = js::jsval::ObjectValue(owner2.get()));
+                rooted!(&in(cx) let mut o2 = js::jsval::ObjectValue(owner2.get()));
                 assert!(js::rust::wrappers2::JS_SetProperty(
                     cx,
                     global.handle().into(),
@@ -683,13 +683,16 @@ mod tests {
                     "the child is reachable before the GC"
                 );
 
+                // Only the chain leads to owner2 now: no root holds it, so marking reaches it
+                // late (roots are marked in the first slice, the chain one budget at a time).
+                o2.set(js::jsval::UndefinedValue());
                 PrepareForFullGC(cx);
                 StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
                 // A few slices in: owner1 marked, the chain (and so owner2) not reached yet.
                 let owner2_ptr = OWNER2.with(|h| h.get());
                 let mut slices = 0;
                 while IsIncrementalGCInProgress(cx)
-                    && !(is_marked_any(owner1.get()) && slices >= 50)
+                    && !(is_marked_any(owner1.get()) && slices >= 5)
                     && slices < 100_000
                 {
                     IncrementalGCSlice(cx, GCReason::API, &work_budget(100));
@@ -727,12 +730,19 @@ mod tests {
             eprintln!(
                 "black_remark_catches_a_moved_edge: (remark, owner2 reached before the move, child died, slices) = {outcomes:?}"
             );
+            // The hazard must be real for the test to mean anything: in both runs marking hadn't
+            // reached owner2 when the child moved, and without the remark the child was lost.
+            assert!(
+                outcomes
+                    .iter()
+                    .all(|(_, owner2_reached, _, _)| !owner2_reached),
+                "marking reached owner2 before the move, so the move was no hazard: {outcomes:?}"
+            );
             let (_, _, control_died, _) = outcomes[0];
-            if !control_died {
-                eprintln!(
-                    "warning: the control run's child survived without the remark; the move wasn't a hazard this time"
-                );
-            }
+            assert!(
+                control_died,
+                "without the remark the moved child survived, so the test can't show the remark matters: {outcomes:?}"
+            );
             let (_, _, died, _) = outcomes[1];
             assert!(
                 !died,
