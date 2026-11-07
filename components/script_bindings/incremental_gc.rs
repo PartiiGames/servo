@@ -229,6 +229,7 @@ unsafe extern "C" {
     fn partii_barrier_tracer_new(cx: *mut js::jsapi::JSContext) -> *mut JSTracer;
     fn partii_barrier_tracer_finish(trc: *mut JSTracer) -> usize;
     fn partii_barrier_tracer_layout(out: *mut usize);
+    fn partii_trace_stack_roots(cx: *mut js::jsapi::JSContext, trc: *mut JSTracer);
     #[cfg(test)]
     fn partii_zone_gc_state(obj: *mut JSObject) -> u32;
 }
@@ -240,6 +241,9 @@ unsafe fn partii_zone_gc_state(_: *mut JSObject) -> u32 {
 
 #[cfg(not(partii_gc_shim))]
 unsafe fn partii_barrier_tracer_layout(_: *mut usize) {}
+
+#[cfg(not(partii_gc_shim))]
+unsafe fn partii_trace_stack_roots(_: *mut js::jsapi::JSContext, _: *mut JSTracer) {}
 
 #[cfg(not(partii_gc_shim))]
 unsafe fn partii_barrier_tracer_new(_: *mut js::jsapi::JSContext) -> *mut JSTracer {
@@ -295,6 +299,19 @@ pub unsafe fn black_remark(
             edges,
         }
     }
+}
+
+/// Traces this thread's JS stack roots and AutoGCRooters with `trc` (a black-remark tracer):
+/// the `Rooted<T>`s that `rooted!` makes, which SpiderMonkey scans only when a GC starts. A value
+/// taken out of a traced container into one of them while marking runs is covered by this.
+///
+/// # Safety
+/// `cx` is this thread's context; `trc` comes from the black remark; not inside a GC slice.
+pub unsafe fn trace_stack_roots(cx: *mut js::jsapi::JSContext, trc: *mut JSTracer) {
+    if cx.is_null() || trc.is_null() || !black_remark_available() {
+        return;
+    }
+    unsafe { partii_trace_stack_roots(cx, trc) };
 }
 
 /// Re-traces the Rust fields of every registered reflector that is marked, with `trc`. Returns

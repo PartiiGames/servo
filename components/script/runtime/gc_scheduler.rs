@@ -109,6 +109,9 @@ struct Config {
     /// The black remark before each slice (on unless `PARTII_GC_BLACK_REMARK=0`, a diagnosis switch;
     /// split sweeping needs it, so it is off then too).
     black_remark: bool,
+    /// The black remark also re-traces the JS stack roots (`rooted!` locals): on unless
+    /// `PARTII_GC_REMARK_STACK=0`.
+    remark_stack: bool,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -149,6 +152,7 @@ fn config() -> &'static Config {
             Ok("1")
         ),
         black_remark: !matches!(std::env::var("PARTII_GC_BLACK_REMARK").as_deref(), Ok("0")),
+        remark_stack: !matches!(std::env::var("PARTII_GC_REMARK_STACK").as_deref(), Ok("0")),
     })
 }
 
@@ -687,7 +691,8 @@ fn black_remark_before_slice(cx: *mut RawJSContext) {
         return;
     }
     let started = Instant::now();
-    let roots: Option<(RootsTracer, *mut c_void)> = Some((remark_roots, std::ptr::null_mut()));
+    let roots: Option<(RootsTracer, *mut c_void)> =
+        Some((black_remark_roots, std::ptr::null_mut()));
     let done = unsafe { incremental_gc::black_remark(cx, roots) };
     let took = started.elapsed();
     BLACK_REMARKS.with(|b| {
@@ -704,6 +709,17 @@ unsafe extern "C" fn remark_roots(trc: *mut JSTracer, _: *mut c_void) {
         unsafe { roots(trc, data) };
     }
     unsafe { js::gc::trace_traceables(trc, std::ptr::null_mut()) };
+}
+
+/// The black remark's roots: `remark_roots`, plus the JS stack roots. A `rooted!` local is a JS
+/// stack root, scanned when the GC started; one filled from a traced container since then (a
+/// `take()` or `mem::take` into `rooted!`) is in neither scan. Black remark only: the gray-roots
+/// tracer runs inside a GC slice, where SpiderMonkey traces the stack roots itself.
+unsafe extern "C" fn black_remark_roots(trc: *mut JSTracer, data: *mut c_void) {
+    unsafe { remark_roots(trc, data) };
+    if config().remark_stack {
+        unsafe { incremental_gc::trace_stack_roots(RAW_CX.with(Cell::get), trc) };
+    }
 }
 
 /// SpiderMonkey's slice-budget callback, for the slices it runs by itself (heap idle here): the

@@ -64,4 +64,14 @@ uint32_t partii_zone_gc_state(JSObject* obj) {
   return JS::shadow::Zone::from(JS::GetObjectZone(obj))->gcState();
 }
 
+// Traces this thread's JS stack roots (every JS::Rooted, the Rooted<Traceable>s that mozjs's
+// rooted! makes for Rust values among them) and AutoGCRooters with trc. SpiderMonkey scans these
+// once, when a GC starts; a value moved off the heap into one while that GC marks is otherwise
+// seen by neither the heap scan nor the root scan.
+void partii_trace_stack_roots(JSContext* cx, JSTracer* trc) {
+  JS::RootingContext* rcx = JS::RootingContext::get(cx);
+  rcx->traceStackRoots(trc);
+  rcx->traceAllGCRooters(trc);
+}
+
 }  // extern "C"
