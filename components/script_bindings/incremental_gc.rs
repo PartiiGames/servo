@@ -199,6 +199,13 @@ unsafe extern "C" {
     fn partii_barrier_tracer_new(cx: *mut js::jsapi::JSContext) -> *mut JSTracer;
     fn partii_barrier_tracer_finish(trc: *mut JSTracer) -> usize;
     fn partii_barrier_tracer_layout(out: *mut usize);
+    #[cfg(test)]
+    fn partii_zone_gc_state(obj: *mut JSObject) -> u32;
+}
+
+#[cfg(all(test, not(partii_gc_shim)))]
+unsafe fn partii_zone_gc_state(_: *mut JSObject) -> u32 {
+    0
 }
 
 #[cfg(not(partii_gc_shim))]
@@ -690,14 +697,24 @@ mod tests {
                 PrepareForFullGC(cx);
                 StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
                 // The first slices can still be preparing (the background unmark task), before
-                // anything is marked or allocated black. Wait, one unit at a time, until a fresh
-                // tenured object comes out black: marking has started.
+                // anything is marked or allocated black. Wait for marking without allocating:
+                // when that task finishes it asks for a slice, and the next allocation would run
+                // that slice itself, with a time budget that can mark everything (or end the GC).
+                // The explicit slices below then clear any such request before owner1 is made.
+                const MARK_BLACK_ONLY: u32 = 2;
+                const MARK_BLACK_AND_GRAY: u32 = 3;
                 let mut prepare_slices = 0;
                 while IsIncrementalGCInProgress(cx)
-                    && !is_marked_any(JS_NewObject(cx, &FILLER_CLASS))
+                    && !matches!(
+                        partii_zone_gc_state(global.get()),
+                        MARK_BLACK_ONLY | MARK_BLACK_AND_GRAY
+                    )
                     && prepare_slices < 100_000
                 {
                     std::thread::sleep(std::time::Duration::from_micros(20));
+                    if !IsIncrementalGCInProgress(cx) {
+                        break;
+                    }
                     IncrementalGCSlice(cx, GCReason::API, &work_budget(1));
                     prepare_slices += 1;
                 }

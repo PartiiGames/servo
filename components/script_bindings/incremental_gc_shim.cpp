@@ -12,6 +12,7 @@
 #include "js/GCAPI.h"
 #include "js/HeapAPI.h"
 #include "js/TracingAPI.h"
+#include "js/shadow/Zone.h"
 
 namespace {
 
@@ -54,6 +55,13 @@ size_t partii_barrier_tracer_finish(JSTracer* trc) {
 void partii_barrier_tracer_layout(size_t* out) {
   out[0] = sizeof(JSTracer);
   out[1] = alignof(JSTracer);
+}
+
+// The GC state of obj's zone (JS::shadow::Zone::GCState: 2 and 3 are marking). Lets the tests
+// wait for marking without allocating: an allocation can run a whole GC slice of its own when a
+// background GC task has asked for one.
+uint32_t partii_zone_gc_state(JSObject* obj) {
+  return JS::shadow::Zone::from(JS::GetObjectZone(obj))->gcState();
 }
 
 }  // extern "C"
