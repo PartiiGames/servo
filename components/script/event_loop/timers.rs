@@ -297,6 +297,10 @@ impl OneshotTimers {
         {
             let mut timers = self.timers.borrow_mut();
             let insertion_index = timers.binary_search(&timer).err().unwrap();
+            // Partii: the insertion barrier. The timer comes from a Rust local (an interval being
+            // rescheduled after its call, a new setTimeout); if this Document is already marked,
+            // an incremental GC would not look at it again.
+            script_bindings::incremental_gc::barrier_traceable(&timer);
             timers.insert(insertion_index, timer);
         }
 
@@ -400,6 +404,7 @@ impl OneshotTimers {
                         };
                         let mut timers = self.timers.borrow_mut();
                         let idx = timers.binary_search(&rein).err().unwrap();
+                        script_bindings::incremental_gc::barrier_traceable(&rein);
                         timers.insert(idx, rein);
                         continue;
                     }
@@ -871,6 +876,10 @@ impl JsTimerTask {
             // Step 9.5. If handler is a Function, then invoke handler given arguments and
             // "report", and with callback this value set to thisArg.
             InternalTimerCallback::FunctionTimerCallback(ref function, ref arguments) => {
+                // Partii: this task is a Rust local now, which no GC root covers. Shade the
+                // arguments (the function is shaded by its read barrier when it is called), or an
+                // incremental GC that began since the timer left its list could free them first.
+                script_bindings::incremental_gc::barrier_traceable(arguments);
                 let arguments = self.collect_heap_args(arguments);
                 rooted!(&in(cx) let mut value: JSVal);
                 let _ = function.Call_(cx, global, arguments, value.handle_mut(), Report);

@@ -192,7 +192,12 @@ impl<D: DomTypes> CallbackObject<D> {
     }
 
     pub fn get(&self) -> *mut JSObject {
-        self.callback.get()
+        let callback = self.callback.get();
+        // Partii: the read barrier, as for reflectors. Script reaches a callback's object only
+        // through here; a callback held in a Rust local that no GC root covers (a timer being
+        // run, a callback taken off its list) is then marked if an incremental GC is marking.
+        crate::incremental_gc::expose(callback);
+        callback
     }
 
     #[expect(unsafe_code)]
