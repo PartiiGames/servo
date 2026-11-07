@@ -704,6 +704,9 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
                 let Some(callback) = &this.blob_callbacks.borrow_mut().remove(&callback_id) else {
                     return error!("Expected blob callback, but found none!");
                 };
+                // Partii: the callback is off the traced map, and making the Blob below can run a
+                // GC slice: shade it, or an incremental GC marking now could free it first.
+                script_bindings::incremental_gc::barrier_traceable(callback);
 
                 let Some(mut snapshot) = result else {
                     let _ = callback.Call__(cx, None, ExceptionHandling::Report);
