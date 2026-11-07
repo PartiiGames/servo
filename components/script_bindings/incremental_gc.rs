@@ -337,12 +337,40 @@ mod tests {
 
     static LIVE_OPS: JSClassOps = ops(finalize_live);
     static DEAD_OPS: JSClassOps = ops(finalize_dead);
+    static FILLER_OPS: JSClassOps = ops(finalize_filler);
+
+    unsafe extern "C" fn finalize_filler(_: *mut GCContext, _: *mut JSObject) {}
+
+    /// SpiderMonkey initializes once per process and can't be initialized again after shutdown,
+    /// so the engine tests share one (leaked) engine, and run one at a time (they share statics).
+    fn engine() -> (js::rust::JSEngineHandle, std::sync::MutexGuard<'static, ()>) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static ENGINE: std::sync::OnceLock<js::rust::JSEngineHandle> = std::sync::OnceLock::new();
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let handle = ENGINE
+            .get_or_init(|| {
+                let engine = JSEngine::init().unwrap();
+                let handle = engine.handle();
+                std::mem::forget(engine);
+                handle
+            })
+            .clone();
+        (handle, guard)
+    }
 
     // Foreground-finalized, like every DOM class (codegen.py).
     static LIVE_CLASS: JSClass = JSClass {
         name: c"IncrementalGcLive".as_ptr(),
         flags: JSCLASS_FOREGROUND_FINALIZE,
         cOps: &LIVE_OPS,
+        spec: ptr::null(),
+        ext: ptr::null(),
+        oOps: ptr::null(),
+    };
+    static FILLER_CLASS: JSClass = JSClass {
+        name: c"IncrementalGcFiller".as_ptr(),
+        flags: JSCLASS_FOREGROUND_FINALIZE,
+        cOps: &FILLER_OPS,
         spec: ptr::null(),
         ext: ptr::null(),
         oOps: ptr::null(),
@@ -416,8 +444,8 @@ mod tests {
     /// a reachable one never is. (`WeakRef::root` returns None exactly when this is true.)
     #[test]
     fn about_to_be_finalized_while_sweeping_in_slices() {
-        let engine = JSEngine::init().unwrap();
-        let mut runtime = Runtime::new(engine.handle());
+        let (engine, _serial) = engine();
+        let mut runtime = Runtime::new(engine);
         let cx = runtime.cx();
         unsafe {
             rooted!(&in(cx) let global = JS_NewGlobalObject(
@@ -432,7 +460,16 @@ mod tests {
             JS_SetGCParameter(cx, JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED, 1);
 
             rooted!(&in(cx) let live = JS_NewObject(cx, &LIVE_CLASS));
+            // Unreachable fillers of the same alloc kind on both sides of the dead object, so
+            // finalizing that kind spans many slices and the dead one is seen between two of them
+            // (otherwise the slice that starts sweeping the zone can finalize it before yielding).
+            for _ in 0..10_000 {
+                JS_NewObject(cx, &FILLER_CLASS);
+            }
             rooted!(&in(cx) let mut dead = JS_NewObject(cx, &DEAD_CLASS));
+            for _ in 0..10_000 {
+                JS_NewObject(cx, &FILLER_CLASS);
+            }
             // Tenure both (the roots are updated to where they moved).
             JS_GC(cx, GCReason::API);
             let dead_ptr = dead.get();
@@ -552,8 +589,8 @@ mod tests {
             );
             return;
         }
-        let engine = JSEngine::init().unwrap();
-        let mut runtime = Runtime::new(engine.handle());
+        let (engine, _serial) = engine();
+        let mut runtime = Runtime::new(engine);
         let cx = runtime.cx();
         enable();
         unsafe {
