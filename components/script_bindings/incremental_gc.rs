@@ -174,13 +174,35 @@ pub unsafe fn is_marked_any(obj: *mut JSObject) -> bool {
 
 /// Whether the C++ barrier tracer was built (it needs SpiderMonkey's headers, which mozjs_sys's
 /// prebuilt archive lacks). Without it `black_remark` does nothing and sweeping in slices is off.
-pub const BLACK_REMARK: bool = cfg!(partii_gc_shim);
+/// It is also off when the shim's headers disagree with the linked SpiderMonkey on `JSTracer`'s
+/// layout (headers from another configuration): checked once per process.
+pub fn black_remark_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        if !cfg!(partii_gc_shim) {
+            return false;
+        }
+        let mut layout = [0usize; 2];
+        unsafe { partii_barrier_tracer_layout(layout.as_mut_ptr()) };
+        let rust = [size_of::<JSTracer>(), align_of::<JSTracer>()];
+        if layout != rust {
+            eprintln!(
+                "[gc-sched] black remark off: the shim's headers see JSTracer as {layout:?} (size, align), the linked SpiderMonkey as {rust:?}"
+            );
+        }
+        layout == rust
+    })
+}
 
 #[cfg(partii_gc_shim)]
 unsafe extern "C" {
     fn partii_barrier_tracer_new(cx: *mut js::jsapi::JSContext) -> *mut JSTracer;
     fn partii_barrier_tracer_finish(trc: *mut JSTracer) -> usize;
+    fn partii_barrier_tracer_layout(out: *mut usize);
 }
+
+#[cfg(not(partii_gc_shim))]
+unsafe fn partii_barrier_tracer_layout(_: *mut usize) {}
 
 #[cfg(not(partii_gc_shim))]
 unsafe fn partii_barrier_tracer_new(_: *mut js::jsapi::JSContext) -> *mut JSTracer {
@@ -218,6 +240,9 @@ pub unsafe fn black_remark(
     )>,
 ) -> BlackRemark {
     unsafe {
+        if !black_remark_available() {
+            return BlackRemark::default();
+        }
         let trc = partii_barrier_tracer_new(cx);
         if trc.is_null() {
             return BlackRemark::default();
@@ -583,7 +608,7 @@ mod tests {
     /// run) it is normally collected, which shows the test exercises the hazard.
     #[test]
     fn black_remark_catches_a_moved_edge() {
-        if !BLACK_REMARK {
+        if !black_remark_available() {
             eprintln!(
                 "black_remark_catches_a_moved_edge: skipped, built without the barrier tracer shim"
             );

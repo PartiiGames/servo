@@ -48,4 +48,12 @@ size_t partii_barrier_tracer_finish(JSTracer* trc) {
   return edges;
 }
 
+// sizeof and alignof JSTracer as these headers see it. The Rust side compares them with the
+// bindgen layout of the mozjs_sys actually linked, so headers from a different SpiderMonkey
+// configuration than the linked library turn the black remark off instead of corrupting memory.
+void partii_barrier_tracer_layout(size_t* out) {
+  out[0] = sizeof(JSTracer);
+  out[1] = alignof(JSTracer);
+}
+
 }  // extern "C"
