@@ -116,6 +116,11 @@ struct Config {
     /// neither from our driver nor from the slice-budget callback (GC zeal's, for one). On with
     /// incremental marking (`PARTII_GC_INCREMENTAL=1`) unless `PARTII_GC_REMARK_AT_SLICE=0`.
     remark_at_slice: bool,
+    /// The gray-roots remark also runs in a GC that never yielded to script before sweeping (one
+    /// slice, such as `JS_GC` from `Window::suspend`): off unless `PARTII_GC_REMARK_UNYIELDED=1`.
+    /// Nothing can have moved a Rust edge behind marking's back there, so the remark only costs
+    /// (6-8 ms per GC on idb-gc-loop, gc-5 release soak 83e8353c).
+    remark_unyielded: bool,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -160,6 +165,10 @@ fn config() -> &'static Config {
         remark_at_slice: !matches!(
             std::env::var("PARTII_GC_REMARK_AT_SLICE").as_deref(),
             Ok("0")
+        ),
+        remark_unyielded: matches!(
+            std::env::var("PARTII_GC_REMARK_UNYIELDED").as_deref(),
+            Ok("1")
         ),
     })
 }
@@ -225,6 +234,8 @@ thread_local! {
     /// Between GC_CYCLE_BEGIN and GC_CYCLE_END. SpiderMonkey also calls the gray-roots hook outside a
     /// GC, from `finishRoots` when a runtime is destroyed, with a tracer that crashes on any edge.
     static IN_CYCLE: Cell<bool> = const { Cell::new(false) };
+    /// Set when a slice of the current GC ends: script may have run since marking began.
+    static YIELDED: Cell<bool> = const { Cell::new(false) };
     /// This thread's context, for SpiderMonkey's slice-budget callback (which gets none).
     static RAW_CX: Cell<*mut RawJSContext> = const { Cell::new(std::ptr::null_mut()) };
     /// Black remarks in the current GC: count, edges shaded, longest, total.
@@ -760,6 +771,14 @@ unsafe extern "C" fn gray_roots(
     if !incremental_sweep() && sm_slices() && !budget.is_null() {
         unsafe { unlimit_budget(budget) };
     }
+    if !YIELDED.with(Cell::get) && !config().remark_unyielded {
+        // Marked in one slice with no script in between: the roots and Rust fields were all
+        // traced with nothing moving them, so there is nothing to remark.
+        if config().log {
+            eprintln!("[gc-sched] remark skipped: the GC never yielded before sweeping");
+        }
+        return true;
+    }
     unsafe { remark_roots(trc, std::ptr::null_mut()) };
     let (registered, traced) = unsafe { incremental_gc::remark(trc) };
     if config().log {
@@ -781,12 +800,16 @@ unsafe extern "C" fn slice_callback(
             incremental_gc::set_marking(false);
             incremental_gc::set_sweeping(false);
             SWEEP_STARTED.with(|s| s.set(false));
+            YIELDED.with(|y| y.set(false));
         },
         GCProgress::GC_SLICE_BEGIN => {
             // A slice of a GC already marking that had no remark: GC zeal's slices, for one, take
             // a work budget of their own (GCRuntime::runDebugGC), not the slice-budget callback's.
             // The heap is not busy yet here (the slice's GC session starts after this callback).
-            if !REMARKED.with(|r| r.replace(false)) && config().incremental && config().remark_at_slice {
+            if !REMARKED.with(|r| r.replace(false))
+                && config().incremental
+                && config().remark_at_slice
+            {
                 black_remark_before_slice(cx);
             }
             REMARKED.with(|r| r.set(false));
@@ -797,6 +820,7 @@ unsafe extern "C" fn slice_callback(
             }
         },
         GCProgress::GC_SLICE_END => {
+            YIELDED.with(|y| y.set(true));
             if let Some(began) = SM_SLICE_BEGAN.with(Cell::take) {
                 let pause = began.elapsed();
                 SM_SLICES.with(|s| {
