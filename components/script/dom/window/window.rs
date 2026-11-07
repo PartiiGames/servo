@@ -3784,8 +3784,10 @@ impl Window {
                 break;
             };
             // Partii: the callback is off the traced list now and IdleDeadline::new can run a GC
-            // slice: shade it, or an incremental GC marking now could free it before the call.
+            // slice: shade it for a GC already marking, and root it for one that marks its roots
+            // later, or an incremental GC could free it before the call.
             script_bindings::incremental_gc::barrier_traceable(&callback);
+            rooted!(&in(cx) let callback = callback);
             ran = true;
             let mut realm = enter_auto_realm(cx, self);
             let cx = &mut realm.current_realm();
@@ -3810,8 +3812,10 @@ impl Window {
         else {
             return;
         };
-        // Partii: off the traced lists, with an allocation before the call: shade it (as above).
+        // Partii: off the traced lists, with an allocation before the call: shade and root it
+        // (as above).
         script_bindings::incremental_gc::barrier_traceable(&callback);
+        rooted!(&in(cx) let callback = callback);
         let mut realm = enter_auto_realm(cx, self);
         let cx = &mut realm.current_realm();
         let idle_deadline = IdleDeadline::new(cx, self, Instant::now(), true);
