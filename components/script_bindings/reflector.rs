@@ -21,6 +21,10 @@ use crate::{DomTypes, JSTraceable};
 
 pub trait AssociatedMemorySize: Default {
     fn size(&self) -> usize;
+    /// The size of the reflected object recorded when the reflector was initialized, if kept.
+    fn base(&self) -> Option<usize> {
+        None
+    }
 }
 
 impl AssociatedMemorySize for () {
@@ -29,12 +33,20 @@ impl AssociatedMemorySize for () {
     }
 }
 
+/// The extra size, and the object size recorded at `init_reflector` (0 until then). Keeping the
+/// latter lets `update_memory_size` be called through an inner struct that shares the outer
+/// object's reflector (OffscreenCanvasRenderingContext2D wraps CanvasRenderingContext2D): its own
+/// `size_of` differs from the reflected type's, and SpiderMonkey's debug build checks that every
+/// RemoveAssociatedMemory matches what was added.
 #[derive(Default, MallocSizeOf)]
-pub struct AssociatedMemory(Cell<usize>);
+pub struct AssociatedMemory(Cell<usize>, Cell<usize>);
 
 impl AssociatedMemorySize for AssociatedMemory {
     fn size(&self) -> usize {
         self.0.get()
+    }
+    fn base(&self) -> Option<usize> {
+        Some(self.1.get()).filter(|b| *b != 0)
     }
 }
 
@@ -117,7 +129,10 @@ impl<T: AssociatedMemorySize> Reflector<T> {
     }
 
     pub fn rust_size<D>(&self, _: &D) -> usize {
-        size_of::<D>() + size_of::<Box<D>>() + self.size.size()
+        self.size
+            .base()
+            .unwrap_or(size_of::<D>() + size_of::<Box<D>>())
+            + self.size.size()
     }
 
     /// This function should be called from finalize of the DOM objects
@@ -204,6 +219,7 @@ impl MutDomObject for Reflector<()> {
 
 impl MutDomObject for Reflector<AssociatedMemory> {
     unsafe fn init_reflector<D>(&self, obj: *mut JSObject) {
+        self.size.1.set(size_of::<D>() + size_of::<Box<D>>());
         unsafe {
             js::jsapi::AddAssociatedMemory(
                 obj,
