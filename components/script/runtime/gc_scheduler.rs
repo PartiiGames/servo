@@ -112,6 +112,10 @@ struct Config {
     /// The black remark also re-traces the JS stack roots (`rooted!` locals): on unless
     /// `PARTII_GC_REMARK_STACK=0`.
     remark_stack: bool,
+    /// The black remark also runs when a slice begins without one: slices whose budget comes
+    /// neither from our driver nor from the slice-budget callback (GC zeal's, for one). On unless
+    /// `PARTII_GC_REMARK_AT_SLICE=0`.
+    remark_at_slice: bool,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -153,6 +157,10 @@ fn config() -> &'static Config {
         ),
         black_remark: !matches!(std::env::var("PARTII_GC_BLACK_REMARK").as_deref(), Ok("0")),
         remark_stack: !matches!(std::env::var("PARTII_GC_REMARK_STACK").as_deref(), Ok("0")),
+        remark_at_slice: !matches!(
+            std::env::var("PARTII_GC_REMARK_AT_SLICE").as_deref(),
+            Ok("0")
+        ),
     })
 }
 
@@ -226,6 +234,9 @@ thread_local! {
     static OUR_SLICE: Cell<bool> = const { Cell::new(false) };
     /// When SpiderMonkey's own slice in progress began.
     static SM_SLICE_BEGAN: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// Set by the black remark, cleared when a slice begins: whether the slice about to begin has
+    /// had its remark (from our driver or the slice-budget callback).
+    static REMARKED: Cell<bool> = const { Cell::new(false) };
     /// SpiderMonkey's own slices in the current GC: count, longest, total.
     static SM_SLICES: Cell<(u32, Duration, Duration)> =
         const { Cell::new((0, Duration::ZERO, Duration::ZERO)) };
@@ -694,6 +705,7 @@ fn black_remark_before_slice(cx: *mut RawJSContext) {
     let roots: Option<(RootsTracer, *mut c_void)> =
         Some((black_remark_roots, std::ptr::null_mut()));
     let done = unsafe { incremental_gc::black_remark(cx, roots) };
+    REMARKED.with(|r| r.set(true));
     let took = started.elapsed();
     BLACK_REMARKS.with(|b| {
         let (n, edges, max, total) = b.get();
@@ -771,6 +783,13 @@ unsafe extern "C" fn slice_callback(
             SWEEP_STARTED.with(|s| s.set(false));
         },
         GCProgress::GC_SLICE_BEGIN => {
+            // A slice of a GC already marking that had no remark: GC zeal's slices, for one, take
+            // a work budget of their own (GCRuntime::runDebugGC), not the slice-budget callback's.
+            // The heap is not busy yet here (the slice's GC session starts after this callback).
+            if !REMARKED.with(|r| r.replace(false)) && config().remark_at_slice {
+                black_remark_before_slice(cx);
+            }
+            REMARKED.with(|r| r.set(false));
             incremental_gc::set_marking(false);
             incremental_gc::set_sweeping(false);
             if !OUR_SLICE.with(Cell::get) {
