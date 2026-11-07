@@ -113,8 +113,8 @@ struct Config {
     /// `PARTII_GC_REMARK_STACK=0`.
     remark_stack: bool,
     /// The black remark also runs when a slice begins without one: slices whose budget comes
-    /// neither from our driver nor from the slice-budget callback (GC zeal's, for one). On unless
-    /// `PARTII_GC_REMARK_AT_SLICE=0`.
+    /// neither from our driver nor from the slice-budget callback (GC zeal's, for one). On with
+    /// incremental marking (`PARTII_GC_INCREMENTAL=1`) unless `PARTII_GC_REMARK_AT_SLICE=0`.
     remark_at_slice: bool,
 }
 
@@ -786,7 +786,7 @@ unsafe extern "C" fn slice_callback(
             // A slice of a GC already marking that had no remark: GC zeal's slices, for one, take
             // a work budget of their own (GCRuntime::runDebugGC), not the slice-budget callback's.
             // The heap is not busy yet here (the slice's GC session starts after this callback).
-            if !REMARKED.with(|r| r.replace(false)) && config().remark_at_slice {
+            if !REMARKED.with(|r| r.replace(false)) && config().incremental && config().remark_at_slice {
                 black_remark_before_slice(cx);
             }
             REMARKED.with(|r| r.set(false));
