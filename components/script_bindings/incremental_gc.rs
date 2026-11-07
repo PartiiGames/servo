@@ -375,20 +375,12 @@ mod tests {
     }
 
     /// SpiderMonkey initializes once per process and can't be initialized again after shutdown,
-    /// so the engine tests share one (leaked) engine, and run one at a time (they share statics).
-    fn engine() -> (js::rust::JSEngineHandle, std::sync::MutexGuard<'static, ()>) {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        static ENGINE: std::sync::OnceLock<js::rust::JSEngineHandle> = std::sync::OnceLock::new();
-        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let handle = ENGINE
-            .get_or_init(|| {
-                let engine = JSEngine::init().unwrap();
-                let handle = engine.handle();
-                std::mem::forget(engine);
-                handle
-            })
-            .clone();
-        (handle, guard)
+    /// so these tests need a process each: run them with cargo-nextest
+    /// (`cargo nextest run -p servo-script-bindings incremental_gc`). Each test inits the engine
+    /// and drops its runtime, then the engine, before it returns (a full shutdown).
+    fn engine() -> JSEngine {
+        JSEngine::init()
+            .expect("SpiderMonkey already initialized: run these tests with cargo-nextest")
     }
 
     // Foreground-finalized, like every DOM class (codegen.py).
@@ -477,8 +469,8 @@ mod tests {
     /// a reachable one never is. (`WeakRef::root` returns None exactly when this is true.)
     #[test]
     fn about_to_be_finalized_while_sweeping_in_slices() {
-        let (engine, _serial) = engine();
-        let mut runtime = Runtime::new(engine);
+        let engine = engine();
+        let mut runtime = Runtime::new(engine.handle());
         let cx = runtime.cx();
         unsafe {
             rooted!(&in(cx) let global = JS_NewGlobalObject(
@@ -634,8 +626,8 @@ mod tests {
             black_remark_available(),
             "the shim was built but the JSTracer layout check turned the black remark off"
         );
-        let (engine, _serial) = engine();
-        let mut runtime = Runtime::new(engine);
+        let engine = engine();
+        let mut runtime = Runtime::new(engine.handle());
         let cx = runtime.cx();
         enable();
         unsafe {
