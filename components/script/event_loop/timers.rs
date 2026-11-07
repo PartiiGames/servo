@@ -872,6 +872,13 @@ impl JsTimerTask {
         // step 9.2 can be ignored, because we proactively prevent execution
         // of this task when its scheduled execution is canceled.
 
+        // Partii: root the handler and its arguments for the whole run. This task is a Rust local
+        // from here until an interval is rescheduled at the end, and the call's cleanup (microtask
+        // checkpoint, error reporting) runs script: a GC that marks its roots in that window, with
+        // the function no longer on the JS stack, would otherwise free a live interval's function
+        // (PARTII_GC_TIMER_CHECK caught it during zeal 21 sweeping, cc0c5e4f).
+        let _rooted_callback = RootedTraceableBox::new(self.callback.clone());
+
         // prep for step ? in nested set_timeout_or_interval calls
         timers.nesting_level.set(self.nesting_level);
 
