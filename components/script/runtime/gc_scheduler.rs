@@ -687,13 +687,23 @@ fn black_remark_before_slice(cx: *mut RawJSContext) {
         return;
     }
     let started = Instant::now();
-    let roots = ROOTS_TRACER.with(Cell::get);
+    let roots: Option<(RootsTracer, *mut c_void)> = Some((remark_roots, std::ptr::null_mut()));
     let done = unsafe { incremental_gc::black_remark(cx, roots) };
     let took = started.elapsed();
     BLACK_REMARKS.with(|b| {
         let (n, edges, max, total) = b.get();
         b.set((n + 1, edges + done.edges, max.max(took), total + took));
     });
+}
+
+/// The roots both remarks re-trace: Servo's (`ROOTS_TRACER`), and mozjs's set of
+/// `RootedTraceableBox`es and other traceable roots. A value moved into one of those while a GC
+/// marks is neither in the heap that GC is scanning nor among the roots it scanned at the start.
+unsafe extern "C" fn remark_roots(trc: *mut JSTracer, _: *mut c_void) {
+    if let Some((roots, data)) = ROOTS_TRACER.with(Cell::get) {
+        unsafe { roots(trc, data) };
+    }
+    unsafe { js::gc::trace_traceables(trc, std::ptr::null_mut()) };
 }
 
 /// SpiderMonkey's slice-budget callback, for the slices it runs by itself (heap idle here): the
@@ -722,9 +732,7 @@ unsafe extern "C" fn gray_roots(
     if !incremental_sweep() && sm_slices() && !budget.is_null() {
         unsafe { unlimit_budget(budget) };
     }
-    if let Some((roots, data)) = ROOTS_TRACER.with(Cell::get) {
-        unsafe { roots(trc, data) };
-    }
+    unsafe { remark_roots(trc, std::ptr::null_mut()) };
     let (registered, traced) = unsafe { incremental_gc::remark(trc) };
     if config().log {
         eprintln!("[gc-sched] remark: {registered} reflectors, {traced} re-traced");
