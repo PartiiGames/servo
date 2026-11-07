@@ -66,5 +66,5 @@ pub use crate::engine::init::init;
 /// Partii: hot functions compiled ahead of time, called from pages through `PartiiHot` (console mode).
 pub mod partii_hot {
     pub use crate::dom::partiihot::{HotArg, HotFunction, HotWrapper, register_hot_functions, set_js_thread_hook};
-    pub use crate::dom::partiiwasm::{WasmModuleTable, register_wasm_modules};
+    pub use crate::dom::partiiwasm::{WasmModuleTable, register_wasm_modules, set_worklet_prelude};
 }

@@ -5,8 +5,9 @@
 // Partii console mode: WebAssembly modules compiled ahead of time to C (wasm2c) and linked into the
 // runtime, for runtimes with no JIT (where SpiderMonkey has no WebAssembly). The embedder registers
 // them; the runtime's `WebAssembly` stand-in (partii-runtime src/wasm-polyfill.js) uses this to
-// instantiate a registered module when a page passes it the module's bytes.
-[Exposed=(Window,Worker), Pref="dom_partii_hot_enabled"]
+// instantiate a registered module when a page passes it the module's bytes. Also in AudioWorklets, where
+// the embedder's worklet prelude (set_worklet_prelude) defines the same stand-in (e.g. jamii's processor).
+[Exposed=(Window,Worker,AudioWorklet), Pref="dom_partii_hot_enabled"]
 namespace PartiiWasm {
   // The registered module whose original .wasm these bytes (an ArrayBuffer or a view) are, or "".
   DOMString find(any bytes);

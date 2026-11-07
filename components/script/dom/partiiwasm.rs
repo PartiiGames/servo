@@ -106,6 +106,22 @@ pub fn register_wasm_modules(tables: Vec<&'static WasmModuleTable>) -> bool {
     MODULES.set(map).is_ok()
 }
 
+static WORKLET_PRELUDE: OnceLock<String> = OnceLock::new();
+
+/// Script the embedder runs in every AudioWorkletGlobalScope before its modules (console mode: the
+/// `WebAssembly` stand-in over PartiiWasm). Call once, before any page runs; later calls are ignored.
+pub fn set_worklet_prelude(js: String) -> bool {
+    WORKLET_PRELUDE.set(js).is_ok()
+}
+
+/// The worklet prelude, when the embedder set one and `dom_partii_hot_enabled` is on.
+pub(crate) fn worklet_prelude() -> Option<&'static str> {
+    if !servo_config::pref!(dom_partii_hot_enabled) {
+        return None;
+    }
+    WORKLET_PRELUDE.get().map(String::as_str)
+}
+
 fn module(name: &str) -> Option<&'static WasmModuleTable> {
     MODULES.get()?.get(name).copied()
 }

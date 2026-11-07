@@ -184,6 +184,17 @@ impl AudioWorkletGlobalScope {
         let mut realm = enter_auto_realm(cx, &*scope);
         let mut realm = realm.current_realm();
         define_all_exposed_interfaces(&mut realm, scope.upcast());
+        // Partii console mode: the embedder's prelude (the WebAssembly stand-in over PartiiWasm) runs
+        // before any worklet module, as it does on the page.
+        if let Some(js) = crate::dom::partiiwasm::worklet_prelude() {
+            let _ = scope.upcast::<GlobalScope>().evaluate_js_on_global(
+                &mut realm,
+                js.into(),
+                "partii-worklet-prelude.js",
+                None,
+                None,
+            );
+        }
         scope
     }
 
