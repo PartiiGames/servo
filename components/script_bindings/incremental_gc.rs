@@ -561,7 +561,12 @@ mod tests {
     unsafe fn trace_heap(trc: *mut JSTracer, heap: &Heap<*mut JSObject>) {
         unsafe { crate::trace::trace_object(trc, "field", heap) };
     }
+    /// How often owner1's trace hook ran: marked isn't scanned (a marked object can wait on the
+    /// mark stack), and the move is only a hazard once owner1's fields have been traced.
+    static OWNER1_TRACES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     unsafe extern "C" fn trace_owner1(trc: *mut JSTracer, _: *mut JSObject) {
+        OWNER1_TRACES.fetch_add(1, Ordering::SeqCst);
         FIELD1.with(|f| unsafe { trace_heap(trc, f) });
         OWNER1.with(|f| unsafe { trace_heap(trc, f) });
     }
@@ -687,12 +692,13 @@ mod tests {
                 // late (roots are marked in the first slice, the chain one budget at a time).
                 o2.set(js::jsval::UndefinedValue());
                 PrepareForFullGC(cx);
+                let traces_before = OWNER1_TRACES.load(Ordering::SeqCst);
                 StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
                 // A few slices in: owner1 marked, the chain (and so owner2) not reached yet.
                 let owner2_ptr = OWNER2.with(|h| h.get());
                 let mut slices = 0;
                 while IsIncrementalGCInProgress(cx)
-                    && !(is_marked_any(owner1.get()) && slices >= 5)
+                    && OWNER1_TRACES.load(Ordering::SeqCst) == traces_before
                     && slices < 100_000
                 {
                     IncrementalGCSlice(cx, GCReason::API, &work_budget(100));
