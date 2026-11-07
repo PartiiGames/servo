@@ -106,6 +106,9 @@ struct Config {
     sm_slices: bool,
     /// Sweep in slices too (stage 2), script running in between.
     incremental_sweep: bool,
+    /// The black remark before each slice (on unless `PARTII_GC_BLACK_REMARK=0`, a diagnosis switch;
+    /// split sweeping needs it, so it is off then too).
+    black_remark: bool,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -145,6 +148,7 @@ fn config() -> &'static Config {
             std::env::var("PARTII_GC_INCREMENTAL_SWEEP").as_deref(),
             Ok("1")
         ),
+        black_remark: !matches!(std::env::var("PARTII_GC_BLACK_REMARK").as_deref(), Ok("0")),
     })
 }
 
@@ -658,7 +662,10 @@ pub(crate) unsafe fn init_runtime(
 fn incremental_sweep() -> bool {
     // Sweeping in slices relies on the black remark (the C++ barrier tracer); builds that link
     // mozjs_sys's prebuilt archive have no headers to build it with, and keep sweeping in one slice.
-    config().incremental_sweep && sm_slices() && incremental_gc::black_remark_available()
+    config().incremental_sweep
+        && config().black_remark
+        && sm_slices()
+        && incremental_gc::black_remark_available()
 }
 
 /// Whether SpiderMonkey's own slices are budgeted (and its GCs incremental).
@@ -669,6 +676,9 @@ fn sm_slices() -> bool {
 /// The black remark (`incremental_gc::black_remark`) before a slice of a GC that is still marking
 /// (or sweeping in slices: later sweep groups still mark). Outside any slice.
 fn black_remark_before_slice(cx: *mut RawJSContext) {
+    if !config().black_remark {
+        return;
+    }
     if cx.is_null() || !unsafe { js::jsapi::IsIncrementalGCInProgress(cx) } {
         return;
     }
