@@ -717,6 +717,17 @@ impl WorkerGlobalScope {
             let mut realm = enter_auto_realm(cx, self);
             let cx = &mut realm.current_realm();
             define_all_exposed_interfaces(cx, self.upcast());
+            // Partii console mode: the embedder's prelude (the WebAssembly stand-in over PartiiWasm)
+            // runs before the worker's script, as it does on pages and in AudioWorklets.
+            if let Some(js) = crate::dom::partiiwasm::worklet_prelude() {
+                let _ = self.upcast::<GlobalScope>().evaluate_js_on_global(
+                    cx,
+                    js.into(),
+                    "partii-worker-prelude.js",
+                    None,
+                    None,
+                );
+            }
             // Step 9. Set inside settings's execution ready flag.
             self.execution_ready.store(true, Ordering::Relaxed);
             match script {

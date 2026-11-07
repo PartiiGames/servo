@@ -108,8 +108,9 @@ pub fn register_wasm_modules(tables: Vec<&'static WasmModuleTable>) -> bool {
 
 static WORKLET_PRELUDE: OnceLock<String> = OnceLock::new();
 
-/// Script the embedder runs in every AudioWorkletGlobalScope before its modules (console mode: the
-/// `WebAssembly` stand-in over PartiiWasm). Call once, before any page runs; later calls are ignored.
+/// Script the embedder runs in every AudioWorkletGlobalScope and WorkerGlobalScope (dedicated, shared)
+/// before their scripts (console mode: the `WebAssembly` stand-in over PartiiWasm). Call once, before any
+/// page runs; later calls are ignored.
 pub fn set_worklet_prelude(js: String) -> bool {
     WORKLET_PRELUDE.set(js).is_ok()
 }
