@@ -364,7 +364,15 @@ mod tests {
     static DEAD_OPS: JSClassOps = ops(finalize_dead);
     static FILLER_OPS: JSClassOps = ops(finalize_filler);
 
-    unsafe extern "C" fn finalize_filler(_: *mut GCContext, _: *mut JSObject) {}
+    /// Fillers finalized so far (addresses), to tell which unreachable ones are still waiting.
+    static FILLERS_FINALIZED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+    unsafe extern "C" fn finalize_filler(_: *mut GCContext, obj: *mut JSObject) {
+        FILLERS_FINALIZED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(obj as usize);
+    }
 
     /// SpiderMonkey initializes once per process and can't be initialized again after shutdown,
     /// so the engine tests share one (leaked) engine, and run one at a time (they share statics).
@@ -484,21 +492,17 @@ mod tests {
             let cx = &mut realm;
             JS_SetGCParameter(cx, JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED, 1);
 
+            // Classes with a finalizer are allocated tenured, so these addresses are stable.
             rooted!(&in(cx) let live = JS_NewObject(cx, &LIVE_CLASS));
-            // Unreachable fillers of the same alloc kind on both sides of the dead object, so
-            // finalizing that kind spans many slices and the dead one is seen between two of them
-            // (otherwise the slice that starts sweeping the zone can finalize it before yielding).
-            for _ in 0..10_000 {
-                JS_NewObject(cx, &FILLER_CLASS);
-            }
-            rooted!(&in(cx) let mut dead = JS_NewObject(cx, &DEAD_CLASS));
-            for _ in 0..10_000 {
-                JS_NewObject(cx, &FILLER_CLASS);
-            }
-            // Tenure both (the roots are updated to where they moved).
-            JS_GC(cx, GCReason::API);
-            let dead_ptr = dead.get();
-            dead.set(ptr::null_mut());
+            // Unreachable fillers of the same alloc kind: foreground finalizing that kind then
+            // spans many slices (the budget is stepped per arena), so some of them are still
+            // waiting between two slices. Which arenas go first isn't ours to choose, so every
+            // filler not finalized yet is checked, not just one object.
+            FILLERS_FINALIZED.lock().unwrap().clear();
+            let fillers: Vec<*mut JSObject> = (0..20_000)
+                .map(|_| JS_NewObject(cx, &FILLER_CLASS))
+                .collect();
+            let dead_ptr = JS_NewObject(cx, &DEAD_CLASS);
             assert!(!DEAD_FINALIZED.load(Ordering::SeqCst));
 
             set_sweeping(true);
@@ -509,14 +513,23 @@ mod tests {
             StartIncrementalGC(cx, GCOptions::Normal, GCReason::API, &work_budget(1));
             let mut seen = false;
             let mut slices = 0;
+            let mut partial_slices = 0;
             while IsIncrementalGCInProgress(cx) && slices < 1_000_000 {
                 // Between slices, as the slice callback would set it.
                 set_sweeping(true);
                 assert!(!about_to_be_finalized(live.get()), "a reachable object");
-                if DEAD_FINALIZED.load(Ordering::SeqCst) {
-                    break;
+                let finalized: std::collections::HashSet<usize> =
+                    FILLERS_FINALIZED.lock().unwrap().iter().copied().collect();
+                if !finalized.is_empty() && finalized.len() < fillers.len() {
+                    partial_slices += 1;
                 }
-                if about_to_be_finalized(dead_ptr) {
+                let waiting = fillers
+                    .iter()
+                    .filter(|f| !finalized.contains(&(**f as usize)))
+                    .any(|f| about_to_be_finalized(*f));
+                let dead_waiting =
+                    !DEAD_FINALIZED.load(Ordering::SeqCst) && about_to_be_finalized(dead_ptr);
+                if waiting || dead_waiting {
                     seen = true;
                     break;
                 }
@@ -528,9 +541,10 @@ mod tests {
             set_sweeping(false);
             assert!(
                 seen,
-                "the unreachable object wasn't reported dying: after {slices} slices, GC in progress {}, finalized {}",
+                "no unreachable object was reported dying between slices: {slices} slices ({partial_slices} with the fillers part-finalized), GC in progress {}, dead finalized {}, fillers finalized {}",
                 IsIncrementalGCInProgress(cx),
-                DEAD_FINALIZED.load(Ordering::SeqCst)
+                DEAD_FINALIZED.load(Ordering::SeqCst),
+                FILLERS_FINALIZED.lock().unwrap().len()
             );
             assert!(!about_to_be_finalized(dead_ptr), "off outside sweeping");
             FinishIncrementalGC(cx, GCReason::API);
@@ -608,12 +622,18 @@ mod tests {
     /// run) it is normally collected, which shows the test exercises the hazard.
     #[test]
     fn black_remark_catches_a_moved_edge() {
-        if !black_remark_available() {
+        if !cfg!(partii_gc_shim) {
             eprintln!(
                 "black_remark_catches_a_moved_edge: skipped, built without the barrier tracer shim"
             );
             return;
         }
+        // Built with the shim, the black remark must really run here (a unit-test target holds a
+        // single from-source mozjs_sys, so the layout check has no reason to turn it off).
+        assert!(
+            black_remark_available(),
+            "the shim was built but the JSTracer layout check turned the black remark off"
+        );
         let (engine, _serial) = engine();
         let mut runtime = Runtime::new(engine);
         let cx = runtime.cx();
@@ -632,6 +652,9 @@ mod tests {
 
             let mut outcomes = vec![];
             for with_remark in [false, true] {
+                // A child the previous round left alive (the control run's move need not lose
+                // it) is garbage now; collect it before the flag is reset.
+                JS_GC(cx, GCReason::API);
                 CHILD_FINALIZED.store(false, Ordering::SeqCst);
                 rooted!(&in(cx) let owner1 = JS_NewObject(cx, &OWNER1_CLASS));
                 rooted!(&in(cx) let mut owner2 = JS_NewObject(cx, &OWNER2_CLASS));
