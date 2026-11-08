@@ -68,7 +68,6 @@ use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::tasks::task::TaskOnce;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
@@ -104,6 +103,7 @@ use crate::dom::webgl::webgluniformlocation::WebGLUniformLocation;
 use crate::dom::webgl::webglvertexarrayobject::WebGLVertexArrayObject;
 use crate::dom::webgl::webglvertexarrayobjectoes::WebGLVertexArrayObjectOES;
 use crate::dom::window::Window;
+use crate::tasks::task::TaskOnce;
 
 fn has_invalid_blend_constants(arg1: u32, arg2: u32) -> bool {
     match (arg1, arg2) {
@@ -243,6 +243,17 @@ thread_local! {
     /// Partii: this thread's contexts in the order their GL contexts were made (creation or
     /// restore), oldest first, for losing the oldest one past max_live_contexts.
     static CONTEXTS_BY_AGE: RefCell<Vec<WeakRef<WebGLRenderingContext>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Partii: getShaderParameter / getProgramParameter on a lost context: COMPLETION_STATUS_KHR is
+/// true (KHR_parallel_shader_compile: a lost context's compiles and links are complete), anything
+/// else null.
+fn set_lost_parameter(param: u32, mut retval: MutableHandleValue) {
+    if param == KHRParallelShaderCompileConstants::COMPLETION_STATUS_KHR {
+        retval.set(BooleanValue(true));
+    } else {
+        retval.set(NullValue());
+    }
 }
 
 /// Partii: before a GL context is made, lose the oldest live contexts of this thread until there is
@@ -3143,6 +3154,10 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
     fn DrawingBufferWidth(&self) -> i32 {
+        // Partii: a lost context has no drawing buffer (0, as Chromium).
+        if self.is_lost() {
+            return 0;
+        }
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::DrawingBufferWidth(sender));
         receiver.recv().unwrap()
@@ -3150,6 +3165,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
     fn DrawingBufferHeight(&self) -> i32 {
+        if self.is_lost() {
+            return 0;
+        }
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::DrawingBufferHeight(sender));
         receiver.recv().unwrap()
@@ -4631,6 +4649,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         param: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_lost() {
+            return set_lost_parameter(param, retval);
+        }
         handle_potential_webgl_error!(
             self,
             self.validate_ownership(program),
@@ -4687,6 +4708,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         param: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.is_lost() {
+            return set_lost_parameter(param, retval);
+        }
         handle_potential_webgl_error!(
             self,
             self.validate_ownership(shader),

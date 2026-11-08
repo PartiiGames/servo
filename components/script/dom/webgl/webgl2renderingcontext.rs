@@ -4137,6 +4137,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
         param_id: u32,
         mut retval: MutableHandleValue,
     ) {
+        if self.base.is_lost() {
+            return self.base.GetProgramParameter(cx, program, param_id, retval);
+        }
         handle_potential_webgl_error!(
             self.base,
             self.base.validate_ownership(program),
@@ -6454,6 +6457,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn CheckFramebufferStatus(&self, target: u32) -> u32 {
+        if self.base.is_lost() {
+            return constants::FRAMEBUFFER_UNSUPPORTED;
+        }
         let fb_slot = match target {
             constants::FRAMEBUFFER | constants::DRAW_FRAMEBUFFER => {
                 self.base.get_draw_framebuffer_slot()

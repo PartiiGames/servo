@@ -11,6 +11,7 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{DomObject as _, reflect_dom_object};
+#[cfg(feature = "webxr")]
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     TexDataType, TexFormat, TexParameter, TexParameterBool, TexParameterInt, WebGLCommand,

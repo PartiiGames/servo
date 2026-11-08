@@ -10,11 +10,11 @@ use servo_canvas_traits::webgl::{
     WebGLVertexArrayId,
 };
 
-use crate::dom::webgl::webglobject::WebGLObjectContext;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::root::{Dom, MutNullableDom};
 use crate::dom::webgl::webglbuffer::WebGLBuffer;
+use crate::dom::webgl::webglobject::WebGLObjectContext;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 
 #[derive(JSTraceable, MallocSizeOf)]

@@ -29,12 +29,12 @@ use {
     crate::dom::webglrenderingcontext::capture_webgl_backtrace,
 };
 
-use crate::dom::webgl::webglobject::WebGLObjectContext;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
+use crate::dom::webgl::webglobject::WebGLObjectContext;
 
 /// A compileShader the WebGL thread translates (ANGLE) and compiles. Its answer is read
 /// lazily, so pages polling COMPLETION_STATUS_KHR (KHR_parallel_shader_compile) don't wait for

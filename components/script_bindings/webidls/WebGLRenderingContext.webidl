@@ -559,10 +559,10 @@ interface mixin WebGLRenderingContextBase
 
     any getFramebufferAttachmentParameter(GLenum target, GLenum attachment,
                                           GLenum pname);
-    any getProgramParameter(WebGLProgram program, GLenum pname);
+    [WebGLHandlesContextLoss] any getProgramParameter(WebGLProgram program, GLenum pname);
     DOMString? getProgramInfoLog(WebGLProgram program);
     any getRenderbufferParameter(GLenum target, GLenum pname);
-    any getShaderParameter(WebGLShader shader, GLenum pname);
+    [WebGLHandlesContextLoss] any getShaderParameter(WebGLShader shader, GLenum pname);
     WebGLShaderPrecisionFormat? getShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype);
     DOMString? getShaderInfoLog(WebGLShader shader);
 
