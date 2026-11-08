@@ -789,7 +789,13 @@ impl Paint {
 
         for (painter_id, repaint_needed) in saw_webrender_frame_ready_for_painter.iter() {
             if let Some(painter) = self.maybe_painter(*painter_id) {
+                // Partii (bd stream): a frame that needs a repaint now waits for `render()`; one that
+                // doesn't frees its place at once (the renderer takes it with the next frame).
+                if *repaint_needed {
+                    painter.note_ready_frame();
+                }
                 painter.handle_new_webrender_frame_ready(*repaint_needed);
+                painter.maybe_send_deferred_frame();
             }
         }
     }

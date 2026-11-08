@@ -753,6 +753,11 @@ impl BufferDamageTracker {
 /// We have a separate `Renderer` instance for each instance of WebRender (generally
 /// one per OS window), and all instances share the same thread.
 pub struct Renderer {
+    /// Partii (bd stream): frames the last `update()` took from the backend, and how many of them it
+    /// had to draw off-screen (a replaced frame with picture-cache or texture-cache work) before the
+    /// newest. More than one frame per update means the renderer is behind the backend.
+    pub partii_update_frames: usize,
+    pub partii_update_offscreen: usize,
     result_rx: Receiver<ResultMsg>,
     api_tx: Sender<ApiMsg>,
     pub device: Device,
@@ -981,6 +986,8 @@ impl Renderer {
     /// Should be called before `render()`, as texture cache updates are done here.
     pub fn update(&mut self) {
         profile_scope!("update");
+        self.partii_update_frames = 0;
+        self.partii_update_offscreen = 0;
 
         // Pull any pending results and return the most recent.
         while let Some(msg) = self.get_next_result_msg() {
@@ -1005,10 +1012,12 @@ impl Renderer {
                     // because a) we don't need to render to the main framebuffer
                     // so it is cheaper not to, and b) doing so without a
                     // subsequent present would break partial present.
+                    self.partii_update_frames += 1;
                     let prev_frame_memory = if let Some(mut prev_doc) = self.active_documents.remove(&document_id) {
                         doc.profile.merge(&mut prev_doc.profile);
 
                         if prev_doc.frame.must_be_drawn() {
+                            self.partii_update_offscreen += 1;
                             prev_doc.render_reasons |= RenderReasons::TEXTURE_CACHE_FLUSH;
                             self.render_impl(
                                 document_id,
