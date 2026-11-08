@@ -846,6 +846,8 @@ impl Paint {
                     painter.note_ready_frame();
                 }
                 painter.handle_new_webrender_frame_ready(*repaint_needed);
+            }
+            if let Some(mut painter) = self.maybe_painter_mut(*painter_id) {
                 painter.maybe_send_deferred_frame();
             }
         }
