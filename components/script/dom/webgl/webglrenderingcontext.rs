@@ -54,6 +54,7 @@ use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::{
     TexImageSource, WebGLContextAttributes, WebGLRenderingContextConstants as constants,
     WebGLRenderingContextMethods,
 };
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::codegen::UnionTypes::{
     Float32ArrayOrUnrestrictedFloatSequence,
     HTMLCanvasElementOrOffscreenCanvas as RootedHTMLCanvasElementOrOffscreenCanvas,
@@ -1121,9 +1122,13 @@ impl WebGLRenderingContext {
                     HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(ref canvas) => {
                         canvas.owner_document()
                     },
+                    // An OffscreenCanvas made in a Window (an <img> exists only there): the
+                    // image is checked against, and uploaded for, the Window's document.
                     HTMLCanvasElementOrOffscreenCanvas::OffscreenCanvas(ref _canvas) => {
-                        // TODO: Support retrieving image pixels here for OffscreenCanvas
-                        return Ok(None);
+                        match self.global().downcast::<Window>() {
+                            Some(window) => window.Document(),
+                            None => return Ok(None),
+                        }
                     },
                 };
                 if !image.same_origin(&document.origin()) {
