@@ -636,6 +636,57 @@ impl Paint {
             },
         ];
 
+        // Partii (bd stream): the rest of WebRender's CPU memory, and the renderer's GPU memory
+        // (textures, render targets, picture tiles, PBOs). Upstream reported fonts, images and the
+        // display list only; on software GL (llvmpipe) GPU memory is ordinary process memory, so
+        // without these a WebRender texture or render-target pool that grows showed only as
+        // anonymous RSS.
+        let mut gpu_report = MemoryReport::default();
+        for painter in &self.painters {
+            if let Some(renderer) = painter.borrow().webrender_renderer.as_ref() {
+                gpu_report += renderer.report_memory(std::ptr::null_mut());
+            }
+        }
+        let interned =
+            memory_report.interning.interners.total() + memory_report.interning.data_stores.total();
+        let cpu = [
+            ("clip-stores", memory_report.clip_stores),
+            ("hit-testers", memory_report.hit_testers),
+            ("weak-fonts", memory_report.weak_fonts),
+            ("rasterized-blobs", memory_report.rasterized_blobs),
+            ("shader-cache", memory_report.shader_cache),
+            ("interning", interned),
+            ("upload-staging-memory", memory_report.upload_staging_memory),
+            ("frame-allocator", memory_report.frame_allocator + gpu_report.frame_allocator),
+            ("render-tasks", memory_report.render_tasks + gpu_report.render_tasks),
+        ];
+        for (name, size) in cpu {
+            reports.push(Report {
+                path: path!["webrender", name],
+                kind: ReportKind::ExplicitJemallocHeapSize,
+                size,
+            });
+        }
+        let gpu = [
+            ("vertex-data-textures", gpu_report.vertex_data_textures),
+            ("render-target-textures", gpu_report.render_target_textures),
+            ("picture-tile-textures", gpu_report.picture_tile_textures),
+            ("atlas-textures", gpu_report.atlas_textures),
+            ("standalone-textures", gpu_report.standalone_textures),
+            ("texture-cache-structures", gpu_report.texture_cache_structures),
+            ("depth-target-textures", gpu_report.depth_target_textures),
+            ("texture-upload-pbos", gpu_report.texture_upload_pbos),
+            ("swap-chain", gpu_report.swap_chain),
+            ("upload-staging-textures", gpu_report.upload_staging_textures),
+        ];
+        for (name, size) in gpu {
+            reports.push(Report {
+                path: path!["webrender-gpu", name],
+                kind: ReportKind::NonExplicitSize,
+                size,
+            });
+        }
+
         perform_memory_report(|ops| {
             let scroll_trees_memory_usage = self
                 .painters
