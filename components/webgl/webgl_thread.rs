@@ -440,8 +440,19 @@ impl WebGLThread {
 
     fn process(&mut self) {
         let webgl_chan = WebGLChan(self.sender.clone());
+        let mut stats = webgl_stats::Stats::new();
         while let Ok(Ok(msg)) = self.receiver.recv() {
+            let Some(stats) = stats.as_mut() else {
+                if self.handle_msg(msg, &webgl_chan) {
+                    break;
+                }
+                continue;
+            };
+            let kind = webgl_stats::kind(&msg);
+            let backlog = self.receiver.len();
+            let t0 = std::time::Instant::now();
             let exit = self.handle_msg(msg, &webgl_chan);
+            stats.record(kind, t0.elapsed(), backlog, self.contexts.len());
             if exit {
                 break;
             }
@@ -5107,4 +5118,89 @@ fn strip_fragment_output_invariance(object_code: String) -> String {
         stripped.push('\n');
     }
     stripped
+}
+
+/// Partii (lx): PARTII_WEBGL_STATS=1 logs the WebGL thread's load to stderr every 2 s: messages
+/// handled and the time inside them (commands, swaps, the rest), the slowest single message, and
+/// the most messages waiting in its channel. It tells a GL driver that blocks the thread (long
+/// messages) from a page that sends faster than the thread drains (a growing backlog).
+mod webgl_stats {
+    use std::time::{Duration, Instant};
+
+    use servo_canvas_traits::webgl::WebGLMsg;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum Kind {
+        Command,
+        Swap,
+        Other,
+    }
+
+    pub(super) fn kind(msg: &WebGLMsg) -> Kind {
+        match msg {
+            WebGLMsg::WebGLCommand(..) => Kind::Command,
+            WebGLMsg::SwapBuffers(..) => Kind::Swap,
+            _ => Kind::Other,
+        }
+    }
+
+    pub(super) struct Stats {
+        since: Instant,
+        count: [u64; 3],
+        time: [Duration; 3],
+        max: Duration,
+        max_kind: &'static str,
+        max_backlog: usize,
+        contexts: usize,
+    }
+
+    impl Stats {
+        pub(super) fn new() -> Option<Self> {
+            std::env::var_os("PARTII_WEBGL_STATS").filter(|v| v != "0")?;
+            Some(Stats {
+                since: Instant::now(),
+                count: [0; 3],
+                time: [Duration::ZERO; 3],
+                max: Duration::ZERO,
+                max_kind: "-",
+                max_backlog: 0,
+                contexts: 0,
+            })
+        }
+
+        pub(super) fn record(&mut self, kind: Kind, took: Duration, backlog: usize, contexts: usize) {
+            let (i, name) = match kind {
+                Kind::Command => (0, "command"),
+                Kind::Swap => (1, "swap"),
+                Kind::Other => (2, "other"),
+            };
+            self.count[i] += 1;
+            self.time[i] += took;
+            if took > self.max {
+                self.max = took;
+                self.max_kind = name;
+            }
+            self.max_backlog = self.max_backlog.max(backlog);
+            self.contexts = contexts;
+            let now = Instant::now();
+            if now - self.since >= Duration::from_secs(2) {
+                let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+                eprintln!(
+                    "partii-webgl-stats: secs={:.1} commands={} command_ms={:.1} swaps={} swap_ms={:.1} other={} other_ms={:.1} max_ms={:.1} max_kind={} max_backlog={} contexts={}",
+                    (now - self.since).as_secs_f64(),
+                    self.count[0],
+                    ms(self.time[0]),
+                    self.count[1],
+                    ms(self.time[1]),
+                    self.count[2],
+                    ms(self.time[2]),
+                    ms(self.max),
+                    self.max_kind,
+                    self.max_backlog,
+                    self.contexts,
+                );
+                *self = Stats { since: now, ..Stats::new().expect("on") };
+            }
+        }
+    }
 }

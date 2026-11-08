@@ -443,13 +443,17 @@ impl Painter {
                     let size = self.rendering_context.size2d().to_i32();
                     results = renderer.render(size, 0 /* buffer_age */).ok();
                 }
+                let t2 = std::time::Instant::now();
+                // Partii (lx): PARTII_PAINT_MAX_FRAMES=N keeps at most N painted frames queued in the
+                // GL driver (a fence per frame; waits for the oldest). Off by default.
+                paint_fence::after_frame(&*self.webrender_gl);
                 if stats_on {
-                    let t2 = std::time::Instant::now();
                     // PARTII_PAINT_STATS=finish: wait for the GL to finish this frame, so the
                     // rasterizer's time shows apart from WebRender's submission.
                     if paint_stats::finish() {
                         self.webrender_gl.finish();
                     }
+                    // finish_ms: the fence wait above plus `finish`.
                     let t3 = std::time::Instant::now();
                     paint_stats::record(t1 - t0, t2 - t1, t3 - t2, results.as_ref());
                 }
@@ -1690,6 +1694,47 @@ impl SceneBuilderHooks for BoostWebRenderThread {
     fn poke(&self) {}
 
     fn deregister(&self) {}
+}
+
+/// Partii (lx): a cap on painted frames the GL driver may still be working on. Without one, a
+/// slow driver (Mesa's llvmpipe under a full-window backdrop-filter blur over a WebGL canvas) is
+/// handed frames faster than it rasterizes them: its queued work and memory grow for minutes and
+/// every thread that touches the GL waits behind it. PARTII_PAINT_MAX_FRAMES=N (1-8) fences each
+/// frame after WebRender renders it and waits for the frame N back; unset or 0: no fences.
+mod paint_fence {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::sync::OnceLock;
+
+    use gleam::gl::{self, Gl, GLsync};
+
+    fn max_frames() -> usize {
+        static MAX: OnceLock<usize> = OnceLock::new();
+        *MAX.get_or_init(|| {
+            std::env::var("PARTII_PAINT_MAX_FRAMES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map_or(0, |n| n.min(8))
+        })
+    }
+
+    thread_local!(static FENCES: RefCell<VecDeque<GLsync>> = RefCell::default());
+
+    pub(super) fn after_frame(gl: &dyn Gl) {
+        let max = max_frames();
+        if max == 0 {
+            return;
+        }
+        FENCES.with_borrow_mut(|fences| {
+            fences.push_back(gl.fence_sync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0));
+            while fences.len() > max {
+                let Some(oldest) = fences.pop_front() else { break };
+                // Ten seconds at most per wait, so a lost fence can't hang painting.
+                gl.client_wait_sync(oldest, gl::SYNC_FLUSH_COMMANDS_BIT, 10_000_000_000);
+                gl.delete_sync(oldest);
+            }
+        });
+    }
 }
 
 /// Partii (perf stream): per-frame paint timing and WebRender stats, logged to stderr every 2 s
