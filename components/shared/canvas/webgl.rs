@@ -1242,6 +1242,12 @@ macro_rules! gl_enums {
 mod gl_ext_constants {
     pub const COMPRESSED_RGB_ETC1_WEBGL: u32 = 0x8D64;
 
+    // WEBGL_compressed_texture_s3tc_srgb (EXT_texture_sRGB on desktop GL).
+    pub const COMPRESSED_SRGB_S3TC_DXT1_EXT: u32 = 0x8C4C;
+    pub const COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT: u32 = 0x8C4D;
+    pub const COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT: u32 = 0x8C4E;
+    pub const COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT: u32 = 0x8C4F;
+
     // KHR_texture_compression_astc_ldr, EXT_texture_compression_bptc, EXT_texture_compression_rgtc.
     pub const COMPRESSED_RGBA_ASTC_4x4_KHR: u32 = 0x93B0;
     pub const COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR: u32 = 0x93D0;
@@ -1313,6 +1319,10 @@ gl_enums! {
         CompressedRgbaS3tcDxt1 = gl::COMPRESSED_RGBA_S3TC_DXT1_EXT,
         CompressedRgbaS3tcDxt3 = gl::COMPRESSED_RGBA_S3TC_DXT3_EXT,
         CompressedRgbaS3tcDxt5 = gl::COMPRESSED_RGBA_S3TC_DXT5_EXT,
+        CompressedSrgbS3tcDxt1 = gl_ext_constants::COMPRESSED_SRGB_S3TC_DXT1_EXT,
+        CompressedSrgbAlphaS3tcDxt1 = gl_ext_constants::COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT,
+        CompressedSrgbAlphaS3tcDxt3 = gl_ext_constants::COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT,
+        CompressedSrgbAlphaS3tcDxt5 = gl_ext_constants::COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT,
         CompressedRgbEtc1 = gl_ext_constants::COMPRESSED_RGB_ETC1_WEBGL,
         CompressedRgbaAstc4x4 = gl_ext_constants::COMPRESSED_RGBA_ASTC_4x4_KHR,
         CompressedSrgb8Alpha8Astc4x4 = gl_ext_constants::COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR,
@@ -1449,7 +1459,19 @@ impl TexFormat {
                 TexFormat::CompressedRgbaS3tcDxt3 |
                 TexFormat::CompressedRgbaS3tcDxt5 |
                 TexFormat::CompressedRgbEtc1
-        ) || self.is_astc_bptc_or_rgtc()
+        ) || self.is_s3tc_srgb() ||
+            self.is_astc_bptc_or_rgtc()
+    }
+
+    /// WEBGL_compressed_texture_s3tc_srgb formats.
+    pub fn is_s3tc_srgb(&self) -> bool {
+        matches!(
+            self,
+            TexFormat::CompressedSrgbS3tcDxt1 |
+                TexFormat::CompressedSrgbAlphaS3tcDxt1 |
+                TexFormat::CompressedSrgbAlphaS3tcDxt3 |
+                TexFormat::CompressedSrgbAlphaS3tcDxt5
+        )
     }
 
     /// ASTC, BPTC and RGTC formats (WebGL 1 and 2 extensions).
@@ -1685,7 +1707,9 @@ impl TexFormat {
             TexFormat::CompressedRgbaS3tcDxt1 |
             TexFormat::CompressedRgbaS3tcDxt3 |
             TexFormat::CompressedRgbaS3tcDxt5 => &[TexDataType::UnsignedByte][..],
-            format if format.is_astc_bptc_or_rgtc() => &[TexDataType::UnsignedByte][..],
+            format if format.is_s3tc_srgb() || format.is_astc_bptc_or_rgtc() => {
+                &[TexDataType::UnsignedByte][..]
+            },
             _ => &[][..],
         }
     }
@@ -1702,7 +1726,9 @@ impl TexFormat {
             TexFormat::CompressedRgbaS3tcDxt1 |
             TexFormat::CompressedRgbaS3tcDxt3 |
             TexFormat::CompressedRgbaS3tcDxt5 => WebGLVersion::WebGL1,
-            format if format.is_astc_bptc_or_rgtc() => WebGLVersion::WebGL1,
+            format if format.is_s3tc_srgb() || format.is_astc_bptc_or_rgtc() => {
+                WebGLVersion::WebGL1
+            },
             _ => WebGLVersion::WebGL2,
         }
     }

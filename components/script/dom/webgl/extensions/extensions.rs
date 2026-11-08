@@ -444,6 +444,7 @@ impl WebGLExtensions {
         self.register::<ext::webglcompressedtextureastc::WEBGLCompressedTextureASTC>();
         self.register::<ext::webglcompressedtextureetc1::WEBGLCompressedTextureETC1>();
         self.register::<ext::webglcompressedtextures3tc::WEBGLCompressedTextureS3TC>();
+        self.register::<ext::webglcompressedtextures3tcsrgb::WEBGLCompressedTextureS3TCsRGB>();
         self.register::<ext::webgldrawinstancedbasevertexbaseinstance::WEBGLDrawInstancedBaseVertexBaseInstance>();
         self.register::<ext::webglmultidraw::WEBGLMultiDraw>();
         self.register::<ext::webglmultidrawinstancedbasevertexbaseinstance::WEBGLMultiDrawInstancedBaseVertexBaseInstance>();
