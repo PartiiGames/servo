@@ -37,7 +37,9 @@
 //! - `PARTII_GC_FINALIZE_STATS=1` adds the DOM objects each GC finalized, and their finalizers'
 //!   time, to the log line.
 //!
-//! **Incremental marking** (`PARTII_GC_INCREMENTAL=1`, default off; not on Windows): a periodic GC
+//! **Incremental marking** (`PARTII_GC_INCREMENTAL`; not on Windows; by default on exactly when
+//! sweeping can be sliced as well, i.e. the barrier tracer shim is built, see below; `=0` turns it
+//! off, `=1` forces it on without the shim): a periodic GC
 //! marks in slices of `PARTII_GC_SLICE_MS` (default 5) at most every `PARTII_GC_SLICE_GAP_MS`
 //! (default 10), from the event loops, and sweeps in one pause: as soon as sweeping starts the GC is
 //! finished before any script runs again. The DOM's Rust edges have no write barriers, so `script_bindings::
@@ -53,7 +55,8 @@
 //! unlimited, so sweeping still never interleaves with script. `PARTII_GC_SM_SLICES=0` keeps
 //! SpiderMonkey's slices unlimited (then its first continuation slice usually finishes our GC).
 //!
-//! **Incremental sweeping** (`PARTII_GC_INCREMENTAL_SWEEP=1`, default off, needs the above): the
+//! **Incremental sweeping** (`PARTII_GC_INCREMENTAL_SWEEP`, on with the above unless `=0`; needs the
+//! barrier tracer shim, so builds that link mozjs_sys's prebuilt archive keep one sweep pause): the
 //! slice that starts sweeping keeps its budget, so sweeping is sliced too and script runs while
 //! zones are being swept. The expose barrier and the per-sweep-group remark stay on (later sweep
 //! groups still mark), and `WeakRef` treats a dead object that isn't finalized yet as gone.
@@ -121,6 +124,9 @@ struct Config {
     /// Nothing can have moved a Rust edge behind marking's back there, so the remark only costs
     /// (6-8 ms per GC on idb-gc-loop, gc-5 release soak 83e8353c).
     remark_unyielded: bool,
+    /// `Window::suspend` runs its own full GC at once (upstream), instead of asking for a scheduled
+    /// one on a later turn: `PARTII_GC_SUSPEND_FULL=1`.
+    suspend_full: bool,
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
@@ -150,16 +156,24 @@ fn config() -> &'static Config {
             std::env::var("PARTII_GC_FINALIZE_STATS").as_deref(),
             Ok("1")
         ),
+        // Default: on where sweeping can be sliced too ("incs"), off elsewhere (marking in slices with
+        // one sweep pause was often worse than a plain GC on loaded nodes). PARTII_GC_INCREMENTAL=0/1
+        // forces it either way.
         incremental: cfg!(not(windows))
-            && matches!(std::env::var("PARTII_GC_INCREMENTAL").as_deref(), Ok("1")),
+            && match std::env::var("PARTII_GC_INCREMENTAL").as_deref() {
+                Ok("1") => true,
+                Ok("0") => false,
+                _ => incremental_gc::black_remark_available(),
+            },
         slice: env_ms("PARTII_GC_SLICE_MS", 5),
         slice_gap: env_ms("PARTII_GC_SLICE_GAP_MS", 10),
         incremental_max: env_ms("PARTII_GC_INCREMENTAL_MAX_MS", 2000),
         sm_slices: !matches!(std::env::var("PARTII_GC_SM_SLICES").as_deref(), Ok("0")),
-        incremental_sweep: matches!(
+        incremental_sweep: !matches!(
             std::env::var("PARTII_GC_INCREMENTAL_SWEEP").as_deref(),
-            Ok("1")
+            Ok("0")
         ),
+        suspend_full: matches!(std::env::var("PARTII_GC_SUSPEND_FULL").as_deref(), Ok("1")),
         black_remark: !matches!(std::env::var("PARTII_GC_BLACK_REMARK").as_deref(), Ok("0")),
         remark_stack: !matches!(std::env::var("PARTII_GC_REMARK_STACK").as_deref(), Ok("0")),
         remark_at_slice: !matches!(
@@ -229,6 +243,9 @@ thread_local! {
         nursery_pause: Cell::new(Duration::ZERO),
         incremental: Cell::new(None),
     };
+    /// A GC was asked for (`request_gc`, e.g. by `Window::suspend`): the next turn runs one without
+    /// waiting for the period. Cleared when a major GC starts or ends.
+    static REQUESTED: Cell<bool> = const { Cell::new(false) };
     /// Set from the gray-roots hook: sweeping began in the current GC.
     static SWEEP_STARTED: Cell<bool> = const { Cell::new(false) };
     /// Between GC_CYCLE_BEGIN and GC_CYCLE_END. SpiderMonkey also calls the gray-roots hook outside a
@@ -303,7 +320,20 @@ fn sync_major(cx: &JSContext, state: &State, now: Instant) {
         state.last_major.set(now);
         state.bytes_after.set(param(cx, JSGCParamKey::JSGC_BYTES));
         state.nursery_at.set(None);
+        REQUESTED.with(|r| r.set(false));
     }
+}
+
+/// Asks for a major GC on this thread soon, through the schedule (nursery split, stagger,
+/// incremental when on) rather than as one full pause now. Returns false when the scheduler is
+/// off or `PARTII_GC_SUSPEND_FULL=1`: the caller then collects by itself, as upstream does.
+pub(crate) fn request_gc() -> bool {
+    let config = config();
+    if !config.enabled || config.suspend_full {
+        return false;
+    }
+    REQUESTED.with(|r| r.set(true));
+    true
 }
 
 /// Empties the nursery (a minor GC) and notes when, for the major GC that follows.
@@ -322,6 +352,7 @@ fn collect_nursery(cx: &mut JSContext, state: &State) {
 }
 
 fn collect(cx: &mut JSContext, state: &State, kind: Kind, shrink: bool) {
+    REQUESTED.with(|r| r.set(false));
     let before = param(cx, JSGCParamKey::JSGC_BYTES);
     if config().finalize_stats {
         script_bindings::take_finalize_stats();
@@ -425,12 +456,15 @@ pub(crate) fn after_tasks(cx: &mut JSContext, kind: Kind) {
             }
         }
         sync_major(cx, state, now);
+        let requested = REQUESTED.with(Cell::get);
         let period = config.period.max(state.last_pause.get() * 50);
-        if now - state.last_major.get() < period {
+        if !requested && now - state.last_major.get() < period {
             return;
         }
         let bytes = param(cx, JSGCParamKey::JSGC_BYTES);
         if bytes < state.bytes_after.get().saturating_add(MIN_GROWTH_BYTES) {
+            // Too little garbage since the last GC to be worth one, asked for or not.
+            REQUESTED.with(|r| r.set(false));
             return;
         }
         if config.split_nursery {
@@ -669,7 +703,11 @@ pub(crate) unsafe fn init_runtime(
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, sm_budget);
         let raw = cx.raw_cx();
         SetGrayGCRootsTracer(raw, Some(gray_roots), roots_data);
-        if config.incremental_sweep && !incremental_gc::black_remark_available() {
+        if matches!(
+            std::env::var("PARTII_GC_INCREMENTAL_SWEEP").as_deref(),
+            Ok("1")
+        ) && !incremental_gc::black_remark_available()
+        {
             eprintln!(
                 "[gc-sched] PARTII_GC_INCREMENTAL_SWEEP=1 ignored: built without the barrier tracer shim (prebuilt mozjs)"
             );
@@ -853,6 +891,7 @@ unsafe extern "C" fn slice_callback(
 
 /// Starts an incremental GC with a first slice.
 fn start_incremental(cx: &mut JSContext, state: &State, kind: Kind) {
+    REQUESTED.with(|r| r.set(false));
     let before = param(cx, JSGCParamKey::JSGC_BYTES);
     if config().finalize_stats {
         script_bindings::take_finalize_stats();
