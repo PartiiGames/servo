@@ -656,7 +656,7 @@ impl Painter {
 
     /// Partii (bd stream): generate the frame held back by [`Self::generate_frame`] once there is room
     /// in the pipeline.
-    pub(crate) fn maybe_send_deferred_frame(&self) {
+    pub(crate) fn maybe_send_deferred_frame(&mut self) {
         let Some(reasons) = self.deferred_frame.get() else {
             return;
         };
@@ -668,9 +668,7 @@ impl Painter {
         let mut transaction = Transaction::new();
         transaction.generate_frame(0, true /* present */, false /* tracked */, reasons);
         self.pending_frames.set(self.pending_frames.get() + 1);
-        let _ = self.rendering_context.make_current();
-        self.webrender_api
-            .send_transaction(self.webrender_document, transaction);
+        self.send_transaction(transaction);
     }
 
     /// Partii (bd stream): a frame WebRender announced is waiting for the renderer.
