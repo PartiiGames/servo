@@ -33,6 +33,32 @@ use smallvec::SmallVec;
 
 const FLOATS_PER_RENDER_TASK_INFO: usize = 8;
 pub const MAX_BLUR_STD_DEVIATION: f32 = 4.0;
+
+/// Partii (bd stream): the largest std deviation a blur pass runs at before the chain halves the
+/// image again. A backdrop-filter blur (edge mode Mirror; nothing else uses it) halves until the
+/// std deviation is at most `PARTII_WR_BACKDROP_BLUR_SIGMA` (default 2.0), so a full-window
+/// `blur(8px)` runs its two blur passes at a quarter of the size in each direction (1/16 of the
+/// pixels) instead of a half, with half as many taps. The blurred image has nothing finer than
+/// the lower resolution can hold, so the upscaled result looks the same (Chrome lowers backdrop
+/// filter resolution the same way: cc's backdrop_filter_quality). `=4` is upstream. Other blurs
+/// (filter: blur(), shadows, SVG) keep 4.
+pub fn max_blur_std_deviation(edge_mode: BlurEdgeMode) -> f32 {
+    match edge_mode {
+        BlurEdgeMode::Mirror => partii_backdrop_blur_sigma(),
+        BlurEdgeMode::Duplicate => MAX_BLUR_STD_DEVIATION,
+    }
+}
+
+fn partii_backdrop_blur_sigma() -> f32 {
+    static SIGMA: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SIGMA.get_or_init(|| {
+        std::env::var("PARTII_WR_BACKDROP_BLUR_SIGMA")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 1.0)
+            .map_or(2.0, |v| v.min(MAX_BLUR_STD_DEVIATION))
+    })
+}
 pub const MIN_DOWNSCALING_RT_SIZE: i32 = 8;
 
 fn render_task_sanity_check(size: &DeviceIntSize) {
@@ -272,10 +298,15 @@ impl BlurTask {
     // In order to do the blur down-scaling passes without introducing errors, we need the
     // source of each down-scale pass to be a multuple of two. If need be, this inflates
     // the source size so that each down-scale pass will sample correctly.
-    pub fn adjusted_blur_source_size(original_size: DeviceSize, mut std_dev: DeviceSize) -> DeviceSize {
+    pub fn adjusted_blur_source_size(
+        original_size: DeviceSize,
+        mut std_dev: DeviceSize,
+        edge_mode: BlurEdgeMode,
+    ) -> DeviceSize {
+        let max_std_dev = max_blur_std_deviation(edge_mode);
         let mut adjusted_size = original_size;
         let mut scale_factor = 1.0;
-        while std_dev.width > MAX_BLUR_STD_DEVIATION && std_dev.height > MAX_BLUR_STD_DEVIATION {
+        while std_dev.width > max_std_dev && std_dev.height > max_std_dev {
             if adjusted_size.width < MIN_DOWNSCALING_RT_SIZE as f32 ||
                adjusted_size.height < MIN_DOWNSCALING_RT_SIZE as f32 {
                 break;
@@ -1006,8 +1037,9 @@ impl RenderTask {
         let mut downscaling_src_task_id = src_task_id;
         let mut scale_factor = 1.0;
         let mut n_downscales = 1;
-        while adjusted_blur_std_deviation.width > MAX_BLUR_STD_DEVIATION &&
-              adjusted_blur_std_deviation.height > MAX_BLUR_STD_DEVIATION {
+        let max_std_dev = max_blur_std_deviation(edge_mode);
+        while adjusted_blur_std_deviation.width > max_std_dev &&
+              adjusted_blur_std_deviation.height > max_std_dev {
             if adjusted_blur_target_size.width < MIN_DOWNSCALING_RT_SIZE ||
                adjusted_blur_target_size.height < MIN_DOWNSCALING_RT_SIZE {
                 break;
@@ -1802,6 +1834,7 @@ impl RenderTask {
                         BlurTask::adjusted_blur_source_size(
                             blur_task_size,
                             adjusted_blur_std_deviation,
+                            BlurEdgeMode::Duplicate,
                         ).max(DeviceSize::new(1.0, 1.0));
                     // Now change the subregion to match the revised task size,
                     // keeping it centered should keep animated radius smooth.
@@ -1924,6 +1957,7 @@ impl RenderTask {
                         BlurTask::adjusted_blur_source_size(
                             blur_task_size,
                             adjusted_blur_std_deviation,
+                            BlurEdgeMode::Duplicate,
                         ).max(DeviceSize::new(1.0, 1.0));
                     // Now change the subregion to match the revised task size,
                     // keeping it centered should keep animated radius smooth.

@@ -333,6 +333,7 @@ pub fn prepare_composite_mode(
             let adjusted_size = BlurTask::adjusted_blur_source_size(
                 original_size,
                 blur_std_deviation,
+                edge_mode,
             );
 
             let clear_color = if adjusted_size == original_size {
