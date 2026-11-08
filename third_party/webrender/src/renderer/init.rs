@@ -806,6 +806,8 @@ pub fn create_webrender_instance(
         enable_instancing: options.enable_instancing,
         consecutive_oom_frames: 0,
         target_frame_publish_id: None,
+        partii_update_frames: 0,
+        partii_update_offscreen: 0,
         pending_result_msg: None,
         layer_compositor_frame_state_in_prev_frame: None,
         external_composite_debug_items: Vec::new(),

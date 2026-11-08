@@ -93,6 +93,16 @@ pub(crate) struct Painter {
     /// The number of frames pending to receive from WebRender.
     pub(crate) pending_frames: Cell<usize>,
 
+    /// Partii (bd stream): frames WebRender has built and announced (`NewWebRenderFrameReady`, with a
+    /// repaint) that the renderer hasn't taken yet. They wait in WebRender's result channel until the
+    /// next `render()`; there `Renderer::update` draws every replaced one off-screen before the newest.
+    ready_frames: Cell<usize>,
+
+    /// Partii (bd stream): a frame asked for while the pipeline was full (see [`frame_backpressure`]),
+    /// with its reasons. Its transaction was still sent; the frame itself is generated once the
+    /// renderer has taken the frames ahead of it, and shows everything asked for meanwhile.
+    deferred_frame: Cell<Option<RenderReasons>>,
+
     /// The [`BaseRefreshDriver`] which manages the painting of `WebView`s during animations.
     refresh_driver: Rc<BaseRefreshDriver>,
 
@@ -287,6 +297,8 @@ impl Painter {
             rendering_context,
             needs_repaint: Cell::default(),
             pending_frames: Default::default(),
+            ready_frames: Default::default(),
+            deferred_frame: Default::default(),
             screenshot_taker: Default::default(),
             refresh_driver,
             animation_refresh_driver_observer,
@@ -367,7 +379,9 @@ impl Painter {
     /// to WebRender and is not ready yet or because the [`FrameDelayer`] is delaying a frame
     /// waiting for asynchronous (canvas) image updates to complete.
     pub(crate) fn has_pending_frames(&self) -> bool {
-        self.pending_frames.get() != 0 || self.frame_delayer.pending_frame
+        self.pending_frames.get() != 0 ||
+            self.frame_delayer.pending_frame ||
+            self.deferred_frame.get().is_some()
     }
 
     pub(crate) fn set_needs_repaint(&self, reason: RepaintReason) {
@@ -433,6 +447,9 @@ impl Painter {
                 if let Some(renderer) = self.webrender_renderer.as_mut() {
                     renderer.update();
                 }
+                // Every frame announced so far is in the channel before its announcement, so
+                // `update` has taken them all.
+                self.ready_frames.set(0);
                 let t1 = std::time::Instant::now();
 
                 // Paint the scene.
@@ -451,7 +468,18 @@ impl Painter {
                         self.webrender_gl.finish();
                     }
                     let t3 = std::time::Instant::now();
-                    paint_stats::record(t1 - t0, t2 - t1, t3 - t2, results.as_ref());
+                    let (taken, offscreen) = self
+                        .webrender_renderer
+                        .as_ref()
+                        .map_or((0, 0), |r| (r.partii_update_frames, r.partii_update_offscreen));
+                    paint_stats::record(
+                        t1 - t0,
+                        t2 - t1,
+                        t3 - t2,
+                        results.as_ref(),
+                        taken,
+                        offscreen,
+                    );
                 }
             }
         );
@@ -459,6 +487,10 @@ impl Painter {
         // We've painted the default target, which means that from the embedder's perspective,
         // the scene no longer needs to be repainted.
         self.needs_repaint.set(RepaintReason::empty());
+
+        // The renderer has caught up: a frame held back meanwhile can go now (before the
+        // screenshots, which wait for it).
+        self.maybe_send_deferred_frame();
 
         self.screenshot_taker.maybe_take_screenshots(self);
         self.send_pending_paint_metrics_messages_after_composite();
@@ -600,9 +632,50 @@ impl Painter {
     }
 
     /// Queue a new frame in the transaction and increase the pending frames count.
+    ///
+    /// Partii (bd stream): with the frame pipeline full (a frame being built, or built and not yet
+    /// taken by the renderer, up to [`frame_backpressure::max_in_flight`]), the transaction goes
+    /// without a frame and one deferred frame is generated when the renderer catches up. Gecko does
+    /// the same (WebRenderBridgeParent skips a frame while the render thread has too many pending)
+    /// and Chrome's display scheduler never begins a frame before the last one is drawn. Without it,
+    /// a renderer slower than the backend (backdrop-filter over a WebGL canvas on software GL) lets
+    /// frames pile up in WebRender's result channel, each holding its frame data, and
+    /// `Renderer::update` then draws every one of them off-screen: a stall that grows with itself.
     pub(crate) fn generate_frame(&self, transaction: &mut Transaction, reason: RenderReasons) {
+        if let Some(max) = frame_backpressure::max_in_flight() {
+            if self.pending_frames.get() + self.ready_frames.get() >= max {
+                let reasons = self.deferred_frame.get().unwrap_or(RenderReasons::empty());
+                self.deferred_frame.set(Some(reasons | reason));
+                frame_backpressure::count_deferred();
+                return;
+            }
+        }
         transaction.generate_frame(0, true /* present */, false /* tracked */, reason);
         self.pending_frames.set(self.pending_frames.get() + 1);
+    }
+
+    /// Partii (bd stream): generate the frame held back by [`Self::generate_frame`] once there is room
+    /// in the pipeline.
+    pub(crate) fn maybe_send_deferred_frame(&self) {
+        let Some(reasons) = self.deferred_frame.get() else {
+            return;
+        };
+        let max = frame_backpressure::max_in_flight().unwrap_or(usize::MAX);
+        if self.pending_frames.get() + self.ready_frames.get() >= max {
+            return;
+        }
+        self.deferred_frame.set(None);
+        let mut transaction = Transaction::new();
+        transaction.generate_frame(0, true /* present */, false /* tracked */, reasons);
+        self.pending_frames.set(self.pending_frames.get() + 1);
+        let _ = self.rendering_context.make_current();
+        self.webrender_api
+            .send_transaction(self.webrender_document, transaction);
+    }
+
+    /// Partii (bd stream): a frame WebRender announced is waiting for the renderer.
+    pub(crate) fn note_ready_frame(&self) {
+        self.ready_frames.set(self.ready_frames.get() + 1);
     }
 
     pub(crate) fn hit_test_at_point_with_api_and_document(
@@ -807,7 +880,8 @@ impl Painter {
     }
 
     pub(crate) fn decrement_pending_frames(&self) {
-        self.pending_frames.set(self.pending_frames.get() - 1);
+        // Saturating: a frame WebRender generated on its own (not via `generate_frame`) is announced too.
+        self.pending_frames.set(self.pending_frames.get().saturating_sub(1));
     }
 
     pub(crate) fn report_memory(&self) -> MemoryReport {
@@ -1722,6 +1796,9 @@ mod paint_stats {
         alpha_targets: usize,
         upload_mb: f64,
         frame_build_ms: f64,
+        taken: usize,
+        offscreen: usize,
+        update_max: Duration,
     }
     thread_local!(static ACC: RefCell<Acc> = RefCell::default());
 
@@ -1730,8 +1807,13 @@ mod paint_stats {
         render: Duration,
         finish: Duration,
         results: Option<&webrender::RenderResults>,
+        taken: usize,
+        offscreen: usize,
     ) {
         ACC.with_borrow_mut(|a| {
+            a.taken += taken;
+            a.offscreen += offscreen;
+            a.update_max = a.update_max.max(update);
             let now = Instant::now();
             let since = *a.since.get_or_insert(now);
             a.frames += 1;
@@ -1749,7 +1831,7 @@ mod paint_stats {
                 let n = a.frames.max(1) as f64;
                 let ms = |d: Duration| d.as_secs_f64() * 1000.0 / n;
                 eprintln!(
-                    "partii-paint-stats: frames={} update_ms={:.2} render_ms={:.2} finish_ms={:.2} draws={:.1} color_targets={:.2} alpha_targets={:.2} upload_mb={:.3} frame_build_ms={:.2}",
+                    "partii-paint-stats: frames={} update_ms={:.2} render_ms={:.2} finish_ms={:.2} draws={:.1} color_targets={:.2} alpha_targets={:.2} upload_mb={:.3} frame_build_ms={:.2} taken={} offscreen={} update_max_ms={:.1} deferred={}",
                     a.frames,
                     ms(a.update),
                     ms(a.render),
@@ -1759,9 +1841,43 @@ mod paint_stats {
                     a.alpha_targets as f64 / n,
                     a.upload_mb / n,
                     a.frame_build_ms / n,
+                    a.taken,
+                    a.offscreen,
+                    a.update_max.as_secs_f64() * 1000.0,
+                    super::frame_backpressure::take_deferred(),
                 );
                 *a = Acc::default();
             }
         });
+    }
+}
+
+/// Partii (bd stream): how many WebRender frames may be in flight (asked for and not yet taken by the
+/// renderer) before the painter holds new ones back. `PARTII_PAINT_FRAMES_IN_FLIGHT=N` (default 1;
+/// `0` = no limit, upstream).
+pub(crate) mod frame_backpressure {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(crate) fn max_in_flight() -> Option<usize> {
+        static MAX: OnceLock<Option<usize>> = OnceLock::new();
+        *MAX.get_or_init(|| {
+            match std::env::var("PARTII_PAINT_FRAMES_IN_FLIGHT")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+            {
+                Some(0) => None,
+                Some(n) => Some(n),
+                None => Some(1),
+            }
+        })
+    }
+
+    static DEFERRED: AtomicUsize = AtomicUsize::new(0);
+    pub(crate) fn count_deferred() {
+        DEFERRED.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn take_deferred() -> usize {
+        DEFERRED.swap(0, Ordering::Relaxed)
     }
 }
