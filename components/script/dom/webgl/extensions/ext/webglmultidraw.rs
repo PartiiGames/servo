@@ -167,6 +167,10 @@ impl WEBGLMultiDrawMethods<crate::DomTypeHolder> for WEBGLMultiDraw {
         counts_offset: u64,
         drawcount: i32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         let (firsts, counts) = (to_vec(firsts_list), to_vec(counts_list));
         self.draw(cx, |cx| {
             let firsts = entries(&firsts, firsts_offset, drawcount)?;
@@ -189,6 +193,10 @@ impl WEBGLMultiDrawMethods<crate::DomTypeHolder> for WEBGLMultiDraw {
         offsets_offset: u64,
         drawcount: i32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         let (counts, offsets) = (to_vec(counts_list), to_vec(offsets_list));
         self.draw(cx, |cx| {
             let counts = entries(&counts, counts_offset, drawcount)?;
@@ -212,6 +220,10 @@ impl WEBGLMultiDrawMethods<crate::DomTypeHolder> for WEBGLMultiDraw {
         instance_counts_offset: u64,
         drawcount: i32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         let (firsts, counts, instances) = (
             to_vec(firsts_list),
             to_vec(counts_list),
@@ -241,6 +253,10 @@ impl WEBGLMultiDrawMethods<crate::DomTypeHolder> for WEBGLMultiDraw {
         instance_counts_offset: u64,
         drawcount: i32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         let (counts, offsets, instances) = (
             to_vec(counts_list),
             to_vec(offsets_list),

@@ -102,6 +102,13 @@ impl IndexedBinding {
             size: Cell::new(0),
         }
     }
+
+    /// Partii: unbound (a restored context).
+    pub(crate) fn reset(&self) {
+        self.buffer.set(None);
+        self.start.set(0);
+        self.size.set(0);
+    }
 }
 
 #[dom_struct] // no need to report size here as it is reported as part of WebGLRenderingContext
@@ -463,6 +470,39 @@ impl WebGL2RenderingContext {
 
     pub(crate) fn base_context(&self) -> DomRoot<WebGLRenderingContext> {
         DomRoot::from_ref(&*self.base)
+    }
+
+    /// Partii: the WebGL 2 state back to a new context's, after the base context was restored
+    /// with a new GL context (WebGLRenderingContext::restore_context).
+    pub(crate) fn reset_state_after_restore(&self) {
+        self.occlusion_query.set(None);
+        self.primitives_query.set(None);
+        for sampler in self.samplers.iter() {
+            sampler.set(None);
+        }
+        self.bound_copy_read_buffer.set(None);
+        self.bound_copy_write_buffer.set(None);
+        self.bound_pixel_pack_buffer.set(None);
+        self.bound_pixel_unpack_buffer.set(None);
+        self.bound_transform_feedback_buffer.set(None);
+        self.bound_uniform_buffer.set(None);
+        for binding in self
+            .indexed_uniform_buffer_bindings
+            .iter()
+            .chain(self.indexed_transform_feedback_buffer_bindings.iter())
+        {
+            binding.reset();
+        }
+        self.current_transform_feedback.set(None);
+        self.default_transform_feedback.reset();
+        self.texture_pack_row_length.set(0);
+        self.texture_pack_skip_pixels.set(0);
+        self.texture_pack_skip_rows.set(0);
+        self.unpack_params.set(UnpackParams::default());
+        self.enable_rasterizer_discard.set(false);
+        self.color_write_mask.set([true; 4]);
+        self.default_fb_readbuffer.set(constants::BACK);
+        self.default_fb_drawbuffer.set(constants::BACK);
     }
 
     fn bound_buffer(
@@ -4077,6 +4117,9 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/2.0/#4.7.7>
     fn GetFragDataLocation(&self, program: &WebGLProgram, name: DOMString) -> i32 {
+        if self.base.is_lost() {
+            return -1;
+        }
         handle_potential_webgl_error!(self.base, self.base.validate_ownership(program), return -1);
         handle_potential_webgl_error!(self.base, program.get_frag_data_location(name), -1)
     }

@@ -9,7 +9,6 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     GlType, InternalFormatIntVec, WebGLCommand, WebGLError, WebGLObjectNameKind,
     WebGLRenderbufferId, WebGLResult, WebGLVersion, webgl_channel,
@@ -22,13 +21,13 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
-use crate::dom::webgl::webglobject::WebGLObject;
+use crate::dom::webgl::webglobject::{WebGLObject, WebGLObjectContext};
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLRenderbuffer {
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
     #[no_trace]
     id: WebGLRenderbufferId,
     is_deleted: Cell<bool>,
@@ -106,7 +105,7 @@ impl WebGLRenderbuffer {
             is_initialized: Cell::new(false),
             attached_framebuffers: Default::default(),
             droppable: DroppableWebGLRenderbuffer {
-                context: WeakRef::new(context),
+                context: WebGLObjectContext::new(context),
                 id,
                 is_deleted: Cell::new(false),
             },

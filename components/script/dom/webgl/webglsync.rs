@@ -7,20 +7,19 @@ use std::cell::Cell;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLSyncId, webgl_channel};
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::webgl::webglobject::WebGLObject;
+use crate::dom::webgl::webglobject::{WebGLObject, WebGLObjectContext};
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLSync {
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
     #[no_trace]
     sync_id: WebGLSyncId,
     marked_for_deletion: Cell<bool>,
@@ -72,7 +71,7 @@ impl WebGLSync {
             client_wait_status: Cell::new(None),
             sync_status: Cell::new(None),
             droppable: DroppableWebGLSync {
-                context: WeakRef::new(context),
+                context: WebGLObjectContext::new(context),
                 sync_id,
                 marked_for_deletion: Cell::new(false),
             },

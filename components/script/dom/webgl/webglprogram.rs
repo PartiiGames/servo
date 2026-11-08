@@ -28,7 +28,7 @@ use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::webgl::shaderinterface::link_mismatch;
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
-use crate::dom::webgl::webglobject::WebGLObject;
+use crate::dom::webgl::webglobject::{WebGLObject, WebGLObjectContext};
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webgl::webglshader::{CompileJob, FragOutputKind, WebGLShader};
 use crate::dom::webgl::webgluniformlocation::WebGLUniformLocation;
@@ -38,7 +38,7 @@ use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 struct DroppableWebGLProgram {
     #[no_trace]
     id: WebGLProgramId,
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
     fragment_shader: Option<WeakRef<WebGLShader>>,
     vertex_shader: Option<WeakRef<WebGLShader>>,
     marked_for_deletion: bool,
@@ -49,7 +49,7 @@ impl DroppableWebGLProgram {
     fn new(id: WebGLProgramId, context: &WebGLRenderingContext) -> Self {
         Self {
             id,
-            context: WeakRef::new(context),
+            context: WebGLObjectContext::new(context),
             fragment_shader: None,
             vertex_shader: None,
             marked_for_deletion: Default::default(),

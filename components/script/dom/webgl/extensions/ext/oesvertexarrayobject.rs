@@ -42,16 +42,28 @@ impl OESVertexArrayObjectMethods<crate::DomTypeHolder> for OESVertexArrayObject 
 
     /// <https://www.khronos.org/registry/webgl/extensions/OES_vertex_array_object/>
     fn DeleteVertexArrayOES(&self, cx: &mut JSContext, vao: Option<&WebGLVertexArrayObjectOES>) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         self.ctx.delete_vertex_array(cx, vao);
     }
 
     /// <https://www.khronos.org/registry/webgl/extensions/OES_vertex_array_object/>
     fn IsVertexArrayOES(&self, vao: Option<&WebGLVertexArrayObjectOES>) -> bool {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return false;
+        }
         self.ctx.is_vertex_array(vao)
     }
 
     /// <https://www.khronos.org/registry/webgl/extensions/OES_vertex_array_object/>
     fn BindVertexArrayOES(&self, vao: Option<&WebGLVertexArrayObjectOES>) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         self.ctx.bind_vertex_array(vao);
     }
 }

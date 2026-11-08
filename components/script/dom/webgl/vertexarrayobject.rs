@@ -5,12 +5,12 @@
 use std::cell::Cell;
 
 use script_bindings::cell::{DomRefCell, Ref};
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     ActiveAttribInfo, WebGLCommand, WebGLError, WebGLProgramId, WebGLResult, WebGLVersion,
     WebGLVertexArrayId,
 };
 
+use crate::dom::webgl::webglobject::WebGLObjectContext;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::root::{Dom, MutNullableDom};
@@ -20,7 +20,7 @@ use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext}
 #[derive(JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) struct VertexArrayObject {
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
     #[no_trace]
     id: Option<WebGLVertexArrayId>,
     ever_bound: Cell<bool>,
@@ -40,7 +40,7 @@ impl VertexArrayObject {
     pub(crate) fn new(context: &WebGLRenderingContext, id: Option<WebGLVertexArrayId>) -> Self {
         let max_vertex_attribs = context.limits().max_vertex_attribs as usize;
         Self {
-            context: WeakRef::new(context),
+            context: WebGLObjectContext::new(context),
             id,
             ever_bound: Default::default(),
             is_deleted: Default::default(),

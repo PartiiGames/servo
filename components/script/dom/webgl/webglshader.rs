@@ -10,7 +10,6 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_weak_referenceable_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_base::generic_channel::{GenericReceiver, TryReceiveError};
 use servo_canvas_traits::webgl::{
     GLLimits, ShaderCompileInfo, ShaderTranslation, WebGLCommand, WebGLError, WebGLResult,
@@ -30,6 +29,7 @@ use {
     crate::dom::webglrenderingcontext::capture_webgl_backtrace,
 };
 
+use crate::dom::webgl::webglobject::WebGLObjectContext;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -111,7 +111,7 @@ impl CompileJob {
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLShader {
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
     #[no_trace]
     id: WebGLShaderId,
     marked_for_deletion: Cell<bool>,
@@ -412,7 +412,7 @@ impl WebGLShader {
             attached_counter: Cell::new(0),
             compile_job: Default::default(),
             droppable: DroppableWebGLShader {
-                context: WeakRef::new(context),
+                context: WebGLObjectContext::new(context),
                 id,
                 marked_for_deletion: Cell::new(false),
             },

@@ -66,6 +66,32 @@ impl WebGLObject {
     }
 }
 
+/// Partii: the context that made an object, for the object's own GL commands (the deletes when
+/// it is dropped among them). `root()` is None once that GL context is gone: a restored context
+/// has a new one (WebGL 1.0 5.15.3), whose names would collide with this object's.
+#[derive(JSTraceable, MallocSizeOf)]
+pub(crate) struct WebGLObjectContext {
+    context: WeakRef<WebGLRenderingContext>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "An id"]
+    context_id: WebGLContextId,
+}
+
+impl WebGLObjectContext {
+    pub(crate) fn new(context: &WebGLRenderingContext) -> Self {
+        Self {
+            context: WeakRef::new(context),
+            context_id: context.sender().context_id(),
+        }
+    }
+
+    pub(crate) fn root(&self) -> Option<DomRoot<WebGLRenderingContext>> {
+        self.context
+            .root()
+            .filter(|context| context.sender().context_id() == self.context_id)
+    }
+}
+
 impl WebGLObjectMethods<crate::DomTypeHolder> for WebGLObject {
     /// <https://registry.khronos.org/webgl/specs/latest/1.0/#5.3>
     fn Label(&self) -> USVString {

@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::{cmp, ptr};
@@ -23,6 +23,7 @@ use script_bindings::cell::{DomRefCell, Ref, RefMut};
 use script_bindings::reflector::{
     AssociatedMemory, Reflector, reflect_weak_referenceable_dom_object,
 };
+use script_bindings::weakref::WeakRef;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{GenericReceiver, GenericSharedMemory};
 use servo_base::{Epoch, generic_channel};
@@ -31,11 +32,13 @@ use servo_canvas_traits::webgl::{
     AlphaTreatment, CompressedTexData, GLContextAttributes, GLLimits, GlType, Parameter,
     SizedDataType, TexDataType, TexFormat, TexParameter, WebGLCommand, WebGLCommandBacktrace,
     WebGLContextId, WebGLError, WebGLFramebufferBindingRequest, WebGLMsg, WebGLMsgSender,
-    WebGLObjectNameKind, WebGLProgramId, WebGLResult, WebGLVersion, WebGLVertexArrayId,
+    WebGLObjectNameKind, WebGLProgramId, WebGLResult, WebGLShaderId, WebGLVersion,
+    WebGLVertexArrayId,
     YAxisTreatment,
     webgl_channel,
 };
 use servo_config::pref;
+use stylo_atoms::Atom;
 use webrender_api::ImageKey;
 
 use crate::canvas_context::{CanvasContext, HTMLCanvasElementOrOffscreenCanvas};
@@ -60,11 +63,14 @@ use crate::dom::bindings::codegen::UnionTypes::{
     HTMLCanvasElementOrOffscreenCanvas as RootedHTMLCanvasElementOrOffscreenCanvas,
     Int32ArrayOrLongSequence, MaybeSharedArrayBufferViewOrMaybeSharedArrayBuffer,
 };
+use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::refcounted::Trusted;
+use crate::tasks::task::TaskOnce;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{DomOnceCell, DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
@@ -182,15 +188,44 @@ pub(crate) enum Operation {
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLRenderingContext {
+    /// Partii: a restored context gets a new GL context on the WebGL thread, with a new id.
     #[no_trace]
-    webgl_sender: WebGLMsgSender,
+    #[ignore_malloc_size_of = "Channels"]
+    webgl_sender: RefCell<WebGLMsgSender>,
+    /// Whether the GL context is counted in LIVE_CONTEXTS (not lost).
+    counted: Cell<bool>,
 }
 
 impl Drop for DroppableWebGLRenderingContext {
     fn drop(&mut self) {
-        LIVE_CONTEXTS.with(|live| live.set(live.get().saturating_sub(1)));
-        let _ = self.webgl_sender.send_remove();
+        if self.counted.get() {
+            LIVE_CONTEXTS.with(|live| live.set(live.get().saturating_sub(1)));
+        }
+        let _ = self.webgl_sender.get_mut().send_remove();
     }
+}
+
+/// Partii: the state of WebGL context loss (WebGL 1.0 5.15.2, WEBGL_lose_context).
+#[derive(Clone, Copy, Default, PartialEq)]
+struct ContextLoss {
+    /// The webgl context lost flag.
+    lost: bool,
+    /// The webglcontextlost event was canceled: restoreContext() may restore the context.
+    restore_allowed: bool,
+    /// A restore is queued.
+    restore_pending: bool,
+}
+
+/// Partii: live (not lost) WebGL contexts of this thread at which creating another one loses the
+/// oldest, as browsers do (Chromium: 16). PARTII_WEBGL_MAX_CONTEXTS overrides it (0: no limit).
+fn max_live_contexts() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("PARTII_WEBGL_MAX_CONTEXTS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(16)
+    })
 }
 
 /// Live WebGL contexts made by this script thread, and the count at which the next context
@@ -198,13 +233,36 @@ impl Drop for DroppableWebGLRenderingContext {
 /// llvmpipe, megabytes each) but reports only its drawing buffer to the GC, so a page that makes
 /// many small throwaway canvases (the WebGPU CTS copy_contents_from_gl_context_canvas: thousands)
 /// never triggers a GC and holds them all: ~25 GB in a minute. Browsers bound this by losing the
-/// oldest context; until context loss exists here, a GC past the threshold frees the unreachable
+/// oldest context (lose_oldest_contexts_if_too_many does too); first a GC past the threshold frees the unreachable
 /// ones (foreground finalizers send RemoveContext at once). The threshold doubles over the
 /// contexts still live after it, so a page that really keeps many pays one GC per doubling.
 const MIN_CONTEXTS_BEFORE_GC: usize = 16;
 thread_local! {
     static LIVE_CONTEXTS: Cell<usize> = const { Cell::new(0) };
     static NEXT_GC_AT: Cell<usize> = const { Cell::new(MIN_CONTEXTS_BEFORE_GC) };
+    /// Partii: this thread's contexts in the order their GL contexts were made (creation or
+    /// restore), oldest first, for losing the oldest one past max_live_contexts.
+    static CONTEXTS_BY_AGE: RefCell<Vec<WeakRef<WebGLRenderingContext>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Partii: before a GL context is made, lose the oldest live contexts of this thread until there is
+/// room for it under max_live_contexts (after collect_dead_contexts_if_many has freed the
+/// unreachable ones). Each lost context fires webglcontextlost at its canvas.
+fn lose_oldest_contexts_if_too_many() {
+    let max = max_live_contexts();
+    if max == 0 {
+        return;
+    }
+    let oldest: Vec<DomRoot<WebGLRenderingContext>> = CONTEXTS_BY_AGE.with(|contexts| {
+        let mut contexts = contexts.borrow_mut();
+        contexts.retain(|context| context.root().is_some_and(|context| !context.is_lost()));
+        let excess = (contexts.len() + 1).saturating_sub(max);
+        contexts.iter().take(excess).filter_map(|context| context.root()).collect()
+    });
+    for context in oldest {
+        warn!("Too many active WebGL contexts: the oldest one is lost");
+        context.lose_context(false);
+    }
 }
 
 #[expect(unsafe_code)]
@@ -268,13 +326,24 @@ pub(crate) struct WebGLRenderingContext {
     stencil_state: Cell<StencilState>,
     /// Whether the default framebuffer was asked for a stencil buffer.
     default_framebuffer_stencil: bool,
-    default_vao: DomOnceCell<WebGLVertexArrayObjectOES>,
+    default_vao: MutNullableDom<WebGLVertexArrayObjectOES>,
     current_vao: MutNullableDom<WebGLVertexArrayObjectOES>,
-    default_vao_webgl2: DomOnceCell<WebGLVertexArrayObject>,
+    default_vao_webgl2: MutNullableDom<WebGLVertexArrayObject>,
     current_vao_webgl2: MutNullableDom<WebGLVertexArrayObject>,
     textures: Textures,
     #[no_trace]
     api_type: GlType,
+    /// Partii: context loss (WebGL 1.0 5.15.2).
+    #[no_trace]
+    #[ignore_malloc_size_of = "Plain state"]
+    loss: Cell<ContextLoss>,
+    /// Partii: the attributes and canvas image key, to make a new GL context on restore.
+    #[no_trace]
+    #[ignore_malloc_size_of = "Plain state"]
+    attributes: GLContextAttributes,
+    #[no_trace]
+    #[ignore_malloc_size_of = "An id"]
+    image_key: Cell<Option<ImageKey>>,
     droppable: DroppableWebGLRenderingContext,
 }
 
@@ -355,11 +424,15 @@ impl WebGLRenderingContext {
                 current_vao_webgl2: Default::default(),
                 textures: Textures::new(max_combined_texture_image_units),
                 api_type: ctx_data.api_type,
+                loss: Default::default(),
+                attributes: attrs,
+                image_key: Cell::new(None),
                 droppable: DroppableWebGLRenderingContext {
                     webgl_sender: {
                         LIVE_CONTEXTS.with(|live| live.set(live.get() + 1));
-                        ctx_data.sender
+                        RefCell::new(ctx_data.sender)
                     },
+                    counted: Cell::new(true),
                 },
             }
         })
@@ -375,6 +448,7 @@ impl WebGLRenderingContext {
         attrs: GLContextAttributes,
     ) -> Option<DomRoot<WebGLRenderingContext>> {
         collect_dead_contexts_if_many(cx);
+        lose_oldest_contexts_if_too_many();
         match WebGLRenderingContext::new_inherited(
             global,
             HTMLCanvasElementOrOffscreenCanvas::from(canvas),
@@ -382,11 +456,11 @@ impl WebGLRenderingContext {
             size,
             attrs,
         ) {
-            Ok(ctx) => Some(reflect_weak_referenceable_dom_object(
-                cx,
-                Rc::new(ctx),
-                global,
-            )),
+            Ok(ctx) => {
+                let ctx = reflect_weak_referenceable_dom_object(cx, Rc::new(ctx), global);
+                CONTEXTS_BY_AGE.with(|contexts| contexts.borrow_mut().push(WeakRef::new(&*ctx)));
+                Some(ctx)
+            },
             Err(msg) => {
                 error!("Couldn't create WebGLRenderingContext: {}", msg);
                 let event = WebGLContextEvent::new(
@@ -410,12 +484,218 @@ impl WebGLRenderingContext {
         }
     }
 
+    /// Partii: whether the webgl context lost flag is set.
+    #[inline]
+    pub(crate) fn is_lost(&self) -> bool {
+        self.loss.get().lost
+    }
+
+    /// WEBGL_lose_context.loseContext(): lose the context, simulated.
+    pub(crate) fn lose_context_from_extension(&self) {
+        if self.is_lost() {
+            self.webgl_error(InvalidOperation);
+            return;
+        }
+        self.lose_context(true);
+    }
+
+    /// WEBGL_lose_context.restoreContext(): restore a context lost with its webglcontextlost
+    /// event canceled, in a task (it stays lost until the webglcontextrestored event).
+    pub(crate) fn restore_context_from_extension(&self) {
+        let loss = self.loss.get();
+        if !loss.lost || !loss.restore_allowed {
+            self.webgl_error(InvalidOperation);
+            return;
+        }
+        if loss.restore_pending {
+            return;
+        }
+        let this = Trusted::new(self);
+        if self.queue_task(task!(webgl_restore_context: move |cx| {
+            this.root().restore_context(cx);
+        })) {
+            self.loss.set(ContextLoss {
+                restore_pending: true,
+                ..loss
+            });
+        }
+    }
+
+    /// Queues a WebGL task (the DOM manipulation task source). A dedicated worker can queue tasks
+    /// only while it handles a message: false if it can't.
+    fn queue_task(&self, task: impl TaskOnce + 'static) -> bool {
+        let global = self.global();
+        let task_manager = global.task_manager();
+        if task_manager.sender().is_none() {
+            warn!("WebGL context loss: no task queue (a dedicated worker outside a message)");
+            return false;
+        }
+        task_manager.dom_manipulation_task_source().queue(task);
+        true
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#CONTEXT_LOST>: set the webgl
+    /// context lost flag, generate CONTEXT_LOST_WEBGL, free the GL context and queue a task to
+    /// fire webglcontextlost at the canvas. `simulated` is WEBGL_lose_context; otherwise this
+    /// thread had too many live contexts (lose_oldest_contexts_if_too_many).
+    pub(crate) fn lose_context(&self, simulated: bool) {
+        if self.is_lost() {
+            return;
+        }
+        self.loss.set(ContextLoss {
+            lost: true,
+            ..Default::default()
+        });
+        self.last_error.set(Some(WebGLError::ContextLost));
+        if self.droppable.counted.replace(false) {
+            LIVE_CONTEXTS.with(|live| live.set(live.get().saturating_sub(1)));
+        }
+        // Names reserved in the old GL context mean nothing any more.
+        *self.object_names.borrow_mut() = Default::default();
+        let _ = self.sender().send_remove();
+        debug!("WebGL context lost (simulated: {simulated})");
+
+        let this = Trusted::new(self);
+        self.queue_task(task!(webgl_context_lost: move |cx| {
+            this.root().fire_context_lost(cx);
+        }));
+    }
+
+    fn fire_context_event(&self, cx: &mut JSContext, name: &str, cancelable: bool) -> bool {
+        let event = WebGLContextEvent::new(
+            cx,
+            &self.global(),
+            Atom::from(name),
+            EventBubbles::DoesNotBubble,
+            if cancelable {
+                EventCancelable::Cancelable
+            } else {
+                EventCancelable::NotCancelable
+            },
+            DOMString::new(),
+        );
+        let event = event.upcast::<Event>();
+        match &self.canvas {
+            HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) => {
+                event.fire(cx, canvas.upcast());
+            },
+            HTMLCanvasElementOrOffscreenCanvas::OffscreenCanvas(canvas) => {
+                event.fire(cx, canvas.upcast());
+            },
+        }
+        event.DefaultPrevented()
+    }
+
+    fn fire_context_lost(&self, cx: &mut JSContext) {
+        if !self.is_lost() {
+            return;
+        }
+        let canceled = self.fire_context_event(cx, "webglcontextlost", true);
+        let loss = self.loss.get();
+        if loss.lost && canceled {
+            self.loss.set(ContextLoss {
+                restore_allowed: true,
+                ..loss
+            });
+        }
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#restore-the-drawing-buffer>: a new GL
+    /// context with the same attributes and size, every object and extension of the old one
+    /// invalid, all state at its defaults, then webglcontextrestored.
+    fn restore_context(&self, cx: &mut JSContext) {
+        let loss = self.loss.get();
+        if !loss.lost || !loss.restore_pending {
+            return;
+        }
+        self.loss.set(ContextLoss {
+            restore_pending: false,
+            ..loss
+        });
+        let global = self.global();
+        let (Some(webgl_chan), Some(webview_id)) = (global.webgl_chan(), global.webview_id())
+        else {
+            return;
+        };
+        collect_dead_contexts_if_many(cx);
+        lose_oldest_contexts_if_too_many();
+        let (sender, receiver) = webgl_channel().unwrap();
+        if webgl_chan
+            .send(WebGLMsg::CreateContext(
+                webview_id.into(),
+                self.webgl_version,
+                self.size.get(),
+                self.attributes,
+                sender,
+            ))
+            .is_err()
+        {
+            return;
+        }
+        let ctx_data = match receiver.recv() {
+            Ok(Ok(ctx_data)) => ctx_data,
+            Ok(Err(msg)) => {
+                error!("Couldn't restore the WebGL context: {msg}");
+                return;
+            },
+            Err(_) => return,
+        };
+        *self.droppable.webgl_sender.borrow_mut() = ctx_data.sender;
+        self.droppable.counted.set(true);
+        LIVE_CONTEXTS.with(|live| live.set(live.get() + 1));
+        CONTEXTS_BY_AGE.with(|contexts| contexts.borrow_mut().push(WeakRef::new(self)));
+        if let Some(image_key) = self.image_key.get() {
+            self.sender().set_image_key(image_key);
+        }
+        self.reset_state_after_restore();
+        if let Some(webgl2) = self.webgl2.get() {
+            webgl2.reset_state_after_restore();
+        }
+        self.loss.set(ContextLoss::default());
+        self.fire_context_event(cx, "webglcontextrestored", false);
+        self.mark_as_dirty();
+    }
+
+    /// Partii: script-side state back to a new context's (restore_context).
+    fn reset_state_after_restore(&self) {
+        let size = self.size.get();
+        self.last_error.set(None);
+        self.texture_packing_alignment.set(4);
+        self.texture_unpacking_settings
+            .set(TextureUnpacking::CONVERT_COLORSPACE);
+        self.texture_unpacking_alignment.set(4);
+        self.bound_draw_framebuffer.set(None);
+        self.bound_read_framebuffer.set(None);
+        self.bound_renderbuffer.set(None);
+        self.bound_buffer_array.set(None);
+        self.current_program.set(None);
+        for attrib in self.current_vertex_attribs.borrow_mut().iter_mut() {
+            *attrib = VertexAttrib::Float(0f32, 0f32, 0f32, 1f32);
+        }
+        self.current_scissor.set((0, 0, size.width, size.height));
+        self.current_clear_color.set((0.0, 0.0, 0.0, 0.0));
+        *self.object_names.borrow_mut() = Default::default();
+        self.draw_state_gen.bump();
+        self.extension_manager.reset_after_restore();
+        self.capabilities.value.set(Default::default());
+        self.stencil_state.set(Default::default());
+        self.default_vao.set(None);
+        self.current_vao.set(None);
+        self.default_vao_webgl2.set(None);
+        self.current_vao_webgl2.set(None);
+        self.textures.reset();
+    }
+
     pub(crate) fn set_image_key(&self, image_key: ImageKey) {
-        self.droppable.webgl_sender.set_image_key(image_key);
+        self.image_key.set(Some(image_key));
+        if self.is_lost() {
+            return;
+        }
+        self.sender().set_image_key(image_key);
     }
 
     pub(crate) fn update_rendering(&self, canvas_epoch: Epoch) -> bool {
-        if !self.onscreen() {
+        if !self.onscreen() || self.is_lost() {
             return false;
         }
         self.swap_buffers(Some(canvas_epoch))
@@ -425,6 +705,9 @@ impl WebGLRenderingContext {
     /// context has an image key, updates that image (tagged `canvas_epoch`). This works on
     /// any thread; an OffscreenCanvas uses it to update its placeholder canvas element.
     pub(crate) fn swap_buffers(&self, canvas_epoch: Option<Epoch>) -> bool {
+        if self.is_lost() {
+            return false;
+        }
         let Some(webgl_chan) = self.global().webgl_chan() else {
             return false;
         };
@@ -459,19 +742,15 @@ impl WebGLRenderingContext {
 
     pub(crate) fn current_vao(&self, cx: &mut JSContext) -> DomRoot<WebGLVertexArrayObjectOES> {
         self.current_vao.or_init(|| {
-            DomRoot::from_ref(
-                self.default_vao
-                    .init_once(|| WebGLVertexArrayObjectOES::new(cx, self, None)),
-            )
+            self.default_vao
+                .or_init(|| WebGLVertexArrayObjectOES::new(cx, self, None))
         })
     }
 
     pub(crate) fn current_vao_webgl2(&self, cx: &mut JSContext) -> DomRoot<WebGLVertexArrayObject> {
         self.current_vao_webgl2.or_init(|| {
-            DomRoot::from_ref(
-                self.default_vao_webgl2
-                    .init_once(|| WebGLVertexArrayObject::new(cx, self, None)),
-            )
+            self.default_vao_webgl2
+                .or_init(|| WebGLVertexArrayObject::new(cx, self, None))
         })
     }
 
@@ -492,8 +771,8 @@ impl WebGLRenderingContext {
     }
 
     #[inline]
-    pub(crate) fn sender(&self) -> &WebGLMsgSender {
-        &self.droppable.webgl_sender
+    pub(crate) fn sender(&self) -> Ref<'_, WebGLMsgSender> {
+        self.droppable.webgl_sender.borrow()
     }
 
     #[inline]
@@ -502,6 +781,7 @@ impl WebGLRenderingContext {
         let result = self
             .droppable
             .webgl_sender
+            .borrow()
             .send(command, capture_webgl_backtrace());
         if matches!(fallibility, Operation::Infallible) {
             result.expect("Operation failed");
@@ -597,6 +877,11 @@ impl WebGLRenderingContext {
     /// for when half the current one is used, so a create waits only when a whole batch went in between.
     /// None when the WebGL thread has none to give (as the Create* commands answer None).
     pub(crate) fn take_object_name(&self, kind: WebGLObjectNameKind) -> Option<NonZeroU32> {
+        // Partii: a lost context still returns objects from createBuffer() and the like, but
+        // they name nothing (WebGL 1.0 5.14: a lost context's objects are invalid).
+        if self.is_lost() {
+            return Some(LOST_OBJECT_NAME);
+        }
         let batch = object_name_batch();
         let mut pools = self.object_names.borrow_mut();
         let pool = &mut pools.0[kind as usize];
@@ -810,6 +1095,11 @@ impl WebGLRenderingContext {
             return Err(WebGLError::InvalidOperation);
         };
         if self != &*context {
+            return Err(WebGLError::InvalidOperation);
+        }
+        // Partii: objects made before a context restore (or while lost) belong to the old GL
+        // context (WebGL 1.0 5.15.3: they are invalid in the restored one).
+        if object.upcast().context_id() != self.context_id() {
             return Err(WebGLError::InvalidOperation);
         }
         Ok(())
@@ -1875,7 +2165,7 @@ impl WebGLRenderingContext {
     ) -> Option<DomRoot<WebGLVertexArrayObjectOES>> {
         // Partii (perf): a pooled name, as createTexture takes (take_object_name), rather than a
         // round trip to the WebGL thread per createVertexArray.
-        if !vao_pool_enabled() {
+        if !vao_pool_enabled() && !self.is_lost() {
             let (sender, receiver) = webgl_channel().unwrap();
             self.send_command(WebGLCommand::CreateVertexArray(sender));
             return receiver
@@ -1892,7 +2182,7 @@ impl WebGLRenderingContext {
         cx: &mut JSContext,
     ) -> Option<DomRoot<WebGLVertexArrayObject>> {
         // Partii (perf): a pooled name, as in create_vertex_array.
-        if !vao_pool_enabled() {
+        if !vao_pool_enabled() && !self.is_lost() {
             let (sender, receiver) = webgl_channel().unwrap();
             self.send_command(WebGLCommand::CreateVertexArray(sender));
             return receiver
@@ -2671,7 +2961,7 @@ impl CanvasContext for WebGLRenderingContext {
     type ID = WebGLContextId;
 
     fn context_id(&self) -> Self::ID {
-        self.droppable.webgl_sender.context_id()
+        self.droppable.webgl_sender.borrow().context_id()
     }
 
     fn canvas(&self) -> Option<RootedHTMLCanvasElementOrOffscreenCanvas> {
@@ -2685,11 +2975,14 @@ impl CanvasContext for WebGLRenderingContext {
         if self.size.get() == size {
             return;
         }
+        // A lost context keeps the size for its restore (context-lost: resizing a lost context
+        // works and it stays lost).
+        if self.is_lost() {
+            self.size.set(size);
+            return;
+        }
         let (sender, receiver) = webgl_channel().unwrap();
-        self.droppable
-            .webgl_sender
-            .send_resize(size, sender)
-            .unwrap();
+        self.sender().send_resize(size, sender).unwrap();
         // FIXME(#21718) The backend is allowed to choose a size smaller than
         // what was requested
         self.size.set(size);
@@ -2753,6 +3046,10 @@ impl CanvasContext for WebGLRenderingContext {
     //
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#2.2>
     fn get_image_data(&self) -> Option<Snapshot> {
+        // A lost context has no drawing buffer.
+        if self.is_lost() {
+            return None;
+        }
         handle_potential_webgl_error!(self, self.validate_framebuffer(), return None);
         let mut size = self.size().cast();
 
@@ -3218,8 +3515,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         // If the send does not succeed, assume context lost
         let backtrace = capture_webgl_backtrace();
         if self
-            .droppable
-            .webgl_sender
+            .sender()
             .send(WebGLCommand::GetContextAttributes(sender), backtrace)
             .is_err()
         {
@@ -3242,7 +3538,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.13>
     fn IsContextLost(&self) -> bool {
-        false
+        self.is_lost()
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.14>
@@ -3894,11 +4190,26 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn CreateProgram(&self, cx: &mut JSContext) -> Option<DomRoot<WebGLProgram>> {
+        if self.is_lost() {
+            return Some(WebGLProgram::new(
+                cx,
+                self,
+                WebGLProgramId::new(LOST_OBJECT_NAME),
+            ));
+        }
         WebGLProgram::maybe_new(cx, self)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.9>
     fn CreateShader(&self, cx: &mut JSContext, shader_type: u32) -> Option<DomRoot<WebGLShader>> {
+        if self.is_lost() {
+            return Some(WebGLShader::new(
+                cx,
+                self,
+                WebGLShaderId::new(LOST_OBJECT_NAME),
+                shader_type,
+            ));
+        }
         match shader_type {
             constants::VERTEX_SHADER | constants::FRAGMENT_SHADER => {},
             _ => {
@@ -4105,6 +4416,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.10>
     fn GetAttribLocation(&self, program: &WebGLProgram, name: DOMString) -> i32 {
+        if self.is_lost() {
+            return -1;
+        }
         handle_potential_webgl_error!(self, self.validate_ownership(program), return -1);
         handle_potential_webgl_error!(self, program.get_attrib_location(name), -1)
     }
@@ -5739,6 +6053,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.6>
     fn CheckFramebufferStatus(&self, target: u32) -> u32 {
+        if self.is_lost() {
+            return constants::FRAMEBUFFER_UNSUPPORTED;
+        }
         // From the GLES 2.0.25 spec, 4.4 ("Framebuffer Objects"):
         //
         //    "If target is not FRAMEBUFFER, INVALID_ENUM is
@@ -5923,6 +6240,22 @@ impl Textures {
 
     pub(crate) fn binding_sequence(&self) -> u64 {
         self.binding_sequence.get()
+    }
+
+    /// Partii: no textures bound, unit 0 active (a restored context).
+    fn reset(&self) {
+        self.active_unit.set(0);
+        for unit in self.units.iter() {
+            unit.tex_2d.set(None);
+            unit.tex_cube_map.set(None);
+            unit.tex_2d_array.set(None);
+            unit.tex_3d.set(None);
+        }
+        let sequence = self.binding_sequence.get() + 1;
+        self.binding_sequence.set(sequence);
+        for unit in self.units.iter() {
+            unit.changed_at.set(sequence);
+        }
     }
 
     /// A texture or sampler binding of `unit` changed.
@@ -6525,6 +6858,9 @@ fn vao_pool_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| !matches!(std::env::var("PARTII_WEBGL_VAO_POOL").as_deref(), Ok("0")))
 }
+
+/// Partii: the name of objects made while the context is lost (take_object_name).
+pub(crate) const LOST_OBJECT_NAME: NonZeroU32 = NonZeroU32::MAX;
 
 /// OES_texture_half_float's HALF_FLOAT_OES (WebGL 1 readPixels accepts the enum).
 const HALF_FLOAT_OES: u32 = 0x8D61;

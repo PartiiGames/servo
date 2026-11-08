@@ -97,6 +97,10 @@ impl WEBGLMultiDrawInstancedBaseVertexBaseInstanceMethods<crate::DomTypeHolder>
         base_instances_offset: u64,
         drawcount: i32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         let (firsts, counts, instances, base_instances) = (
             to_vec(firsts_list),
             to_vec(counts_list),
@@ -139,6 +143,10 @@ impl WEBGLMultiDrawInstancedBaseVertexBaseInstanceMethods<crate::DomTypeHolder>
         base_instances_offset: u64,
         drawcount: i32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         let (counts, offsets, instances, base_vertices, base_instances) = (
             to_vec(counts_list),
             to_vec(offsets_list),

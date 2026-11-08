@@ -11,7 +11,6 @@ use euclid::Size2D;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     TexDataType, WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
     WebGLObjectNameKind, WebGLRenderbufferId, WebGLResult, WebGLTextureId, WebGLVersion,
@@ -25,7 +24,7 @@ use crate::dom::bindings::reflector::DomGlobal;
 #[cfg(feature = "webxr")]
 use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::webgl::webglobject::WebGLObject;
+use crate::dom::webgl::webglobject::{WebGLObject, WebGLObjectContext};
 use crate::dom::webgl::webglrenderbuffer::WebGLRenderbuffer;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webgl::webgltexture::WebGLTexture;
@@ -105,14 +104,14 @@ struct DroppableWebGLFramebuffer {
     #[no_trace]
     id: WebGLFramebufferId,
     is_deleted: Cell<bool>,
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
 }
 
 impl DroppableWebGLFramebuffer {
     fn new(
         id: WebGLFramebufferId,
         is_deleted: Cell<bool>,
-        context: WeakRef<WebGLRenderingContext>,
+        context: WebGLObjectContext,
     ) -> Self {
         Self {
             id,
@@ -195,7 +194,7 @@ impl WebGLFramebuffer {
             is_initialized: Cell::new(false),
             #[cfg(feature = "webxr")]
             xr_session: Default::default(),
-            droppable: DroppableWebGLFramebuffer::new(id, Cell::new(false), WeakRef::new(context)),
+            droppable: DroppableWebGLFramebuffer::new(id, Cell::new(false), WebGLObjectContext::new(context)),
         }
     }
 

@@ -8,7 +8,6 @@ use std::cell::Cell;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::{DomObject, reflect_dom_object};
-use script_bindings::weakref::WeakRef;
 use servo_base::generic_channel;
 use servo_canvas_traits::webgl::{
     WebGLBufferId, WebGLCommand, WebGLError, WebGLObjectNameKind, WebGLResult,
@@ -19,7 +18,7 @@ use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGL
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::webgl::webglobject::WebGLObject;
+use crate::dom::webgl::webglobject::{WebGLObject, WebGLObjectContext};
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 
 fn target_is_copy_buffer(target: u32) -> bool {
@@ -33,7 +32,7 @@ struct DroppableWebGLBuffer {
     id: WebGLBufferId,
     marked_for_deletion: Cell<bool>,
     attached_counter: Cell<u32>,
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
 }
 
 impl DroppableWebGLBuffer {
@@ -41,7 +40,7 @@ impl DroppableWebGLBuffer {
         id: WebGLBufferId,
         marked_for_deletion: Cell<bool>,
         attached_counter: Cell<u32>,
-        context: WeakRef<WebGLRenderingContext>,
+        context: WebGLObjectContext,
     ) -> Self {
         Self {
             id,
@@ -131,7 +130,7 @@ impl WebGLBuffer {
                 id,
                 Default::default(),
                 Default::default(),
-                WeakRef::new(context),
+                WebGLObjectContext::new(context),
             ),
         }
     }

@@ -75,6 +75,10 @@ impl ANGLEInstancedArraysMethods<crate::DomTypeHolder> for ANGLEInstancedArrays 
         count: i32,
         primcount: i32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         handle_potential_webgl_error!(
             self.ctx,
             self.ctx
@@ -92,6 +96,10 @@ impl ANGLEInstancedArraysMethods<crate::DomTypeHolder> for ANGLEInstancedArrays 
         offset: i64,
         primcount: i32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         handle_potential_webgl_error!(
             self.ctx,
             self.ctx
@@ -100,6 +108,10 @@ impl ANGLEInstancedArraysMethods<crate::DomTypeHolder> for ANGLEInstancedArrays 
     }
 
     fn VertexAttribDivisorANGLE(&self, cx: &mut JSContext, index: u32, divisor: u32) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         self.ctx.vertex_attrib_divisor(cx, index, divisor);
     }
 }

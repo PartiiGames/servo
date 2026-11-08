@@ -27,6 +27,9 @@ pub(crate) trait WebGLExtensionWrapper: JSTraceable + MallocSizeOf {
     fn is_enabled(&self) -> bool;
     fn enable(&self, ext: &WebGLExtensions);
     fn name(&self) -> &'static str;
+    /// Partii: forget the extension object (a restored context starts with every extension
+    /// disabled, WebGL 1.0 5.15.3).
+    fn reset(&self);
 }
 
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
@@ -85,5 +88,9 @@ where
 
     fn name(&self) -> &'static str {
         T::name()
+    }
+
+    fn reset(&self) {
+        self.extension.set(None);
     }
 }

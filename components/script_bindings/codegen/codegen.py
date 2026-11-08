@@ -4392,6 +4392,38 @@ class CGCallGenerator(CGThing):
         return self.cgRoot.define()
 
 
+def webglContextLossGuard(descriptor: Descriptor, idlNode: IDLInterfaceMember,
+                          returnType: IDLType | None, static: bool) -> str | None:
+    """
+    Partii: WebGL context loss (WebGL 1.0 5.14, "the webgl context lost flag"). Every operation of a
+    WebGL rendering context returns the default value for its return type while the context is
+    lost, without running, unless it is marked [WebGLHandlesContextLoss]. Operations whose return
+    type has no such default (a non-nullable string, sequence, dictionary or promise) run anyway.
+    """
+    if static or not isinstance(idlNode, IDLMethod) or not idlNode.isMethod():
+        return None
+    if descriptor.interface.identifier.name not in ("WebGLRenderingContext", "WebGL2RenderingContext"):
+        return None
+    if idlNode.getExtendedAttribute("WebGLHandlesContextLoss"):
+        return None
+    if returnType is None or returnType.isUndefined():
+        value = "js::jsval::UndefinedValue()"
+    elif returnType.nullable() or returnType.isAny() or returnType.isObject():
+        value = "js::jsval::NullValue()"
+    elif returnType.isBoolean():
+        value = "js::jsval::BooleanValue(false)"
+    elif returnType.isNumeric():
+        value = "js::jsval::Int32Value(0)"
+    else:
+        return None
+    return (
+        "if this.IsContextLost() {\n"
+        f"    MutableHandleValue::from_raw(args.rval()).set({value});\n"
+        "    return true;\n"
+        "}"
+    )
+
+
 class CGPerSignatureCall(CGThing):
     """
     This class handles the guts of generating code for a particular
@@ -4458,6 +4490,9 @@ class CGPerSignatureCall(CGThing):
                                                           idlNode.maplikeOrSetlikeOrIterable,
                                                           idlNode.identifier.name))
         else:
+            contextLossGuard = webglContextLossGuard(descriptor, idlNode, returnType, static)
+            if contextLossGuard is not None:
+                cgThings.append(CGGeneric(contextLossGuard))
             hasCEReactions = idlNode.getExtendedAttribute("CEReactions") or False
             is_event_listener = isinstance(idlNode, IDLAttribute) and isEventHandlerCallback(idlNode)
             is_implicit_cx_attribute = is_event_listener or descriptor.implicitCxSetters and idlNode.isAttr() and nativeMethodName.startswith('Set')

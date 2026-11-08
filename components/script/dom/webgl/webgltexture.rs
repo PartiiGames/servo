@@ -25,7 +25,7 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::webgl::extensions::oestexturefloatlinear::OESTextureFloatLinear;
 use crate::dom::webgl::validations::types::TexImageTarget;
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
-use crate::dom::webgl::webglobject::WebGLObject;
+use crate::dom::webgl::webglobject::{WebGLObject, WebGLObjectContext};
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 #[cfg(feature = "webxr")]
@@ -53,7 +53,7 @@ const MAX_FACE_COUNT: usize = 6;
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLTexture {
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
     #[no_trace]
     id: WebGLTextureId,
     is_deleted: Cell<bool>,
@@ -160,7 +160,7 @@ impl WebGLTexture {
             image_info_array: DomRefCell::new(Vec::new()),
             attached_framebuffers: Default::default(),
             droppable: DroppableWebGLTexture {
-                context: WeakRef::new(context),
+                context: WebGLObjectContext::new(context),
                 id,
                 is_deleted: Cell::new(false),
                 #[cfg(feature = "webxr")]

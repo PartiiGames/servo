@@ -7,19 +7,20 @@ use std::cell::Cell;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{WebGLCommand, webgl_channel};
 
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webgl2renderingcontext::IndexedBinding;
-use crate::dom::webgl::webglobject::WebGLObject;
-use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
+use crate::dom::webgl::webglobject::{WebGLObject, WebGLObjectContext};
+use crate::dom::webgl::webglrenderingcontext::{
+    LOST_OBJECT_NAME, Operation, WebGLRenderingContext,
+};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLTransformFeedback {
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
     id: u32,
     marked_for_deletion: Cell<bool>,
 }
@@ -98,6 +99,17 @@ impl TransformFeedbackState {
         self.is_active.get()
     }
 
+    /// Partii: a new object's state (a restored context's default transform feedback).
+    pub(crate) fn reset(&self) {
+        for binding in self.saved_buffer_bindings.iter() {
+            binding.reset();
+        }
+        self.is_active.set(false);
+        self.is_paused.set(false);
+        self.primitive_mode.set(0);
+        self.vertices_recorded.set(0);
+    }
+
     pub(crate) fn is_paused(&self) -> bool {
         self.is_paused.get()
     }
@@ -170,7 +182,7 @@ impl WebGLTransformFeedback {
             has_been_bound: Cell::new(false),
             state: TransformFeedbackState::new(context),
             droppable: DroppableWebGLTransformFeedback {
-                context: WeakRef::new(context),
+                context: WebGLObjectContext::new(context),
                 id,
                 marked_for_deletion: Cell::new(false),
             },
@@ -178,9 +190,14 @@ impl WebGLTransformFeedback {
     }
 
     pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        context.send_command(WebGLCommand::CreateTransformFeedback(sender));
-        let id = receiver.recv().unwrap();
+        // Partii: a lost context makes objects that name nothing.
+        let id = if context.is_lost() {
+            LOST_OBJECT_NAME.get()
+        } else {
+            let (sender, receiver) = webgl_channel().unwrap();
+            context.send_command(WebGLCommand::CreateTransformFeedback(sender));
+            receiver.recv().unwrap()
+        };
 
         reflect_dom_object(
             cx,

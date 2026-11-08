@@ -29,5 +29,6 @@ pub(crate) mod webglcompressedtextureetc1;
 pub(crate) mod webglcompressedtextures3tc;
 pub(crate) mod webglcompressedtextures3tcsrgb;
 pub(crate) mod webgldrawinstancedbasevertexbaseinstance;
+pub(crate) mod webgllosecontext;
 pub(crate) mod webglmultidraw;
 pub(crate) mod webglmultidrawinstancedbasevertexbaseinstance;

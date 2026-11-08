@@ -1041,8 +1041,10 @@ impl WebGLThread {
     ) {
         debug!("handle_swap_buffers()");
         for context_id in context_ids {
-            self.make_current_if_needed(context_id)
-                .expect("Where's the GL data?");
+            // Partii: a lost context's GL context is gone (a swap queued before the loss).
+            if self.make_current_if_needed(context_id).is_none() {
+                continue;
+            }
 
             let data = self
                 .contexts
@@ -1223,10 +1225,31 @@ impl WebGLThread {
 
     fn handle_set_image_key(&mut self, context_id: WebGLContextId, image_key: ImageKey) {
         let external_image_data = self.external_image_data(context_id);
+        // Partii: a restored context (WebGL context loss) takes over its canvas's image key from
+        // the lost GL context. If that one still holds it (its removal waits for WebRender to
+        // finish with it), the key still exists: take it away so the removal keeps it, and point
+        // it at the new context.
+        let mut key_exists = false;
+        for (other_id, info) in self.cached_context_info.iter_mut() {
+            if *other_id != context_id && info.image_key == Some(image_key) {
+                info.image_key = None;
+                key_exists = true;
+            }
+        }
         let Some(info) = self.cached_context_info.get_mut(&context_id) else {
             self.paint_api.delete_image(image_key);
             return;
         };
+        if key_exists {
+            info.image_key = Some(image_key);
+            self.paint_api.update_image(
+                image_key,
+                info.image_descriptor(),
+                external_image_data,
+                None,
+            );
+            return;
+        }
 
         if let Some(old_image_key) = info.image_key.replace(image_key) {
             self.paint_api.delete_image(old_image_key);

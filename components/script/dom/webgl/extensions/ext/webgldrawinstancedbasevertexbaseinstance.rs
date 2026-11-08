@@ -78,6 +78,10 @@ impl WEBGLDrawInstancedBaseVertexBaseInstanceMethods<crate::DomTypeHolder>
         instance_count: i32,
         base_instance: u32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         let result = match self.ctx.webgl2() {
             Some(webgl2) => webgl2.draw_arrays_checked_base_instance(
                 cx,
@@ -104,6 +108,10 @@ impl WEBGLDrawInstancedBaseVertexBaseInstanceMethods<crate::DomTypeHolder>
         base_vertex: i32,
         base_instance: u32,
     ) {
+        // Partii: a lost context's extensions do nothing (WebGL 1.0 5.15.2).
+        if self.ctx.is_lost() {
+            return;
+        }
         let result = match self.ctx.webgl2() {
             Some(webgl2) => webgl2.draw_elements_checked_base_vertex_base_instance(
                 cx,

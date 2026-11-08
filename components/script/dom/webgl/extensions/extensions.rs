@@ -208,6 +208,21 @@ impl WebGLExtensions {
         }
     }
 
+    /// Partii: after a context restore every extension is disabled again and its old object is
+    /// no longer returned, except WEBGL_lose_context, whose object stays the same (WebGL 1.0
+    /// 5.15.3, context-lost-restored).
+    pub(crate) fn reset_after_restore(&self) {
+        for (name, extension) in self.extensions.borrow().iter() {
+            if name != "WEBGL_LOSE_CONTEXT" {
+                extension.reset();
+            }
+        }
+        let mut features = self.features.borrow_mut();
+        let gl_extensions = std::mem::take(&mut features.gl_extensions);
+        *features = WebGLExtensionFeatures::new(self.webgl_version);
+        features.gl_extensions = gl_extensions;
+    }
+
     pub(crate) fn register<T: 'static + WebGLExtension + JSTraceable + MallocSizeOf>(&self) {
         let name = T::name().to_uppercase();
         self.extensions
@@ -445,6 +460,7 @@ impl WebGLExtensions {
         self.register::<ext::webglcompressedtextureetc1::WEBGLCompressedTextureETC1>();
         self.register::<ext::webglcompressedtextures3tc::WEBGLCompressedTextureS3TC>();
         self.register::<ext::webglcompressedtextures3tcsrgb::WEBGLCompressedTextureS3TCsRGB>();
+        self.register::<ext::webgllosecontext::WEBGLLoseContext>();
         self.register::<ext::webgldrawinstancedbasevertexbaseinstance::WEBGLDrawInstancedBaseVertexBaseInstance>();
         self.register::<ext::webglmultidraw::WEBGLMultiDraw>();
         self.register::<ext::webglmultidrawinstancedbasevertexbaseinstance::WEBGLMultiDrawInstancedBaseVertexBaseInstance>();

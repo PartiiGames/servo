@@ -7,7 +7,6 @@ use std::cell::Cell;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::reflector::reflect_dom_object;
-use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLQueryId, webgl_channel};
 
@@ -15,13 +14,15 @@ use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebG
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::webgl::webglobject::WebGLObject;
-use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
+use crate::dom::webgl::webglobject::{WebGLObject, WebGLObjectContext};
+use crate::dom::webgl::webglrenderingcontext::{
+    LOST_OBJECT_NAME, Operation, WebGLRenderingContext,
+};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLQuery {
-    context: WeakRef<WebGLRenderingContext>,
+    context: WebGLObjectContext,
     #[no_trace]
     gl_id: WebGLQueryId,
     marked_for_deletion: Cell<bool>,
@@ -71,7 +72,7 @@ impl WebGLQuery {
             query_result_available: Cell::new(None),
             query_result: Cell::new(0),
             droppable: DroppableWebGLQuery {
-                context: WeakRef::new(context),
+                context: WebGLObjectContext::new(context),
                 gl_id: id,
                 marked_for_deletion: Cell::new(false),
             },
@@ -79,9 +80,14 @@ impl WebGLQuery {
     }
 
     pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        context.send_command(WebGLCommand::GenerateQuery(sender));
-        let id = receiver.recv().unwrap();
+        // Partii: a lost context makes objects that name nothing.
+        let id = if context.is_lost() {
+            WebGLQueryId::new(LOST_OBJECT_NAME)
+        } else {
+            let (sender, receiver) = webgl_channel().unwrap();
+            context.send_command(WebGLCommand::GenerateQuery(sender));
+            receiver.recv().unwrap()
+        };
 
         reflect_dom_object(
             cx,

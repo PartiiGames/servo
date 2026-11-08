@@ -474,7 +474,7 @@ interface mixin WebGLRenderingContextBase
     readonly attribute GLsizei drawingBufferWidth;
     readonly attribute GLsizei drawingBufferHeight;
 
-    [WebGLHandlesContextLoss] WebGLContextAttributes? getContextAttributes();
+    WebGLContextAttributes? getContextAttributes();
     [WebGLHandlesContextLoss] boolean isContextLost();
 
     sequence<DOMString>? getSupportedExtensions();
@@ -508,12 +508,12 @@ interface mixin WebGLRenderingContextBase
     undefined copyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                            GLint x, GLint y, GLsizei width, GLsizei height);
 
-    WebGLBuffer? createBuffer();
-    WebGLFramebuffer? createFramebuffer();
-    WebGLProgram? createProgram();
-    WebGLRenderbuffer? createRenderbuffer();
-    WebGLShader? createShader(GLenum type);
-    WebGLTexture? createTexture();
+    [WebGLHandlesContextLoss] WebGLBuffer? createBuffer();
+    [WebGLHandlesContextLoss] WebGLFramebuffer? createFramebuffer();
+    [WebGLHandlesContextLoss] WebGLProgram? createProgram();
+    [WebGLHandlesContextLoss] WebGLRenderbuffer? createRenderbuffer();
+    [WebGLHandlesContextLoss] WebGLShader? createShader(GLenum type);
+    [WebGLHandlesContextLoss] WebGLTexture? createTexture();
 
     undefined cullFace(GLenum mode);
 
@@ -576,16 +576,16 @@ interface mixin WebGLRenderingContextBase
 
     any getVertexAttrib(GLuint index, GLenum pname);
 
-    [WebGLHandlesContextLoss] GLsizeiptr getVertexAttribOffset(GLuint index, GLenum pname);
+    GLsizeiptr getVertexAttribOffset(GLuint index, GLenum pname);
 
     undefined hint(GLenum target, GLenum mode);
-    [WebGLHandlesContextLoss] GLboolean isBuffer(WebGLBuffer? buffer);
-    [WebGLHandlesContextLoss] GLboolean isEnabled(GLenum cap);
-    [WebGLHandlesContextLoss] GLboolean isFramebuffer(WebGLFramebuffer? framebuffer);
-    [WebGLHandlesContextLoss] GLboolean isProgram(WebGLProgram? program);
-    [WebGLHandlesContextLoss] GLboolean isRenderbuffer(WebGLRenderbuffer? renderbuffer);
-    [WebGLHandlesContextLoss] GLboolean isShader(WebGLShader? shader);
-    [WebGLHandlesContextLoss] GLboolean isTexture(WebGLTexture? texture);
+    GLboolean isBuffer(WebGLBuffer? buffer);
+    GLboolean isEnabled(GLenum cap);
+    GLboolean isFramebuffer(WebGLFramebuffer? framebuffer);
+    GLboolean isProgram(WebGLProgram? program);
+    GLboolean isRenderbuffer(WebGLRenderbuffer? renderbuffer);
+    GLboolean isShader(WebGLShader? shader);
+    GLboolean isTexture(WebGLTexture? texture);
     undefined lineWidth(GLfloat width);
     undefined linkProgram(WebGLProgram program);
     undefined pixelStorei(GLenum pname, GLint param);
