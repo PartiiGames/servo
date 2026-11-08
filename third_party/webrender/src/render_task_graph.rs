@@ -862,10 +862,10 @@ impl RenderTaskGraph {
     pub fn print(
         &self,
     ) {
-        print!("-- RenderTaskGraph --\n");
+        eprint!("-- RenderTaskGraph --\n");
 
         for (i, task) in self.tasks.iter().enumerate() {
-            print!("Task {} [{}]: render_on={} free_after={} children={:?} target_size={:?}\n",
+            eprint!("Task {} [{}]: render_on={} free_after={} children={:?} target_size={:?}\n",
                 i,
                 task.kind.as_str(),
                 task.render_on.0,
@@ -876,16 +876,16 @@ impl RenderTaskGraph {
         }
 
         for (p, pass) in self.passes.iter().enumerate() {
-            print!("Pass {}:\n", p);
+            eprint!("Pass {}:\n", p);
 
             for (s, sub_pass) in pass.sub_passes.iter().enumerate() {
-                print!("\tSubPass {}: {:?}\n",
+                eprint!("\tSubPass {}: {:?}\n",
                     s,
                     sub_pass.surface,
                 );
 
                 for task_id in &sub_pass.task_ids {
-                    print!("\t\tTask {:?}\n", task_id.index);
+                    eprint!("\t\tTask {:?}\n", task_id.index);
                 }
             }
         }

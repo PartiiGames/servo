@@ -760,6 +760,7 @@ impl FrameBuilder {
             scene.config.max_shared_surface_size,
             &frame_memory,
         );
+        partii_maybe_dump_graph(&render_tasks);
 
         let mut passes = frame_memory.new_vec();
         let mut has_texture_cache_tasks = false;
@@ -1471,4 +1472,22 @@ impl Frame {
         // or external surfaces being updated).
         self.passes.is_empty()
     }
+}
+
+/// Partii (bd stream), measurement only: `PARTII_WR_GRAPH_DUMP=N` prints the render task graph of the
+/// first 3 frames that have N or more passes to stderr (what each target in a slow frame is for).
+fn partii_maybe_dump_graph(graph: &RenderTaskGraph) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static MIN: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    static DUMPED: AtomicUsize = AtomicUsize::new(0);
+    let Some(min) = *MIN.get_or_init(|| {
+        std::env::var("PARTII_WR_GRAPH_DUMP").ok().and_then(|v| v.trim().parse().ok())
+    }) else {
+        return;
+    };
+    if graph.passes.len() < min || DUMPED.fetch_add(1, Ordering::Relaxed) >= 3 {
+        return;
+    }
+    eprintln!("partii-wr-graph: {} tasks, {} passes", graph.tasks.len(), graph.passes.len());
+    graph.print();
 }
