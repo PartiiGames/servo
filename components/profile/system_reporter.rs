@@ -5,8 +5,6 @@
 #[cfg(target_os = "macos")]
 use std::ptr;
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-use libc::c_int;
 use profile_traits::mem::{ProcessReports, Report, ReportKind, ReporterRequest};
 use profile_traits::path;
 
@@ -64,53 +62,35 @@ pub fn collect_reports(request: ReporterRequest) {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 unsafe extern "C" {
-    fn mallinfo() -> struct_mallinfo;
+    fn mallinfo2() -> struct_mallinfo2;
 }
 
+/// glibc's `struct mallinfo2` (glibc 2.33+): `struct mallinfo` with `size_t` fields.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[repr(C)]
-pub struct struct_mallinfo {
-    arena: c_int,
-    ordblks: c_int,
-    smblks: c_int,
-    hblks: c_int,
-    hblkhd: c_int,
-    usmblks: c_int,
-    fsmblks: c_int,
-    uordblks: c_int,
-    fordblks: c_int,
-    keepcost: c_int,
+pub struct struct_mallinfo2 {
+    arena: usize,
+    ordblks: usize,
+    smblks: usize,
+    hblks: usize,
+    hblkhd: usize,
+    usmblks: usize,
+    fsmblks: usize,
+    uordblks: usize,
+    fordblks: usize,
+    keepcost: usize,
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn system_heap_info() -> SystemHeapInfo {
-    let info: struct_mallinfo = unsafe { mallinfo() };
-
-    // https://man7.org/linux/man-pages/man3/mallinfo.3.html
-    // TODO: Switch to mallinfo2 or malloc_info.
-    // The documentation in the glibc man page makes it sound like |uordblks| would suffice,
-    // but that only gets the small allocations that are put in the brk heap. We need |hblkhd|
-    // as well to get the larger allocations that are mmapped.
-    //
-    // These fields are unfortunately |int| and so can overflow (becoming negative) if memory
-    // usage gets high enough. So don't report anything in that case. In the non-overflow case
-    // we cast the two values to usize before adding them to make sure the sum also doesn't
-    // overflow.
-    let allocated = if info.hblkhd >= 0 && info.uordblks >= 0 {
-        Some(info.hblkhd as usize + info.uordblks as usize)
-    } else {
-        None
-    };
-
-    let reserved = if info.arena >= 0 && info.hblkhd >= 0 {
-        Some(info.arena as usize + info.hblkhd as usize)
-    } else {
-        None
-    };
-
+    // Partii (bd stream): mallinfo2, not mallinfo. mallinfo's fields are `int`: past 2 GiB they wrap
+    // and the old code reported nothing, so system-heap-allocated vanished from the memory report
+    // exactly when the heap was biggest (hexii's backdrop-filter stalls, lx soak 6). The arena
+    // figures are the sum over every malloc arena; hblkhd is the mmapped (large) allocations.
+    let info: struct_mallinfo2 = unsafe { mallinfo2() };
     SystemHeapInfo {
-        allocated,
-        reserved,
+        allocated: Some(info.hblkhd + info.uordblks),
+        reserved: Some(info.arena + info.hblkhd),
     }
 }
 

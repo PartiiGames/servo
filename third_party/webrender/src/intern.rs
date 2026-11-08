@@ -433,6 +433,13 @@ macro_rules! declare_interning_memory_report {
                 pub $name: usize,
             )+
         }
+
+        impl InternerSubReport {
+            /// Partii (bd stream): every interner's bytes added up, for embedders' memory reports.
+            pub fn total(&self) -> usize {
+                0 $( + self.$name )+
+            }
+        }
     }
 }
 
