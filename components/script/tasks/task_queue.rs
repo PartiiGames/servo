@@ -105,14 +105,17 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
     fn store_task_for_inactive_pipeline(&self, msg: T, pipeline_id: &PipelineId) {
         if self.exited.borrow().contains(pipeline_id) {
             // Partii: the pipeline is gone; its task will never run. Drop it (and what it holds).
-            return;
+            // The placeholder below is still needed: if this dropped task was the only message
+            // of the iteration, the event-loop was woken for it and expects a message.
+            drop(msg);
+        } else {
+            let mut inactive = self.inactive.borrow_mut();
+            let inactive_queue = inactive.entry(*pipeline_id).or_default();
+            inactive_queue.push_back(
+                msg.into_queued_task()
+                    .expect("Incoming messages should always be convertible into queued tasks"),
+            );
         }
-        let mut inactive = self.inactive.borrow_mut();
-        let inactive_queue = inactive.entry(*pipeline_id).or_default();
-        inactive_queue.push_back(
-            msg.into_queued_task()
-                .expect("Incoming messages should always be convertible into queued tasks"),
-        );
         let mut msg_queue = self.msg_queue.borrow_mut();
         if msg_queue.is_empty() {
             // Ensure there is at least one message.
