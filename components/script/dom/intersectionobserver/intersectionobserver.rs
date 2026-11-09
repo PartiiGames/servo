@@ -1017,12 +1017,13 @@ fn compute_the_intersection(
 
                     intersection_rect = intersect_rectangle(&intersection_rect, &viewport_rect)?;
 
+                    // The box query has no answer for some frames (a 3D transform such as
+                    // `perspective() rotateY()`): treat it as no offset rather than panic.
                     let current_offset = frame_container
                         .upcast::<Node>()
                         .padding_box()
-                        .unwrap()
-                        .origin
-                        .to_vector();
+                        .map(|padding_box| padding_box.origin.to_vector())
+                        .unwrap_or_else(Vector2D::zero);
                     intersection_rect.origin += current_offset;
                     total_inter_document_offset += current_offset;
 
