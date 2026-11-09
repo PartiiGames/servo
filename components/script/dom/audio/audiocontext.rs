@@ -157,6 +157,9 @@ impl AudioContextMethods<crate::DomTypeHolder> for AudioContext {
     fn Suspend(&self, cx: &mut CurrentRealm) -> RootedPromise {
         // Step 1.
         let promise = Promise::new_in_realm(cx);
+        if self.context.reject_if_not_fully_active(cx, &promise) {
+            return promise;
+        }
 
         // Step 2.
         if self.context.control_thread_state() == ProcessingState::Closed {
@@ -216,6 +219,9 @@ impl AudioContextMethods<crate::DomTypeHolder> for AudioContext {
     fn Close(&self, cx: &mut CurrentRealm) -> RootedPromise {
         // Step 1.
         let promise = Promise::new_in_realm(cx);
+        if self.context.reject_if_not_fully_active(cx, &promise) {
+            return promise;
+        }
 
         // Step 2.
         if self.context.control_thread_state() == ProcessingState::Closed {

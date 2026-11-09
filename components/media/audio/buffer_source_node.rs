@@ -178,6 +178,10 @@ impl AudioNodeEngine for AudioBufferSourceNode {
         debug_assert!(inputs.is_empty());
 
         if self.buffer.is_none() {
+            // Started with a null buffer: nothing to play, so the source ends now rather than at
+            // its start time (as in Chrome; WPT audiobuffersource-start-null-buffer). The DOM node
+            // sends no buffer after such a start. A no-op until start() has been called.
+            self.maybe_trigger_onended_callback();
             inputs.blocks.push(Default::default());
             return inputs;
         }

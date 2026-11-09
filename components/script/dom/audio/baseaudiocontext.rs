@@ -233,6 +233,21 @@ impl BaseAudioContext {
             self.state.get() != AudioContextState::Closed
     }
 
+    /// Rejects `promise` with InvalidStateError and returns true when this context's Document is
+    /// not fully active (its frame was removed or navigated): the first step of suspend(),
+    /// resume(), close() and startRendering(). Without it these queued work on a pipeline that is
+    /// gone, and the promise never settled.
+    pub(crate) fn reject_if_not_fully_active(&self, cx: &mut JSContext, promise: &RootedPromise) -> bool {
+        if self.global().as_window().Document().is_fully_active() {
+            return false;
+        }
+        promise.reject_error(
+            cx,
+            Error::InvalidState(Some("Audio context's document is not fully active.".into())),
+        );
+        true
+    }
+
     pub(crate) fn push_pending_resume_promise(&self, promise: &RootedPromise) {
         self.pending_resume_promises
             .borrow_mut()
@@ -432,6 +447,9 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
     fn Resume(&self, cx: &mut CurrentRealm) -> RootedPromise {
         // Step 1.
         let promise = Promise::new_in_realm(cx);
+        if self.reject_if_not_fully_active(cx, &promise) {
+            return promise;
+        }
 
         // Step 2.
         if self.audio_context_impl.lock().unwrap().state() == ProcessingState::Closed {
