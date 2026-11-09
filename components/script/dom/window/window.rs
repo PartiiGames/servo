@@ -176,6 +176,7 @@ use crate::dom::mediaquerylist::{MediaQueryList, MediaQueryListMatchState};
 use crate::dom::mediaquerylistevent::MediaQueryListEvent;
 use crate::dom::messageevent::MessageEvent;
 use crate::dom::navigator::Navigator;
+use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::{Node, NodeDamage, NodeTraits, from_untrusted_node_address};
 use crate::dom::performance::performance::Performance;
 use crate::dom::performanceresourcetiming::InitiatorType;
@@ -3317,6 +3318,17 @@ impl Window {
     ) -> layout_api::HitTestResult {
         self.layout_reflow(QueryMsg::ElementsFromPoint);
         self.layout().hit_test(flags, point)
+    }
+
+    /// IntersectionObserver v2: whether `node` is visible in this document (painted, not
+    /// occluded, no visual effects). See layout's `VisibilityTest`.
+    pub(crate) fn visibility_query(&self, node: &Node) -> bool {
+        self.layout_reflow(QueryMsg::ElementsFromPoint);
+        let subtree = node
+            .traverse_preorder(ShadowIncluding::Yes)
+            .map(|node| node.to_opaque())
+            .collect();
+        self.layout().query_visibility(node.to_opaque(), &subtree)
     }
 
     pub(crate) fn query_effective_overflow(&self, node: &Node) -> Option<AxesOverflow> {

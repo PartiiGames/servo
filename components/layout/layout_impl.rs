@@ -85,7 +85,9 @@ use webrender_api::units::{DevicePixel, LayoutVector2D};
 
 use crate::accessibility::{AccessibilityContext, AccessibilityDamageMap, AccessibilityTree};
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
-use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
+use crate::display_list::{
+    DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree, VisibilityTest,
+};
 use crate::dom::NodeExt;
 use crate::query::{
     BoxAreaInclusion, find_character_offset_in_fragment_descendants, get_the_text_steps,
@@ -647,6 +649,20 @@ impl Layout for LayoutThread {
                 .as_mut()
                 .map(|tree| HitTest::run(flags, tree, point))
                 .unwrap_or_default()
+        })
+    }
+
+    #[servo_tracing::instrument(skip_all)]
+    fn query_visibility(
+        &self,
+        target: OpaqueNode,
+        subtree: &std::collections::HashSet<OpaqueNode>,
+    ) -> bool {
+        with_layout_state(|| {
+            self.stacking_context_tree
+                .borrow()
+                .as_ref()
+                .is_some_and(|tree| VisibilityTest::run(tree, target, subtree))
         })
     }
 

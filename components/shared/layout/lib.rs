@@ -432,6 +432,14 @@ pub trait Layout {
         point_in_viewport: Point2D<Au, CSSPixel>,
     ) -> Option<(OpaqueNode, Utf32CodeUnits)>;
     fn hit_test(&self, flags: HitTestFlags, point: LayoutPoint) -> HitTestResult;
+    /// IntersectionObserver v2: whether `target` (whose inclusive descendants are `subtree`)
+    /// is visible: painted, unoccluded by anything painted after it, and without visual
+    /// effects (opacity, filters, non-translation/upscale transforms).
+    fn query_visibility(
+        &self,
+        target: OpaqueNode,
+        subtree: &std::collections::HashSet<OpaqueNode>,
+    ) -> bool;
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow>;
     fn stylist_mut(&mut self) -> &mut Stylist;
 

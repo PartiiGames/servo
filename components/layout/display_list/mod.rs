@@ -79,8 +79,10 @@ mod hit_test;
 mod paint_timing_handler;
 mod paint_traversal;
 mod stacking_context;
+mod visibility;
 
 pub(crate) use hit_test::{ClosestFragmentSearch, HitTest};
+pub(crate) use visibility::VisibilityTest;
 pub(crate) use paint_timing_handler::PaintTimingHandler;
 pub(crate) use stacking_context::*;
 

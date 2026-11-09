@@ -653,15 +653,16 @@ impl IntersectionObserver {
             ThresholdIndex::NotMatching
         };
 
-        // Step 14
-        // > Let isVisible be the result of running the visibility algorithm on target.
-        // TODO: Implement visibility algorithm
-        let is_visible = false;
-
         // We never report isIntersecting as true unless we have exceeded a threshold,
         // which matches other browser eengines.
         // See https://github.com/w3c/IntersectionObserver/issues/432 for background.
         let is_intersecting = matches!(threshold_index, ThresholdIndex::Matching(..));
+
+        // Step 14
+        // > Let isVisible be the result of running the visibility algorithm on target.
+        // Only for observers that track visibility (as in Blink; otherwise it stays false),
+        // and only for a target that intersects.
+        let is_visible = self.track_visibility.get() && is_intersecting && target_is_visible(target);
 
         IntersectionObservationOutput::new_computed(
             threshold_index,
@@ -693,7 +694,7 @@ impl IntersectionObserver {
             if time - registration.last_update_time.get() <
                 Duration::from_millis(self.delay.get().max(0) as u64)
             {
-                return;
+                continue;
             }
 
             // Step 3
@@ -977,6 +978,25 @@ fn intersect_rectangle(
 /// Compute the intersection rectangle of the target [`Element`] returning the results of intersection in the coordinate
 /// space of the target's owning [`Document`]. Additionally, we assume that both the target and the root is connected.
 /// <https://w3c.github.io/IntersectionObserver/#compute-the-intersection>
+/// <https://w3c.github.io/IntersectionObserver/#calculate-visibility-algo>: visible in its own
+/// document (layout's visibility test: painted, unoccluded, no visual effects) and, for a target
+/// in a same-origin frame, the frame element visible in its parent too. A cross-origin parent
+/// can't be checked from here; its occlusion is not seen.
+fn target_is_visible(target: &Element) -> bool {
+    let node = target.upcast::<Node>();
+    let document = node.owner_document();
+    if !document.window().visibility_query(node) {
+        return false;
+    }
+    match document
+        .browsing_context()
+        .and_then(|window_proxy| window_proxy.frame_element().map(DomRoot::from_ref))
+    {
+        Some(frame) => target_is_visible(&frame),
+        None => true,
+    }
+}
+
 fn compute_the_intersection(
     target: &Element,
     root: &ElementOrDocument,
