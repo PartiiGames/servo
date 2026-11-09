@@ -1122,6 +1122,13 @@ mod gc_stats {
                     cpu_fields(s.slice_cpu.take())
                 );
                 let _ = s.out.flush();
+                // Partii (measurement): with PARTII_FRAME_PROF=trace, long slices on the trace's wall clock.
+                let d = start.elapsed() + s.remark;
+                crate::partii_frame_prof::trace_span(
+                    &format!("gc:slice:{:?}", reason.unwrap_or(GCReason::NO_REASON)),
+                    crate::partii_frame_prof::wall_ms() - d.as_secs_f64() * 1000.0,
+                    d,
+                );
             },
             GCProgress::GC_CYCLE_END => {
                 let Some(start) = s.cycle_start.take() else { return };
@@ -1160,6 +1167,12 @@ mod gc_stats {
                     ms(start),
                     reason,
                     cpu_fields(s.minor_cpu.take())
+                );
+                let d = start.elapsed();
+                crate::partii_frame_prof::trace_span(
+                    &format!("gc:minor:{reason:?}"),
+                    crate::partii_frame_prof::wall_ms() - d.as_secs_f64() * 1000.0,
+                    d,
                 );
                 s.minors += 1;
                 if s.minors % 64 == 0 {
