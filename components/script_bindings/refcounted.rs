@@ -141,12 +141,83 @@ pub unsafe fn trace_live_domreferences(tracer: *mut JSTracer) {
     LIVE_DOM_REFERENCES.with(|live_references| {
         let mut table = live_references.reflectable_table.borrow_mut();
         remove_nulls(&mut table);
+        let census = partii_trusted_census::due();
+        let mut by_class: FxHashMap<&'static str, usize> = FxHashMap::default();
         for obj in table.keys() {
             unsafe {
-                trace_reflector(tracer, "refcounted", &*(*obj as *const Reflector));
+                let reflector = &*(*obj as *const Reflector);
+                if census {
+                    *by_class
+                        .entry(partii_trusted_census::class_name(reflector))
+                        .or_default() += 1;
+                }
+                trace_reflector(tracer, "refcounted", reflector);
             }
         }
+        if census {
+            partii_trusted_census::print(table.len(), by_class);
+        }
     })
+}
+
+/// Partii (bd stream), diagnosis: `PARTII_TRUSTED_CENSUS=N` prints, at every Nth GC on each thread,
+/// how many DOM objects `Trusted` handles keep alive, by class. A `Trusted` roots its object (and
+/// with it, for a node, its document and window) until the handle is dropped, so a count that only
+/// grows names what keeps discarded pages alive.
+mod partii_trusted_census {
+    use std::cell::Cell;
+    use std::sync::OnceLock;
+
+    use rustc_hash::FxHashMap;
+
+    use crate::reflector::Reflector;
+
+    fn every() -> Option<u64> {
+        static N: OnceLock<Option<u64>> = OnceLock::new();
+        *N.get_or_init(|| {
+            std::env::var("PARTII_TRUSTED_CENSUS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|n| *n > 0)
+        })
+    }
+
+    thread_local!(static GCS: Cell<u64> = const { Cell::new(0) });
+
+    pub(super) fn due() -> bool {
+        let Some(n) = every() else { return false };
+        GCS.with(|c| {
+            c.set(c.get() + 1);
+            c.get() % n == 1 || n == 1
+        })
+    }
+
+    pub(super) unsafe fn class_name(reflector: &Reflector) -> &'static str {
+        let obj = reflector.get_jsobject_unbarriered();
+        if obj.is_null() {
+            return "(null)";
+        }
+        let class = unsafe { js::rust::get_object_class(obj) };
+        if class.is_null() || unsafe { (*class).name }.is_null() {
+            return "(?)";
+        }
+        unsafe { std::ffi::CStr::from_ptr((*class).name) }
+            .to_str()
+            .unwrap_or("(?)")
+    }
+
+    pub(super) fn print(total: usize, by_class: FxHashMap<&'static str, usize>) {
+        let mut v: Vec<_> = by_class.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let top: Vec<String> = v.iter().take(12).map(|(c, n)| format!("{c}={n}")).collect();
+        eprintln!(
+            "partii-trusted-census: thread={} gc={} trusted={} {}",
+            std::thread::current().name().unwrap_or("?"),
+            GCS.with(|c| c.get()),
+            total,
+            top.join(" ")
+        );
+    }
 }
 
 impl LiveDOMReferences {
