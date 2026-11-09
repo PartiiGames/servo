@@ -106,6 +106,22 @@ impl ImmutableOrigin {
                 url.port().unwrap_or(0),
             );
         }
+        // A blob: URL made by such a page (`blob:tauri://localhost/<uuid>`) has that page's origin, as the URL
+        // standard gives blob URLs over http(s) theirs: rust-url only does it for http, https and file, so the
+        // page's own blob URLs were opaque (cross-origin to it) and `new Worker(URL.createObjectURL(...))`
+        // failed in every exported game (inline workers, wasm loaders).
+        if url.scheme() == "blob" &&
+            ANY_TUPLE_ORIGIN_SCHEME.load(Ordering::Acquire) &&
+            let Ok(inner) = Url::parse(url.path()) &&
+            is_tuple_origin_scheme(inner.scheme()) &&
+            let Some(host) = inner.host()
+        {
+            return ImmutableOrigin::Tuple(
+                inner.scheme().to_owned(),
+                host.to_owned(),
+                inner.port().unwrap_or(0),
+            );
+        }
 
         match url.origin() {
             Origin::Opaque(_) => ImmutableOrigin::new_opaque(),
