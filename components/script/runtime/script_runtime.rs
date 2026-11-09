@@ -990,7 +990,9 @@ mod gc_stats {
         out: BufWriter<File>,
         cycle_start: Option<Instant>,
         slice_start: Option<Instant>,
+        slice_cpu: Option<(f64, i64)>,
         minor_start: Option<Instant>,
+        minor_cpu: Option<(f64, i64)>,
         slices: u32,
         cycle: u64,
         minors: u32,
@@ -1023,7 +1025,9 @@ mod gc_stats {
                     out,
                     cycle_start: None,
                     slice_start: None,
+                    slice_cpu: None,
                     minor_start: None,
+                    minor_cpu: None,
                     slices: 0,
                     cycle: 0,
                     minors: 0,
@@ -1038,6 +1042,37 @@ mod gc_stats {
 
     fn ms(since: Instant) -> f64 {
         since.elapsed().as_secs_f64() * 1000.0
+    }
+
+    /// This thread's CPU time (ms) and involuntary context switches so far (Linux; elsewhere none). A pause
+    /// whose wall time is well over its CPU time, with involuntary switches, was preempted (another thread had
+    /// the core); over its CPU time without them, it waited (helper threads, locks, I/O).
+    #[cfg(target_os = "linux")]
+    #[expect(unsafe_code)]
+    fn thread_cpu() -> Option<(f64, i64)> {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0 &&
+            unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut ru) } == 0;
+        ok.then(|| {
+            (
+                ts.tv_sec as f64 * 1000.0 + ts.tv_nsec as f64 / 1e6,
+                ru.ru_nivcsw as i64,
+            )
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn thread_cpu() -> Option<(f64, i64)> {
+        None
+    }
+
+    /// `,"cpu":<ms>,"ivcsw":<n>` since `start` (empty when not measured).
+    fn cpu_fields(start: Option<(f64, i64)>) -> String {
+        match (start, thread_cpu()) {
+            (Some((c0, v0)), Some((c1, v1))) => format!(",\"cpu\":{:.3},\"ivcsw\":{}", c1 - c0, v1 - v0),
+            _ => String::new(),
+        }
     }
 
     #[expect(unsafe_code)]
@@ -1065,6 +1100,7 @@ mod gc_stats {
             },
             GCProgress::GC_SLICE_BEGIN => {
                 s.slice_start = Some(Instant::now());
+                s.slice_cpu = thread_cpu();
                 // The black remark that ran right before this slice (outside it) is part of the pause.
                 s.remark = crate::runtime::gc_scheduler::take_pending_remark();
             },
@@ -1074,7 +1110,7 @@ mod gc_stats {
                 let remark = s.remark.as_secs_f64() * 1000.0;
                 let _ = writeln!(
                     s.out,
-                    "{{\"k\":\"slice\",\"t\":{:.1},\"ms\":{:.3},\"remark\":{:.3},\"cycle\":{},\"n\":{},\"reason\":\"{:?}\",\"zone\":{},\"bytes\":{}}}",
+                    "{{\"k\":\"slice\",\"t\":{:.1},\"ms\":{:.3},\"remark\":{:.3},\"cycle\":{},\"n\":{},\"reason\":\"{:?}\",\"zone\":{},\"bytes\":{}{}}}",
                     ms(*START),
                     ms(start) + remark,
                     remark,
@@ -1082,7 +1118,8 @@ mod gc_stats {
                     s.slices,
                     reason.unwrap_or(GCReason::NO_REASON),
                     zone,
-                    heap_bytes(cx)
+                    heap_bytes(cx),
+                    cpu_fields(s.slice_cpu.take())
                 );
                 let _ = s.out.flush();
             },
@@ -1110,15 +1147,19 @@ mod gc_stats {
         _data: *mut std::os::raw::c_void,
     ) {
         with(|s| match progress {
-            GCNurseryProgress::GC_NURSERY_COLLECTION_START => s.minor_start = Some(Instant::now()),
+            GCNurseryProgress::GC_NURSERY_COLLECTION_START => {
+                s.minor_start = Some(Instant::now());
+                s.minor_cpu = thread_cpu();
+            },
             GCNurseryProgress::GC_NURSERY_COLLECTION_END => {
                 let Some(start) = s.minor_start.take() else { return };
                 let _ = writeln!(
                     s.out,
-                    "{{\"k\":\"minor\",\"t\":{:.1},\"ms\":{:.3},\"reason\":\"{:?}\"}}",
+                    "{{\"k\":\"minor\",\"t\":{:.1},\"ms\":{:.3},\"reason\":\"{:?}\"{}}}",
                     ms(*START),
                     ms(start),
-                    reason
+                    reason,
+                    cpu_fields(s.minor_cpu.take())
                 );
                 s.minors += 1;
                 if s.minors % 64 == 0 {
