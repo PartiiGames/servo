@@ -35,10 +35,6 @@ pub(crate) struct AudioBufferSourceNode {
     source_node: AudioScheduledSourceNode,
     buffer: MutNullableDom<AudioBuffer>,
     buffer_set: Cell<bool>,
-    /// start() ran with a null buffer: the source acquired no content, has nothing to play and
-    /// ends at once, so a buffer assigned afterwards is ignored (as in Chrome; WPT
-    /// audiobuffersource-start-null-buffer).
-    started_without_buffer: Cell<bool>,
     playback_rate: Dom<AudioParam>,
     detune: Dom<AudioParam>,
     loop_enabled: Cell<bool>,
@@ -95,7 +91,6 @@ impl AudioBufferSourceNode {
             source_node,
             buffer: Default::default(),
             buffer_set: Cell::new(false),
-            started_without_buffer: Cell::new(false),
             playback_rate: Dom::from_ref(&playback_rate),
             detune: Dom::from_ref(&detune),
             loop_enabled: Cell::new(options.loop_),
@@ -166,9 +161,8 @@ impl AudioBufferSourceNodeMethods<crate::DomTypeHolder> for AudioBufferSourceNod
         // Step 4.
         self.buffer.set(new_buffer);
 
-        // Step 5. Not for a source started with a null buffer: it has already ended.
+        // Step 5.
         if self.source_node.has_start() &&
-            !self.started_without_buffer.get() &&
             let Some(buffer) = self.buffer.get()
         {
             let buffer = buffer.get_channels(cx);
@@ -283,11 +277,7 @@ impl AudioBufferSourceNodeMethods<crate::DomTypeHolder> for AudioBufferSourceNod
 
         self.source_node
             .upcast::<AudioScheduledSourceNode>()
-            .Start(when)?;
-        if self.buffer.get().is_none() {
-            self.started_without_buffer.set(true);
-        }
-        Ok(())
+            .Start(when)
     }
 }
 
