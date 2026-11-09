@@ -311,7 +311,7 @@ impl FileManager {
                 set_blob_response_headers(
                     &mut response.headers,
                     len,
-                    buf.type_string.parse().unwrap_or(mime::TEXT_PLAIN),
+                    buf.type_string.parse().ok(),
                     content_range,
                 );
 
@@ -363,9 +363,11 @@ impl FileManager {
                 set_blob_response_headers(
                     &mut response.headers,
                     metadata.size,
-                    mime_guess::from_path(metadata.path)
-                        .first()
-                        .unwrap_or(mime::TEXT_PLAIN),
+                    Some(
+                        mime_guess::from_path(metadata.path)
+                            .first()
+                            .unwrap_or(mime::TEXT_PLAIN),
+                    ),
                     content_range,
                 );
 
@@ -916,12 +918,20 @@ async fn read_file_in_chunks(
 fn set_blob_response_headers(
     headers: &mut HeaderMap,
     content_length: u64,
-    mime: Mime,
+    mime: Option<Mime>,
     content_range: Option<ContentRange>,
 ) {
     headers.typed_insert(ContentLength(content_length));
     if let Some(content_range) = content_range {
         headers.typed_insert(content_range);
     }
-    headers.typed_insert(ContentType::from(mime));
+    match mime {
+        Some(mime) => headers.typed_insert(ContentType::from(mime)),
+        None => {
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static(""),
+            );
+        },
+    }
 }

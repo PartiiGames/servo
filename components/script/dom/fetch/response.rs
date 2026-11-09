@@ -545,6 +545,19 @@ impl Response {
         }
     }
 
+    /// <https://fetch.spec.whatwg.org/#concept-http-network-fetch>: a response with a null body
+    /// status (101, 204, 205, 304), or to a HEAD or CONNECT request, has a null body, so
+    /// `response.body` is null and `text()` gives "".
+    pub(crate) fn set_null_body_if_required(&self, method: &http::Method) {
+        if is_null_body_status(self.status.borrow().raw_code()) ||
+            *method == http::Method::HEAD ||
+            *method == http::Method::CONNECT
+        {
+            self.body_stream.set(None);
+            self.fetch_body_stream.set(None);
+        }
+    }
+
     pub(crate) fn set_stream_consumer(&self, sc: Option<StreamConsumer>) {
         *self.stream_consumer.borrow_mut() = sc;
     }
