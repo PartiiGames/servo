@@ -72,7 +72,11 @@ fn parse_token<'a>(token: &'a str) -> Option<SriEntry<'a>> {
     let algorithm_expression = expression_and_option.next()?;
 
     // Step 2.4. Let algorithm-and-value be the result of splitting algorithm-expression on U+002D (-).
-    let mut algorithm_and_value = algorithm_expression.split('-');
+    // Only on the first one: a base64url value has '-' in it (sha512-D6yns0qxG0E7-Twk...).
+    let mut algorithm_and_value = match algorithm_expression.split_once('-') {
+        Some((algorithm, value)) => [algorithm, value].into_iter(),
+        None => [algorithm_expression, ""].into_iter(),
+    };
 
     // Step 2.5. Let algorithm be algorithm-and-value[0].
     let algorithm = algorithm_and_value.next()?;
@@ -152,6 +156,20 @@ fn apply_algorithm_to_response(
     }
 }
 
+/// A metadata value as standard base64 without its padding: base64url's '-' and '_' become '+'
+/// and '/'.
+fn normalize_base64(value: &str) -> String {
+    value
+        .trim_end_matches('=')
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect()
+}
+
 /// <https://w3c.github.io/webappsec-subresource-integrity/#is-response-eligible>
 fn is_eligible_for_integrity_validation(response: &Response) -> bool {
     matches!(
@@ -186,7 +204,9 @@ pub fn is_response_integrity_valid(integrity_metadata: &str, response: &Response
             Algorithm::Sha512 => apply_algorithm_to_response(body, &digest::SHA512),
         };
 
-        if hashed == digest {
+        // Compare as base64 without padding, and take base64url ('-' and '_') for the same
+        // digest, as Chrome and Firefox do (WPT integrity.sub: missing padding, base64url).
+        if hashed.trim_end_matches('=') == normalize_base64(digest) {
             return true;
         }
     }

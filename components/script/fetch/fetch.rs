@@ -766,6 +766,9 @@ impl FetchResponseListener for FetchContext {
             },
         }
 
+        let method = self.request.root().request().method.clone();
+        self.response_object.root().set_null_body_if_required(&method);
+
         // Step 12.5. Resolve p with responseObject.
         promise.resolve_native(cx, &self.response_object.root());
         self.fetch_promise = Some(TrustedPromise::from(&promise));
