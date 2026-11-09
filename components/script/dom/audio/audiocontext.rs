@@ -19,7 +19,7 @@ use crate::dom::audio::mediastreamaudiodestinationnode::MediaStreamAudioDestinat
 use crate::dom::audio::mediastreamaudiosourcenode::MediaStreamAudioSourceNode;
 use crate::dom::audio::mediastreamtrackaudiosourcenode::MediaStreamTrackAudioSourceNode;
 use crate::dom::audio::audiosinkinfo::AudioSinkInfo;
-use crate::dom::bindings::cell::DomRefCell;
+use script_bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::AudioContextBinding::{
     AudioContextLatencyCategory, AudioContextMethods, AudioContextOptions, AudioSinkInfoMethods,
     AudioSinkType, AudioTimestamp,
