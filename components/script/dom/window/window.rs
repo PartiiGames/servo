@@ -2574,6 +2574,9 @@ impl Window {
         // Callbacks may contain `Trusted` references, which are rooted and would
         // prevent the window from being GCed.
         self.pending_image_callbacks.borrow_mut().clear();
+
+        // Partii: the same for the handle this window's module scripts share.
+        self.as_global_scope().release_module_owner();
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>

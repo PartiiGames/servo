@@ -351,9 +351,38 @@ pub(crate) struct GlobalScope {
     /// <https://fetch.spec.whatwg.org/#environment-settings-object-fetch-group>
     #[no_trace]
     fetch_group: RefCell<FetchGroup>,
+
+    /// Partii: the owner handle every module script of this global shares (`ModuleScript::owner`).
+    /// A module's private data lives in this global's realm, so a `Trusted` there per module made a
+    /// cycle the GC cannot see through: every page that ran a module stayed alive after a reload.
+    /// One shared slot, emptied at teardown (`release_module_owner`).
+    #[no_trace]
+    #[ignore_malloc_size_of = "a shared handle"]
+    module_owner: RefCell<Option<crate::modules::script_module::ModuleOwner>>,
 }
 
 impl GlobalScope {
+    /// Partii: the shared owner handle for this global's module scripts (see `module_owner`).
+    pub(crate) fn module_owner(&self) -> crate::modules::script_module::ModuleOwner {
+        self.module_owner
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                std::rc::Rc::new(RefCell::new(Some(Trusted::new(self))))
+            })
+            .clone()
+    }
+
+    /// Partii: at teardown, let go of the handle the module scripts share, so the page can be
+    /// collected. Modules that outlive it resolve against the current global instead.
+    pub(crate) fn release_module_owner(&self) {
+        // The slot stays (empty), so a module made after this gets no owner either.
+        self.module_owner
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .borrow_mut()
+            .take();
+    }
+
     /// <https://storage.spec.whatwg.org/#obtain-a-storage-key-for-non-storage-purposes>
     pub(crate) fn obtain_storage_key_for_non_storage_purposes(&self) -> ImmutableOrigin {
         // Step 1: Let origin be environment’s origin if environment is an environment settings object; otherwise environment’s creation URL’s origin.
@@ -467,6 +496,7 @@ impl GlobalScope {
             import_map: Default::default(),
             resolved_module_set: Default::default(),
             fetch_group,
+            module_owner: Default::default(),
         }
     }
 

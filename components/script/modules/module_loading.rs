@@ -416,7 +416,7 @@ pub(crate) fn host_load_imported_module(
         ),
     };
 
-    let script_owner = referencing_script.and_then(|script| script.owner.clone());
+    let script_owner = referencing_script.and_then(|script| script.owner());
 
     // Step 6.2. Set settingsObject to referencingScript's settings object.
     if let Some(ref owner) = script_owner {
