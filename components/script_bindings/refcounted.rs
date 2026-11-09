@@ -71,6 +71,17 @@ pub struct Trusted<T: DomObject> {
     #[ignore_malloc_size_of = "These are shared by all `Trusted` types."]
     owner_thread: *const LiveDOMReferences,
     phantom: PhantomData<T>,
+    /// Partii census: where this handle was made, counted while it lives.
+    #[ignore_malloc_size_of = "static"]
+    site: Option<&'static std::panic::Location<'static>>,
+}
+
+impl<T: DomObject> Drop for Trusted<T> {
+    fn drop(&mut self) {
+        if let Some(site) = self.site {
+            partii_trusted_census::handle_gone(site);
+        }
+    }
 }
 
 impl<T: DomObject> std::fmt::Debug for Trusted<T> {
@@ -102,6 +113,7 @@ impl<T: DomObject> Trusted<T> {
             refcount,
             owner_thread,
             phantom: PhantomData,
+            site: partii_trusted_census::handle_made(std::panic::Location::caller()),
         }
     }
 
@@ -125,6 +137,7 @@ impl<T: DomObject> Clone for Trusted<T> {
             refcount: self.refcount.clone(),
             owner_thread: self.owner_thread,
             phantom: PhantomData,
+            site: self.site.and_then(partii_trusted_census::handle_made),
         }
     }
 }
@@ -194,6 +207,50 @@ mod partii_trusted_census {
 
     type Sites = Vec<&'static Location<'static>>;
 
+    /// Live `Trusted` handles by the place they were made (all threads).
+    static HANDLES: std::sync::Mutex<Option<FxHashMap<usize, (&'static Location<'static>, isize)>>> =
+        std::sync::Mutex::new(None);
+
+    pub(super) fn handle_made(
+        site: &'static Location<'static>,
+    ) -> Option<&'static Location<'static>> {
+        every()?;
+        let mut h = HANDLES.lock().ok()?;
+        h.get_or_insert_with(Default::default)
+            .entry(site as *const _ as usize)
+            .or_insert((site, 0))
+            .1 += 1;
+        Some(site)
+    }
+
+    pub(super) fn handle_gone(site: &'static Location<'static>) {
+        if let Ok(mut h) = HANDLES.lock() {
+            if let Some(e) = h.as_mut().and_then(|h| h.get_mut(&(site as *const _ as usize))) {
+                e.1 -= 1;
+            }
+        }
+    }
+
+    fn print_handles() {
+        let Ok(h) = HANDLES.lock() else { return };
+        let Some(h) = h.as_ref() else { return };
+        let mut v: Vec<_> = h.values().filter(|(_, n)| *n > 0).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let top: Vec<String> = v
+            .iter()
+            .take(16)
+            .map(|(l, n)| {
+                let f: Vec<_> = l.file().rsplit('/').take(2).collect();
+                format!("{}/{}:{}={n}", f.get(1).unwrap_or(&""), f[0], l.line())
+            })
+            .collect();
+        eprintln!(
+            "partii-trusted-handles: gc={} {}",
+            GCS.with(|c| c.get()),
+            top.join(" ")
+        );
+    }
+
     thread_local! {
         /// Where `Trusted::new` was called for each object (at most four sites an object).
         static SITES: RefCell<FxHashMap<*const libc::c_void, Sites>> = RefCell::new(FxHashMap::default());
@@ -238,6 +295,7 @@ mod partii_trusted_census {
     pub(super) fn print_sites(table: &FxHashMap<*const libc::c_void, Weak<TrustedReference>>) {
         // Forget the sites of objects no longer held.
         SITES.with(|s| s.borrow_mut().retain(|k, _| table.contains_key(k)));
+        print_handles();
         let mut v: Vec<(String, usize)> = BY_SITE.with(|b| b.borrow_mut().drain().collect());
         v.sort_by(|a, b| b.1.cmp(&a.1));
         for (k, n) in v.iter().take(12) {
