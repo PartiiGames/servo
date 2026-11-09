@@ -63,6 +63,7 @@ use crate::dom::webgl::validations::tex_image_2d::{
 use crate::dom::webgl::validations::tex_image_3d::{
     TexImage3DValidator, TexImage3DValidatorResult,
 };
+use crate::dom::webgl::extensions::ext::oesdrawbuffersindexed::OESDrawBuffersIndexed;
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglbuffer::WebGLBuffer;
 use crate::dom::webgl::webglframebuffer::{
@@ -104,6 +105,13 @@ impl IndexedBinding {
     }
 }
 
+/// WEBGL_stencil_texturing's STENCIL_INDEX_WEBGL (GL_STENCIL_INDEX).
+const STENCIL_INDEX: u32 = 0x1901;
+
+/// Draw buffers whose colour write masks the draw checks track (GL_MAX_DRAW_BUFFERS is 8 on
+/// every driver we run on; a buffer past this uses draw buffer 0's mask).
+const MAX_TRACKED_DRAW_BUFFERS: usize = 16;
+
 #[dom_struct] // no need to report size here as it is reported as part of WebGLRenderingContext
 pub(crate) struct WebGL2RenderingContext {
     reflector_: Reflector,
@@ -132,9 +140,10 @@ pub(crate) struct WebGL2RenderingContext {
     #[no_trace]
     unpack_params: Cell<UnpackParams>,
     enable_rasterizer_discard: Cell<bool>,
-    /// COLOR_WRITEMASK, for the draw check on draw buffers without a fragment output.
+    /// COLOR_WRITEMASK of each draw buffer (colorMask sets them all, OES_draw_buffers_indexed's
+    /// colorMaskiOES one), for the draw check on draw buffers without a fragment output.
     #[ignore_malloc_size_of = "plain bools"]
-    color_write_mask: Cell<[bool; 4]>,
+    color_write_masks: Cell<[[bool; 4]; MAX_TRACKED_DRAW_BUFFERS]>,
     default_fb_readbuffer: Cell<u32>,
     default_fb_drawbuffer: Cell<u32>,
 }
@@ -196,7 +205,7 @@ impl WebGL2RenderingContext {
             texture_pack_skip_rows: Cell::new(0),
             unpack_params: Cell::new(UnpackParams::default()),
             enable_rasterizer_discard: Cell::new(false),
-            color_write_mask: Cell::new([true; 4]),
+            color_write_masks: Cell::new([[true; 4]; MAX_TRACKED_DRAW_BUFFERS]),
             default_fb_readbuffer: Cell::new(constants::BACK),
             default_fb_drawbuffer: Cell::new(constants::BACK),
         })
@@ -351,6 +360,17 @@ impl WebGL2RenderingContext {
     /// fine while the colour write mask is all off, and nothing applies with
     /// RASTERIZER_DISCARD. The canvas only gets the type check. Programs whose outputs
     /// couldn't be read from the translated shader are not checked.
+    /// colorMaskiOES: draw buffer `index`'s write mask (the base context validates and sends it).
+    pub(crate) fn color_mask_indexed(&self, index: u32, mask: [bool; 4]) {
+        if self.base.color_mask_indexed(index, mask) {
+            let mut masks = self.color_write_masks.get();
+            if let Some(slot) = masks.get_mut(index as usize) {
+                *slot = mask;
+            }
+            self.color_write_masks.set(masks);
+        }
+    }
+
     fn validate_fragment_outputs_for_draw(&self) -> WebGLResult<()> {
         if self.enable_rasterizer_discard.get() {
             return Ok(());
@@ -363,8 +383,9 @@ impl WebGL2RenderingContext {
             return Ok(());
         };
         let user_framebuffer = self.base.get_draw_framebuffer_slot().get().is_some();
-        let writes_color = self.color_write_mask.get().contains(&true);
+        let masks = self.color_write_masks.get();
         for index in 0..self.base.limits().max_draw_buffers as usize {
+            let writes_color = masks.get(index).unwrap_or(&masks[0]).contains(&true);
             let Some(class) = self.draw_buffer_class(index) else {
                 continue;
             };
@@ -2213,7 +2234,9 @@ impl WebGL2RenderingContext {
                     Some(sampler) => sampler.compare_mode(),
                     None => texture.compare_mode(),
                 };
-                if texture_kind(format, compare_mode) != sampler_kind {
+                if texture_kind(format, compare_mode, texture.depth_stencil_mode()) !=
+                    sampler_kind
+                {
                     return Err(InvalidOperation);
                 }
                 // WebGL 2.0, 5.19: sampling a texture level that the draw framebuffer renders
@@ -2709,9 +2732,16 @@ fn sampler_target_and_kind(type_: u32) -> Option<(u32, SamplerKind)> {
 }
 
 /// The kind of sampler a texture with base level `format` can be read with.
-fn texture_kind(format: TexFormat, compare_mode: u32) -> SamplerKind {
+fn texture_kind(format: TexFormat, compare_mode: u32, depth_stencil_mode: u32) -> SamplerKind {
     use TexFormat as F;
     match format {
+        // WEBGL_stencil_texturing: a depth-stencil texture sampled as its stencil index is an
+        // unsigned integer texture (the compare mode doesn't apply).
+        F::DepthStencil | F::Depth24Stencil8 | F::Depth32fStencil8
+            if depth_stencil_mode == STENCIL_INDEX =>
+        {
+            SamplerKind::Uint
+        },
         F::R8i |
         F::R16i |
         F::R32i |
@@ -3875,7 +3905,8 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn ColorMask(&self, r: bool, g: bool, b: bool, a: bool) {
-        self.color_write_mask.set([r, g, b, a]);
+        self.color_write_masks
+            .set([[r, g, b, a]; MAX_TRACKED_DRAW_BUFFERS]);
         self.base.ColorMask(r, g, b, a)
     }
 
@@ -4161,6 +4192,35 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             constants::UNIFORM_BUFFER_BINDING |
             constants::UNIFORM_BUFFER_SIZE |
             constants::UNIFORM_BUFFER_START => &self.indexed_uniform_buffer_bindings,
+            constants::BLEND_EQUATION_RGB |
+            constants::BLEND_EQUATION_ALPHA |
+            constants::BLEND_SRC_RGB |
+            constants::BLEND_SRC_ALPHA |
+            constants::BLEND_DST_RGB |
+            constants::BLEND_DST_ALPHA |
+            constants::COLOR_WRITEMASK
+                if self
+                    .base
+                    .extension_manager()
+                    .is_enabled::<OESDrawBuffersIndexed>() =>
+            {
+                if target == constants::COLOR_WRITEMASK {
+                    match self.base.color_write_mask_indexed(index) {
+                        Ok(mask) => return mask.to_jsval(cx, retval),
+                        Err(error) => {
+                            self.base.webgl_error(error);
+                            return retval.set(NullValue());
+                        },
+                    }
+                }
+                match self.base.indexed_blend_parameter(target, index) {
+                    Ok(value) => return retval.set(Int32Value(value)),
+                    Err(error) => {
+                        self.base.webgl_error(error);
+                        return retval.set(NullValue());
+                    },
+                }
+            },
             _ => {
                 self.base.webgl_error(InvalidEnum);
                 return retval.set(NullValue());

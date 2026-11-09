@@ -97,6 +97,12 @@ pub struct GLState {
     // but the WebGL context doesn't, then color_write_mask.3 might be true
     // but the GL color write mask is false.
     color_write_mask: [bool; 4],
+    /// OES_draw_buffers_indexed: one WebGL colour write mask per draw buffer once colorMaskiOES
+    /// made them differ (empty while every draw buffer uses `color_write_mask`, which is then
+    /// also draw buffer 0's).
+    color_write_masks: Vec<[bool; 4]>,
+    /// GL_MAX_DRAW_BUFFERS, the number of per-draw-buffer masks.
+    max_draw_buffers: u32,
     clear_color: (f32, f32, f32, f32),
     scissor_test_enabled: bool,
     // The WebGL view of the stencil write mask (see comment re `color_write_mask`)
@@ -269,11 +275,37 @@ impl GLState {
     }
 
     fn restore_alpha_invariant(&self, gl: &Gl) {
-        let [r, g, b, a] = self.color_write_mask;
-        if self.fake_no_alpha() {
-            unsafe { gl.color_mask(r, g, b, false) };
-        } else {
-            unsafe { gl.color_mask(r, g, b, a) };
+        let fake_no_alpha = self.fake_no_alpha();
+        if self.color_write_masks.is_empty() {
+            let [r, g, b, a] = self.color_write_mask;
+            unsafe { gl.color_mask(r, g, b, a && !fake_no_alpha) };
+            return;
+        }
+        for (index, &[r, g, b, a]) in self.color_write_masks.iter().enumerate() {
+            unsafe { gl.color_mask_draw_buffer(index as u32, r, g, b, a && !fake_no_alpha) };
+        }
+    }
+
+    /// colorMaskiOES: draw buffer `index`'s WebGL write mask.
+    fn set_color_write_mask_indexed(&mut self, index: u32, mask: [bool; 4]) {
+        let count = self.max_draw_buffers.max(1) as usize;
+        let index = index as usize;
+        if index >= count {
+            return;
+        }
+        if self.color_write_masks.is_empty() {
+            self.color_write_masks = vec![self.color_write_mask; count];
+        }
+        self.color_write_masks[index] = mask;
+        if index == 0 {
+            self.color_write_mask = mask;
+        }
+        if self
+            .color_write_masks
+            .iter()
+            .all(|m| *m == self.color_write_mask)
+        {
+            self.color_write_masks.clear();
         }
     }
 
@@ -328,6 +360,8 @@ impl Default for GLState {
             framebuffer_renderbuffers: FxHashMap::default(),
             bound_framebuffers: (0, 0),
             color_write_mask: [true, true, true, true],
+            color_write_masks: Vec::new(),
+            max_draw_buffers: 1,
             clear_color: (0., 0., 0., 0.),
             scissor_test_enabled: false,
             // GL's initial stencil writemask is all ones.
@@ -862,6 +896,7 @@ impl WebGLThread {
             default_vao,
             emulate_luminance: webgl_version == WebGLVersion::WebGL2 && api_type == GlType::Gl,
             msaa,
+            max_draw_buffers: limits.max_draw_buffers,
             ..Default::default()
         };
         debug!("Created state {:?}", state);
@@ -1417,7 +1452,48 @@ impl WebGLImpl {
             },
             WebGLCommand::ColorMask(r, g, b, a) => {
                 state.color_write_mask = [r, g, b, a];
+                state.color_write_masks.clear();
                 state.restore_alpha_invariant(gl);
+            },
+            WebGLCommand::ColorMaskIndexed(index, r, g, b, a) => {
+                state.set_color_write_mask_indexed(index, [r, g, b, a]);
+                state.restore_alpha_invariant(gl);
+            },
+            WebGLCommand::EnableIndexed(cap, index) => unsafe {
+                gl.enable_draw_buffer(cap, index)
+            },
+            WebGLCommand::DisableIndexed(cap, index) => unsafe {
+                gl.disable_draw_buffer(cap, index)
+            },
+            WebGLCommand::BlendEquationIndexed(index, mode) => unsafe {
+                gl.blend_equation_draw_buffer(index, mode)
+            },
+            WebGLCommand::BlendEquationSeparateIndexed(index, mode_rgb, mode_alpha) => unsafe {
+                gl.blend_equation_separate_draw_buffer(index, mode_rgb, mode_alpha)
+            },
+            WebGLCommand::BlendFuncIndexed(index, src, dest) => unsafe {
+                gl.blend_func_draw_buffer(index, src, dest)
+            },
+            WebGLCommand::BlendFuncSeparateIndexed(
+                index,
+                src_rgb,
+                dest_rgb,
+                src_alpha,
+                dest_alpha,
+            ) => unsafe {
+                gl.blend_func_separate_draw_buffer(index, src_rgb, dest_rgb, src_alpha, dest_alpha)
+            },
+            WebGLCommand::GetIndexedParameterInt(pname, index, ref sender) => {
+                let value = unsafe { gl.get_parameter_indexed_i32(pname, index) };
+                sender.send(value).unwrap()
+            },
+            WebGLCommand::GetIndexedColorWritemask(index, ref sender) => {
+                let value = state
+                    .color_write_masks
+                    .get(index as usize)
+                    .copied()
+                    .unwrap_or(state.color_write_mask);
+                sender.send(value).unwrap()
             },
             WebGLCommand::CopyTexImage2D {
                 target,

@@ -18,6 +18,7 @@ use servo_canvas_traits::webgl::{
 };
 
 use crate::dom::bindings::codegen::Bindings::EXTTextureFilterAnisotropicBinding::EXTTextureFilterAnisotropicConstants;
+use crate::dom::bindings::codegen::Bindings::WEBGLStencilTexturingBinding::WEBGLStencilTexturingConstants;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -133,6 +134,9 @@ pub(crate) struct WebGLTexture {
     immutable_levels: Cell<Option<u32>>,
     /// TEXTURE_COMPARE_MODE, for the draw-time sampler type check.
     compare_mode: Cell<u32>,
+    /// DEPTH_STENCIL_TEXTURE_MODE (WEBGL_stencil_texturing): DEPTH_COMPONENT, or STENCIL_INDEX
+    /// to sample a depth-stencil texture's stencil (an unsigned integer texture).
+    depth_stencil_mode: Cell<u32>,
     /// TEXTURE_BASE_LEVEL and TEXTURE_MAX_LEVEL (WebGL 2), for the draw-time feedback-loop check.
     base_level: Cell<u32>,
     max_level: Cell<u32>,
@@ -150,6 +154,7 @@ impl WebGLTexture {
             target: Cell::new(None),
             immutable_levels: Cell::new(None),
             compare_mode: Cell::new(constants::NONE),
+            depth_stencil_mode: Cell::new(constants::DEPTH_COMPONENT),
             base_level: Cell::new(0),
             max_level: Cell::new(1000),
             face_count: Cell::new(0),
@@ -445,6 +450,10 @@ impl WebGLTexture {
         self.compare_mode.get()
     }
 
+    pub(crate) fn depth_stencil_mode(&self) -> u32 {
+        self.depth_stencil_mode.get()
+    }
+
     /// The internal format of the base level image (face 0 for cube maps), if defined.
     pub(crate) fn base_internal_format(&self) -> Option<TexFormat> {
         self.base_image_info().map(|info| info.internal_format)
@@ -531,6 +540,23 @@ impl WebGLTexture {
                         return Ok(());
                     },
                     _ => return Err(WebGLError::InvalidEnum),
+                },
+                // WEBGL_stencil_texturing (the context lets the name through only once it is
+                // enabled).
+                WEBGLStencilTexturingConstants::DEPTH_STENCIL_TEXTURE_MODE_WEBGL => {
+                    return match int_value as u32 {
+                        mode @ (constants::DEPTH_COMPONENT |
+                        WEBGLStencilTexturingConstants::STENCIL_INDEX_WEBGL) => {
+                            self.depth_stencil_mode.set(mode);
+                            context.send_command(WebGLCommand::TexParameteri(
+                                target,
+                                param,
+                                mode as i32,
+                            ));
+                            Ok(())
+                        },
+                        _ => Err(WebGLError::InvalidEnum),
+                    };
                 },
                 constants::TEXTURE_MAX_LOD | constants::TEXTURE_MIN_LOD => {
                     context.send_command(WebGLCommand::TexParameterf(target, param, float_value));

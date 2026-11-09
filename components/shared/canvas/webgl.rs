@@ -319,6 +319,19 @@ pub enum WebGLCommand {
     ClearDepth(f32),
     ClearStencil(i32),
     ColorMask(bool, bool, bool, bool),
+    /// OES_draw_buffers_indexed (GL 4.0 / ARB_draw_buffers_blend, GLES 3.2): per-draw-buffer
+    /// blend enable, equation, function and colour write mask.
+    EnableIndexed(u32, u32),
+    DisableIndexed(u32, u32),
+    BlendEquationIndexed(u32, u32),
+    BlendEquationSeparateIndexed(u32, u32, u32),
+    BlendFuncIndexed(u32, u32, u32),
+    BlendFuncSeparateIndexed(u32, u32, u32, u32, u32),
+    ColorMaskIndexed(u32, bool, bool, bool, bool),
+    /// glGetIntegeri_v of an indexed blend state (BLEND_EQUATION_RGB, BLEND_SRC_ALPHA, ...).
+    GetIndexedParameterInt(u32, u32, GenericSender<i32>),
+    /// The WebGL view of a draw buffer's colour write mask.
+    GetIndexedColorWritemask(u32, GenericSender<[bool; 4]>),
     CullFace(u32),
     FrontFace(u32),
     DepthFunc(u32),

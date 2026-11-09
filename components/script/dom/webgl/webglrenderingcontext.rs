@@ -49,6 +49,7 @@ use crate::dom::bindings::codegen::Bindings::ANGLEInstancedArraysBinding::ANGLEI
 use crate::dom::bindings::codegen::Bindings::EXTBlendMinmaxBinding::EXTBlendMinmaxConstants;
 use crate::dom::bindings::codegen::Bindings::KHRParallelShaderCompileBinding::KHRParallelShaderCompileConstants;
 use crate::dom::bindings::codegen::Bindings::OESVertexArrayObjectBinding::OESVertexArrayObjectConstants;
+use crate::dom::bindings::codegen::Bindings::WEBGLStencilTexturingBinding::WEBGLStencilTexturingConstants;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::{
     TexImageSource, WebGLContextAttributes, WebGLRenderingContextConstants as constants,
@@ -260,6 +261,10 @@ pub(crate) struct WebGLRenderingContext {
     draw_state_gen: DrawStateGen,
     extension_manager: WebGLExtensions,
     capabilities: Capabilities,
+    /// OES_draw_buffers_indexed: set once enableiOES/disableiOES ran, after which the draw
+    /// buffers' BLEND enables can differ from draw buffer 0's (what `capabilities` keeps), so
+    /// enable(BLEND) / disable(BLEND) always reach GL.
+    blend_indexed: Cell<bool>,
     /// Front and back stencil reference and masks, for the draw-time check that they agree
     /// (WebGL 1.0 6.11).
     #[ignore_malloc_size_of = "Because it's small"]
@@ -346,6 +351,7 @@ impl WebGLRenderingContext {
                 object_names: Default::default(),
                 draw_state_gen: Default::default(),
                 capabilities: Default::default(),
+                blend_indexed: Cell::new(false),
                 stencil_state: Default::default(),
                 default_framebuffer_stencil,
                 default_vao: Default::default(),
@@ -1991,6 +1997,109 @@ impl WebGLRenderingContext {
         self.current_vao_webgl2.set(vao);
     }
 
+    /// OES_draw_buffers_indexed: a draw buffer index below MAX_DRAW_BUFFERS, else INVALID_VALUE.
+    fn validate_draw_buffer_index(&self, index: u32) -> WebGLResult<()> {
+        if index >= self.limits.max_draw_buffers {
+            return Err(InvalidValue);
+        }
+        Ok(())
+    }
+
+    /// enableiOES / disableiOES: only BLEND has per-draw-buffer state.
+    pub(crate) fn set_blend_indexed(&self, target: u32, index: u32, enabled: bool) {
+        if target != constants::BLEND {
+            return self.webgl_error(InvalidEnum);
+        }
+        handle_potential_webgl_error!(self, self.validate_draw_buffer_index(index), return);
+        if index == 0 {
+            let _ = self.capabilities.set(constants::BLEND, enabled);
+        }
+        self.blend_indexed.set(true);
+        self.send_command(if enabled {
+            WebGLCommand::EnableIndexed(target, index)
+        } else {
+            WebGLCommand::DisableIndexed(target, index)
+        });
+    }
+
+    /// blendEquationiOES / blendEquationSeparateiOES.
+    pub(crate) fn blend_equation_indexed(
+        &self,
+        index: u32,
+        mode_rgb: u32,
+        mode_alpha: Option<u32>,
+    ) {
+        handle_potential_webgl_error!(self, self.validate_blend_mode(mode_rgb), return);
+        if let Some(mode_alpha) = mode_alpha {
+            handle_potential_webgl_error!(self, self.validate_blend_mode(mode_alpha), return);
+        }
+        handle_potential_webgl_error!(self, self.validate_draw_buffer_index(index), return);
+        self.send_command(match mode_alpha {
+            None => WebGLCommand::BlendEquationIndexed(index, mode_rgb),
+            Some(mode_alpha) => {
+                WebGLCommand::BlendEquationSeparateIndexed(index, mode_rgb, mode_alpha)
+            },
+        });
+    }
+
+    /// blendFunciOES / blendFuncSeparateiOES, with blendFunc's checks (WebGL 1.0 6.13: no
+    /// CONSTANT_COLOR with CONSTANT_ALPHA between the RGB source and destination factors).
+    pub(crate) fn blend_func_indexed(
+        &self,
+        index: u32,
+        src_rgb: u32,
+        dest_rgb: u32,
+        alpha: Option<(u32, u32)>,
+    ) {
+        let webgl2 = self.webgl_version() == WebGLVersion::WebGL2;
+        let (src_alpha, dest_alpha) = alpha.unwrap_or((src_rgb, dest_rgb));
+        if !is_blend_factor(src_rgb, false, webgl2) ||
+            !is_blend_factor(dest_rgb, true, webgl2) ||
+            !is_blend_factor(src_alpha, false, webgl2) ||
+            !is_blend_factor(dest_alpha, true, webgl2)
+        {
+            return self.webgl_error(InvalidEnum);
+        }
+        handle_potential_webgl_error!(self, self.validate_draw_buffer_index(index), return);
+        if has_invalid_blend_constants(src_rgb, dest_rgb) ||
+            has_invalid_blend_constants(dest_rgb, src_rgb)
+        {
+            return self.webgl_error(InvalidOperation);
+        }
+        self.send_command(match alpha {
+            None => WebGLCommand::BlendFuncIndexed(index, src_rgb, dest_rgb),
+            Some((src_alpha, dest_alpha)) => WebGLCommand::BlendFuncSeparateIndexed(
+                index, src_rgb, dest_rgb, src_alpha, dest_alpha,
+            ),
+        });
+    }
+
+    /// colorMaskiOES. True when it was sent (the WebGL 2 context keeps the masks for its draw
+    /// checks).
+    pub(crate) fn color_mask_indexed(&self, index: u32, mask: [bool; 4]) -> bool {
+        handle_potential_webgl_error!(self, self.validate_draw_buffer_index(index), return false);
+        let [r, g, b, a] = mask;
+        self.send_command(WebGLCommand::ColorMaskIndexed(index, r, g, b, a));
+        true
+    }
+
+    /// getIndexedParameter of an OES_draw_buffers_indexed blend state (INVALID_VALUE for an
+    /// index past MAX_DRAW_BUFFERS).
+    pub(crate) fn indexed_blend_parameter(&self, pname: u32, index: u32) -> WebGLResult<i32> {
+        self.validate_draw_buffer_index(index)?;
+        let (sender, receiver) = webgl_channel().unwrap();
+        self.send_command(WebGLCommand::GetIndexedParameterInt(pname, index, sender));
+        Ok(receiver.recv().unwrap())
+    }
+
+    /// getIndexedParameter(COLOR_WRITEMASK, index) (OES_draw_buffers_indexed).
+    pub(crate) fn color_write_mask_indexed(&self, index: u32) -> WebGLResult<[bool; 4]> {
+        self.validate_draw_buffer_index(index)?;
+        let (sender, receiver) = webgl_channel().unwrap();
+        self.send_command(WebGLCommand::GetIndexedColorWritemask(index, sender));
+        Ok(receiver.recv().unwrap())
+    }
+
     fn validate_blend_mode(&self, mode: u32) -> WebGLResult<()> {
         match mode {
             constants::FUNC_ADD | constants::FUNC_SUBTRACT | constants::FUNC_REVERSE_SUBTRACT => {
@@ -3147,6 +3256,10 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         match pname {
             constants::TEXTURE_MAG_FILTER => return retval.set(UInt32Value(texture.mag_filter())),
             constants::TEXTURE_MIN_FILTER => return retval.set(UInt32Value(texture.min_filter())),
+            // WEBGL_stencil_texturing (enabled, or the name check above failed).
+            WEBGLStencilTexturingConstants::DEPTH_STENCIL_TEXTURE_MODE_WEBGL => {
+                return retval.set(UInt32Value(texture.depth_stencil_mode()));
+            },
             _ => {},
         }
 
@@ -3846,14 +3959,17 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn Enable(&self, cap: u32) {
-        if handle_potential_webgl_error!(self, self.capabilities.set(cap, true), return) {
+        let changed = handle_potential_webgl_error!(self, self.capabilities.set(cap, true), return);
+        if changed || (cap == constants::BLEND && self.blend_indexed.get()) {
             self.send_command(WebGLCommand::Enable(cap));
         }
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn Disable(&self, cap: u32) {
-        if handle_potential_webgl_error!(self, self.capabilities.set(cap, false), return) {
+        let changed =
+            handle_potential_webgl_error!(self, self.capabilities.set(cap, false), return);
+        if changed || (cap == constants::BLEND && self.blend_indexed.get()) {
             self.send_command(WebGLCommand::Disable(cap));
         }
     }
