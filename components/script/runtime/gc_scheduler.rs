@@ -703,6 +703,29 @@ pub(crate) unsafe fn init_runtime(
             0
         };
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, sm_budget);
+        // PARTII_GC_PARAMS="NAME=N,..." (measurement): SpiderMonkey's GC helper-thread parameters, e.g.
+        // PARALLEL_MARKING_ENABLED=0 or MARKING_THREAD_COUNT=1, to see whether a slice waits on helper
+        // threads that a busy node (llvmpipe's rasterizer threads) starves.
+        if let Ok(spec) = std::env::var("PARTII_GC_PARAMS") {
+            for kv in spec.split(',').filter(|kv| !kv.is_empty()) {
+                let (name, value) = kv.split_once('=').unwrap_or((kv, ""));
+                let key = match name {
+                    "PARALLEL_MARKING_ENABLED" => JSGCParamKey::JSGC_PARALLEL_MARKING_ENABLED,
+                    "MARKING_THREAD_COUNT" => JSGCParamKey::JSGC_MARKING_THREAD_COUNT,
+                    "HELPER_THREAD_RATIO" => JSGCParamKey::JSGC_HELPER_THREAD_RATIO,
+                    "MAX_HELPER_THREADS" => JSGCParamKey::JSGC_MAX_HELPER_THREADS,
+                    "URGENT_THRESHOLD_MB" => JSGCParamKey::JSGC_URGENT_THRESHOLD_MB,
+                    _ => {
+                        eprintln!("[gc-sched] PARTII_GC_PARAMS: unknown {name}");
+                        continue;
+                    },
+                };
+                match value.parse::<u32>() {
+                    Ok(v) => JS_SetGCParameter(cx, key, v),
+                    Err(_) => eprintln!("[gc-sched] PARTII_GC_PARAMS: {kv} is not NAME=number"),
+                }
+            }
+        }
         let raw = cx.raw_cx();
         SetGrayGCRootsTracer(raw, Some(gray_roots), roots_data);
         if matches!(
