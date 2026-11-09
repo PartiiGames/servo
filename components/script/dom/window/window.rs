@@ -2584,6 +2584,9 @@ impl Window {
         // map so the page can be collected.
         let module_map = std::mem::take(&mut self.Document().module_map().borrow_mut().0);
         drop(module_map);
+
+        // Partii: fetches still streaming hold the page through their listeners.
+        self.upcast::<GlobalScope>().fetch_group_mut().release_listeners();
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>

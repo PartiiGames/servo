@@ -133,7 +133,8 @@ pub(crate) struct NetworkListener<Listener: FetchResponseListener> {
     pub(crate) context: Arc<Mutex<Option<Listener>>>,
     pub(crate) task_source: SendableTaskSource,
     /// The [`GlobalScope`] this [`NetworkListener`] was created for.
-    pub(crate) global_scope: Trusted<GlobalScope>,
+    /// Partii: emptied when the page is torn down (`release_handle`), like `context`.
+    pub(crate) global_scope: Arc<Mutex<Option<Trusted<GlobalScope>>>>,
 }
 
 impl<Listener: FetchResponseListener> NetworkListener<Listener> {
@@ -145,8 +146,24 @@ impl<Listener: FetchResponseListener> NetworkListener<Listener> {
         Self {
             context: Arc::new(Mutex::new(Some(context))),
             task_source,
-            global_scope: Trusted::new(global_scope),
+            global_scope: Arc::new(Mutex::new(Some(Trusted::new(global_scope)))),
         }
+    }
+
+    /// Partii: a hook that drops this listener's context and its handle to the global. The
+    /// network side keeps the listener until the response ends, and a streamed response that
+    /// never ends kept the page that started it alive (its window, WebGL contexts, media
+    /// players) after a reload. The fetch group calls this when it terminates the fetch or the
+    /// page is torn down; later network events then find nothing to deliver to.
+    pub(crate) fn release_handle(&self) -> Box<dyn Fn()> {
+        let context = self.context.clone();
+        let global_scope = self.global_scope.clone();
+        Box::new(move || {
+            let listener = context.lock().ok().and_then(|mut c| c.take());
+            drop(listener);
+            let global = global_scope.lock().ok().and_then(|mut g| g.take());
+            drop(global);
+        })
     }
 
     pub(crate) fn notify(&mut self, message: FetchResponseMsg) {
@@ -155,10 +172,13 @@ impl<Listener: FetchResponseListener> NetworkListener<Listener> {
         self.task_source
             .queue(task!(network_listener_response: move |cx| {
                 if let FetchResponseMsg::ProcessResponseEOF(request_id, ..) = &message {
-                    global_scope
-                        .root()
-                        .fetch_group_mut()
-                        .mark_fetch_request_as_done(request_id);
+                    let global = global_scope.lock().ok().and_then(|g| g.clone());
+                    if let Some(global) = global {
+                        global
+                            .root()
+                            .fetch_group_mut()
+                            .mark_fetch_request_as_done(request_id);
+                    }
                 }
 
                 let mut context = context.lock().unwrap();
