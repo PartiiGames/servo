@@ -6,7 +6,7 @@
 //! related to `type=module` for script thread or worker threads.
 
 use std::borrow::Cow;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::hash_map::Entry;
 use std::ffi::CStr;
 use std::fmt::Debug;
@@ -134,23 +134,32 @@ impl Clone for RethrowError {
     }
 }
 
+/// Partii: the global a module script belongs to, shared by all of that global's modules and
+/// emptied when the global is torn down (`GlobalScope::release_module_owner`).
+pub(crate) type ModuleOwner = Rc<RefCell<Option<Trusted<GlobalScope>>>>;
+
 pub(crate) struct ModuleScript {
     pub(crate) base_url: ServoUrl,
     pub(crate) options: ScriptFetchOptions,
-    pub(crate) owner: Option<Trusted<GlobalScope>>,
+    owner: Option<ModuleOwner>,
 }
 
 impl ModuleScript {
     pub(crate) fn new(
         base_url: ServoUrl,
         options: ScriptFetchOptions,
-        owner: Option<Trusted<GlobalScope>>,
+        owner: Option<ModuleOwner>,
     ) -> Self {
         ModuleScript {
             base_url,
             options,
             owner,
         }
+    }
+
+    /// The global this module script belongs to, unless it was torn down.
+    pub(crate) fn owner(&self) -> Option<Trusted<GlobalScope>> {
+        self.owner.as_ref().and_then(|o| o.borrow().clone())
     }
 }
 
@@ -205,7 +214,7 @@ impl ModuleTree {
         line_number: u32,
         introduction_type: Option<&'static CStr>,
     ) -> Self {
-        let owner = Trusted::new(global);
+        let owner = global.module_owner();
 
         // Step 2. Let script be a new module script that this algorithm will subsequently initialize.
         // Step 6. Set script's parse error and error to rethrow to null.
@@ -464,7 +473,7 @@ impl ModuleTree {
         specifier: String,
     ) -> Fallible<ServoUrl> {
         // Step 1~3 to get settingsObject and baseURL
-        let script_global = script.and_then(|s| s.owner.as_ref().map(|o| o.root()));
+        let script_global = script.and_then(|s| s.owner().map(|o| o.root()));
         // Step 1. Let settingsObject and baseURL be null.
         let (global, base_url): (&GlobalScope, &ServoUrl) = match script {
             // Step 2. If referringScript is not null, then:
