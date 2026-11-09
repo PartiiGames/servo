@@ -3,7 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! `decodeAudioData` on symphonia: ogg/vorbis, mp3, wav (PCM, ADPCM), flac, mp3 in mp4,
-//! webm/mkv (where the codec is one of these). Output is resampled to the context's rate.
+//! webm/mkv (where the codec is one of these), and Opus in Ogg or WebM with the `opus` feature
+//! (codecs.rs). Output is resampled to the context's rate.
 
 use std::io::Cursor;
 
@@ -54,7 +55,7 @@ pub fn decode_all(data: Vec<u8>) -> Result<Decoded, AudioDecoderError> {
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or(AudioDecoderError::InvalidMediaFormat)?;
     let track_id = track.id;
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = crate::codecs::codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| AudioDecoderError::Backend(format!("no decoder: {e}")))?;
     let mut rate = track.codec_params.sample_rate.unwrap_or(0);

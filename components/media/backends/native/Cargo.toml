@@ -26,6 +26,8 @@ servo-media-streams = { workspace = true }
 servo-media-traits = { workspace = true }
 servo-media-webrtc = { workspace = true }
 symphonia = { version = "0.5.5", default-features = false, features = ["adpcm", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+# Opus (Ogg and WebM) through libopus, built from its bundled source with cmake (BSD-3-Clause).
+symphonia-adapter-libopus = { version = "0.2.9", default-features = false, features = ["bundled"], optional = true }
 
 # cpal's own ALSA binding: to keep alsa-lib's probe errors off stderr when there's no sound card.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
@@ -36,6 +38,8 @@ default = ["device"]
 # Sound output through cpal (links libasound on Linux). Without it the output is always the null
 # output: Web Audio and <audio> still run, silently (headless servers without ALSA libraries).
 device = ["dep:cpal", "dep:alsa"]
+# Opus decoding (decodeAudioData, <audio>, canPlayType "codecs=opus") through libopus.
+opus = ["dep:symphonia-adapter-libopus"]
 
 [lints]
 workspace = true

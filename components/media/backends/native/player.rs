@@ -429,12 +429,12 @@ fn open_stream(bytes: Arc<Vec<u8>>) -> Result<(Stream, Option<f64>), String> {
         .iter()
         .find(|t| {
             t.codec_params.codec != CODEC_TYPE_NULL
-                && symphonia::default::get_codecs()
+                && crate::codecs::codecs()
                     .get_codec(t.codec_params.codec)
                     .is_some()
         })
         .ok_or_else(|| "no decodable audio track".to_owned())?;
-    let decoder = symphonia::default::get_codecs()
+    let decoder = crate::codecs::codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("no decoder: {e}"))?;
     let rate = track.codec_params.sample_rate.unwrap_or(0);
@@ -473,7 +473,7 @@ impl Stream {
                     // A chained stream changed parameters; rebuild the decoder.
                     let track = self.format.default_track()?;
                     self.track_id = track.id;
-                    self.decoder = symphonia::default::get_codecs()
+                    self.decoder = crate::codecs::codecs()
                         .make(&track.codec_params, &DecoderOptions::default())
                         .ok()?;
                     continue;

@@ -63,6 +63,8 @@ media-gstreamer = ["servo-media-gstreamer", "gstreamer"]
 # libasound link); media-native-device adds the cpal output.
 media-native = ["dep:servo-media-native"]
 media-native-device = ["media-native", "servo-media-native/device"]
+# Opus decoding in the native backend, through libopus (bundled, built with cmake).
+media-native-opus = ["media-native", "servo-media-native/opus"]
 
 # Allows multiprocess and ipc mode. If enabled this still needs the correct preference flags to use multi process mode.
 multiprocess = ["servo-base/multiprocess", "servo-constellation/multiprocess"]

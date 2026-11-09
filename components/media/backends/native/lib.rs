@@ -11,6 +11,7 @@
 //!   threads and players still run.
 //! - Video, capture, media streams and WebRTC behave like the dummy backend.
 
+mod codecs;
 pub mod decoder;
 mod device;
 pub mod output;
@@ -118,10 +119,13 @@ impl NativeBackend {
     }
 }
 
-/// What symphonia (as built here) decodes. Opus is not supported by symphonia 0.5; AAC is not built
-/// (royalty-free codecs only): mp4a.40.34/6b/69 are MP3 in MP4.
+/// What the decoders (codecs.rs) take: symphonia as built here, and Opus with the `opus` feature.
+/// AAC is not built (royalty-free codecs only): mp4a.40.34/6b/69 are MP3 in MP4.
 fn codec_supported(codec: &str) -> bool {
     let codec = codec.trim().trim_matches('"').to_ascii_lowercase();
+    if codec == "opus" {
+        return cfg!(feature = "opus");
+    }
     matches!(
         codec.as_str(),
         "vorbis" | "mp3" | "mp4a.40.34" | "mp4a.6b" | "mp4a.69" | "flac" | "1" | "pcm"
@@ -333,10 +337,13 @@ mod tests {
             can_play_type("audio/ogg; codecs=\"vorbis\""),
             SupportsMediaType::Probably
         );
-        assert_eq!(
-            can_play_type("audio/ogg; codecs=\"opus\""),
+        let opus = if cfg!(feature = "opus") {
+            SupportsMediaType::Probably
+        } else {
             SupportsMediaType::No
-        );
+        };
+        assert_eq!(can_play_type("audio/ogg; codecs=\"opus\""), opus);
+        assert_eq!(can_play_type("audio/webm; codecs=opus"), opus);
         // No AAC (royalty-free codecs only, 2026-11-09): mp4/m4a with AAC and ADTS .aac are "".
         assert_eq!(
             can_play_type("audio/mp4; codecs=\"mp4a.40.2\""),
