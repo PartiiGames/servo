@@ -138,6 +138,22 @@ impl Clone for RethrowError {
 /// emptied when the global is torn down (`GlobalScope::release_module_owner`).
 pub(crate) type ModuleOwner = Rc<RefCell<Option<Trusted<GlobalScope>>>>;
 
+/// Partii: `GlobalScope`'s slot for its `ModuleOwner`. A `Trusted` roots itself, so there is
+/// nothing to trace.
+#[derive(Default)]
+pub(crate) struct ModuleOwnerSlot(pub(crate) RefCell<Option<ModuleOwner>>);
+
+#[expect(unsafe_code)]
+unsafe impl crate::JSTraceable for ModuleOwnerSlot {
+    unsafe fn trace(&self, _trc: *mut js::jsapi::JSTracer) {}
+}
+
+impl malloc_size_of::MallocSizeOf for ModuleOwnerSlot {
+    fn size_of(&self, _ops: &mut malloc_size_of::MallocSizeOfOps) -> usize {
+        0
+    }
+}
+
 pub(crate) struct ModuleScript {
     pub(crate) base_url: ServoUrl,
     pub(crate) options: ScriptFetchOptions,
