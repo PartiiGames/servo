@@ -1004,7 +1004,10 @@ impl WebGLRenderingContext {
     fn incomplete_sampler_bindings(&self) -> Vec<(u32, u32, DomRoot<WebGLTexture>)> {
         let mut bindings = Vec::new();
         if self.webgl_version() != WebGLVersion::WebGL1 {
-            return bindings;
+            return self
+                .webgl2()
+                .map(|webgl2| webgl2.incomplete_depth_bindings())
+                .unwrap_or_default();
         }
         let Some(program) = self.current_program() else {
             return bindings;
