@@ -356,15 +356,14 @@ pub(crate) struct GlobalScope {
     /// A module's private data lives in this global's realm, so a `Trusted` there per module made a
     /// cycle the GC cannot see through: every page that ran a module stayed alive after a reload.
     /// One shared slot, emptied at teardown (`release_module_owner`).
-    #[no_trace]
-    #[ignore_malloc_size_of = "a shared handle"]
-    module_owner: RefCell<Option<crate::modules::script_module::ModuleOwner>>,
+    module_owner: crate::modules::script_module::ModuleOwnerSlot,
 }
 
 impl GlobalScope {
     /// Partii: the shared owner handle for this global's module scripts (see `module_owner`).
     pub(crate) fn module_owner(&self) -> crate::modules::script_module::ModuleOwner {
         self.module_owner
+            .0
             .borrow_mut()
             .get_or_insert_with(|| {
                 std::rc::Rc::new(RefCell::new(Some(Trusted::new(self))))
@@ -377,6 +376,7 @@ impl GlobalScope {
     pub(crate) fn release_module_owner(&self) {
         // The slot stays (empty), so a module made after this gets no owner either.
         self.module_owner
+            .0
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .borrow_mut()
