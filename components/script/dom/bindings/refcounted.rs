@@ -80,9 +80,13 @@ impl TrustedPromise {
     /// Create a new `TrustedPromise` instance from an existing DOM object. The object will
     /// be prevented from being GCed for the duration of the resulting `TrustedPromise` object's
     /// lifetime.
+    #[track_caller]
     pub(crate) fn new(promise: &RootedPromise) -> TrustedPromise {
+        partii_dropped_promises::release_pending();
+        let site = std::panic::Location::caller();
         LIVE_PROMISE_REFERENCES.with(|live_references| {
             let ptr = live_references.store_promise(promise);
+            partii_dropped_promises::note_site(ptr.0 as usize, site);
             TrustedPromise {
                 dom_object: ptr,
                 owner_thread: thread::current().id(),
@@ -94,6 +98,8 @@ impl TrustedPromise {
     /// a different thread than the original value from which this `TrustedPromise` was
     /// obtained.
     pub(crate) fn root(self, cx: &JSContext) -> RootedPromise {
+        partii_dropped_promises::release_pending();
+        partii_dropped_promises::forget_site(self.dom_object.0 as usize);
         LIVE_PROMISE_REFERENCES.with(|live_references| {
             debug_assert_eq!(self.owner_thread, thread::current().id());
             live_references
@@ -127,11 +133,139 @@ impl TrustedPromise {
     }
 }
 
+/// Partii: a `TrustedPromise` dropped without `root()` (its task was cancelled, its page exited, a
+/// callback it was sent into went away) used to leave its entry in the table for good, rooting
+/// the promise and, through it, its whole page. Dropping one now removes the entry: at once on the
+/// owner thread, else at that thread's next `TrustedPromise::new`/`root`.
+impl Drop for TrustedPromise {
+    fn drop(&mut self) {
+        let key = self.dom_object;
+        if thread::current().id() == self.owner_thread {
+            partii_dropped_promises::remove(key);
+        } else {
+            partii_dropped_promises::defer(self.owner_thread, key.0 as usize);
+        }
+    }
+}
+
+mod partii_dropped_promises {
+    use std::cell::RefCell;
+    use std::panic::Location;
+    use std::sync::Mutex;
+    use std::thread::{self, ThreadId};
+
+    use rustc_hash::FxHashMap;
+
+    use super::{LIVE_PROMISE_REFERENCES, PromiseKey};
+
+    static DEFERRED: Mutex<Vec<(ThreadId, usize)>> = Mutex::new(Vec::new());
+
+    thread_local! {
+        /// Census (`PARTII_TRUSTED_CENSUS`): where each live entry was made.
+        static SITES: RefCell<FxHashMap<usize, &'static Location<'static>>> = RefCell::new(FxHashMap::default());
+    }
+
+    fn census() -> bool {
+        std::env::var_os("PARTII_TRUSTED_CENSUS").is_some()
+    }
+
+    pub(super) fn note_site(key: usize, site: &'static Location<'static>) {
+        if census() {
+            let _ = SITES.try_with(|s| s.borrow_mut().insert(key, site));
+        }
+    }
+
+    pub(super) fn forget_site(key: usize) {
+        if census() {
+            let _ = SITES.try_with(|s| s.borrow_mut().remove(&key));
+        }
+    }
+
+    pub(super) fn remove(key: PromiseKey) {
+        forget_site(key.0 as usize);
+        // Not while the table is being traced or changed; the entry stays (as before) then.
+        let removed = LIVE_PROMISE_REFERENCES
+            .try_with(|live| {
+                live.promise_table
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut t| t.remove(&key))
+            })
+            .ok()
+            .flatten();
+        drop(removed);
+    }
+
+    pub(super) fn defer(owner: ThreadId, key: usize) {
+        if let Ok(mut d) = DEFERRED.lock() {
+            d.push((owner, key));
+        }
+    }
+
+    pub(super) fn release_pending() {
+        let me = thread::current().id();
+        let mine: Vec<usize> = match DEFERRED.lock() {
+            Ok(mut d) if !d.is_empty() => {
+                let mut mine = Vec::new();
+                d.retain(|(t, k)| {
+                    if *t == me {
+                        mine.push(*k);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                mine
+            },
+            _ => return,
+        };
+        for k in mine {
+            remove(PromiseKey(k as *const _));
+        }
+    }
+
+    /// Census line: live table entries by where they were made.
+    pub(super) fn print(total: usize) {
+        let mut by: FxHashMap<String, usize> = FxHashMap::default();
+        SITES.with(|s| {
+            for l in s.borrow().values() {
+                let f: Vec<_> = l.file().rsplit('/').take(2).collect();
+                *by.entry(format!("{}/{}:{}", f.get(1).unwrap_or(&""), f[0], l.line()))
+                    .or_default() += 1;
+            }
+        });
+        let mut v: Vec<_> = by.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let top: Vec<String> = v.iter().take(12).map(|(k, n)| format!("{k}={n}")).collect();
+        eprintln!("partii-trusted-promises: live={total} {}", top.join(" "));
+    }
+}
+
+fn partii_promise_census(total: usize) {
+    use std::cell::Cell;
+    thread_local!(static N: Cell<u64> = const { Cell::new(0) });
+    let Some(every) = std::env::var("PARTII_TRUSTED_CENSUS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+    else {
+        return;
+    };
+    let n = N.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    if n % every == 1 || every == 1 {
+        partii_dropped_promises::print(total);
+    }
+}
+
 /// A JSTraceDataOp for tracing reflectors held in LIVE_REFERENCES
 pub(crate) unsafe fn trace_refcounted_objects(tracer: *mut JSTracer) {
     trace!("tracing live refcounted promise references");
     LIVE_PROMISE_REFERENCES.with(|live_references| {
         let table = live_references.promise_table.borrow_mut();
+        partii_promise_census(table.len());
         for promise in table.values() {
             unsafe {
                 promise.reflector().trace(tracer);
