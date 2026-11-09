@@ -360,6 +360,66 @@ impl WebGL2RenderingContext {
     /// fine while the colour write mask is all off, and nothing applies with
     /// RASTERIZER_DISCARD. The canvas only gets the type check. Programs whose outputs
     /// couldn't be read from the translated shader are not checked.
+    /// ES 3.0.6 3.8.13: a depth texture (or a depth-stencil one sampled as depth) whose compare
+    /// mode is NONE is not filterable, so with a LINEAR filter it is incomplete and samples as
+    /// zeros (opaque black for a float sampler). Desktop GL filters it, so the draw swaps in the
+    /// black stand-in: the 2D and cube sampler bindings of the current program for which that
+    /// holds, as (unit, target, texture).
+    pub(crate) fn incomplete_depth_bindings(&self) -> Vec<(u32, u32, DomRoot<WebGLTexture>)> {
+        let mut bindings = Vec::new();
+        let Some(program) = self.base.current_program() else {
+            return bindings;
+        };
+        for uniform in program.active_uniforms().iter() {
+            let target = match uniform.type_ {
+                constants::SAMPLER_2D => constants::TEXTURE_2D,
+                constants::SAMPLER_CUBE => constants::TEXTURE_CUBE_MAP,
+                _ => continue,
+            };
+            let Some(location) = uniform.location else {
+                continue;
+            };
+            for element in 0..uniform.size.unwrap_or(1).max(1) {
+                let unit = program.sampler_unit(location + element);
+                let Some(texture) = self.base.textures().texture_at(unit, target) else {
+                    continue;
+                };
+                let is_depth = match texture.base_internal_format() {
+                    Some(
+                        TexFormat::DepthComponent |
+                        TexFormat::DepthComponent16 |
+                        TexFormat::DepthComponent24 |
+                        TexFormat::DepthComponent32f,
+                    ) => true,
+                    Some(
+                        TexFormat::DepthStencil |
+                        TexFormat::Depth24Stencil8 |
+                        TexFormat::Depth32fStencil8,
+                    ) => texture.depth_stencil_mode() != STENCIL_INDEX,
+                    _ => false,
+                };
+                if !is_depth {
+                    continue;
+                }
+                let (compare_mode, linear) =
+                    match self.samplers.get(unit as usize).and_then(|s| s.get()) {
+                        Some(sampler) => (
+                            sampler.compare_mode(),
+                            sampler.is_using_linear_filtering(),
+                        ),
+                        None => (texture.compare_mode(), texture.is_using_linear_filtering()),
+                    };
+                if compare_mode == constants::NONE &&
+                    linear &&
+                    !bindings.iter().any(|(u, t, _)| *u == unit && *t == target)
+                {
+                    bindings.push((unit, target, texture));
+                }
+            }
+        }
+        bindings
+    }
+
     /// colorMaskiOES: draw buffer `index`'s write mask (the base context validates and sends it).
     pub(crate) fn color_mask_indexed(&self, index: u32, mask: [bool; 4]) {
         if self.base.color_mask_indexed(index, mask) {

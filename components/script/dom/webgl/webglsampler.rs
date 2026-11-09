@@ -59,6 +59,10 @@ pub(crate) struct WebGLSampler {
     droppable: DroppableWebGLSampler,
     /// TEXTURE_COMPARE_MODE, for the draw-time sampler type check.
     compare_mode: Cell<u32>,
+    /// TEXTURE_MIN_FILTER and TEXTURE_MAG_FILTER, for the draw-time depth texture completeness
+    /// check (a depth texture is not filterable).
+    min_filter: Cell<u32>,
+    mag_filter: Cell<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -121,11 +125,28 @@ impl WebGLSampler {
                 marked_for_deletion: Cell::new(false),
             },
             compare_mode: Cell::new(constants::NONE),
+            min_filter: Cell::new(constants::NEAREST_MIPMAP_LINEAR),
+            mag_filter: Cell::new(constants::LINEAR),
         }
     }
 
     pub(crate) fn compare_mode(&self) -> u32 {
         self.compare_mode.get()
+    }
+
+    /// Whether the sampler's filters read more than the nearest texel of a level.
+    pub(crate) fn is_using_linear_filtering(&self) -> bool {
+        [self.min_filter.get(), self.mag_filter.get()]
+            .iter()
+            .any(|filter| {
+                matches!(
+                    *filter,
+                    constants::LINEAR |
+                        constants::NEAREST_MIPMAP_LINEAR |
+                        constants::LINEAR_MIPMAP_NEAREST |
+                        constants::LINEAR_MIPMAP_LINEAR
+                )
+            })
     }
 
     pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
@@ -176,8 +197,17 @@ impl WebGLSampler {
         if !validate_params(pname, value) {
             return Err(InvalidEnum);
         }
-        if let (constants::TEXTURE_COMPARE_MODE, WebGLSamplerValue::GLenum(mode)) = (pname, value) {
-            self.compare_mode.set(mode);
+        match (pname, value) {
+            (constants::TEXTURE_COMPARE_MODE, WebGLSamplerValue::GLenum(mode)) => {
+                self.compare_mode.set(mode)
+            },
+            (constants::TEXTURE_MIN_FILTER, WebGLSamplerValue::GLenum(filter)) => {
+                self.min_filter.set(filter)
+            },
+            (constants::TEXTURE_MAG_FILTER, WebGLSamplerValue::GLenum(filter)) => {
+                self.mag_filter.set(filter)
+            },
+            _ => {},
         }
         let command = match value {
             WebGLSamplerValue::GLenum(value) => {
