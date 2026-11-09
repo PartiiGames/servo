@@ -1,0 +1,21 @@
+[package]
+name = "partii-libvpx-sys"
+version = "1.17.0"
+edition = "2024"
+publish = false
+license = "BSD-3-Clause"
+description = "libvpx 1.17.0 (VP8/VP9 decoders only), built from the vendored source in libvpx/ and linked statically."
+links = "vpx"
+build = "build.rs"
+# Listed, so cargo walks these files for the build script's fingerprint instead of asking git (its index
+# read failed on the farm with the vendored tree untracked).
+include = ["Cargo.toml", "build.rs", "lib.rs", "libvpx/**"]
+
+[lib]
+path = "lib.rs"
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true

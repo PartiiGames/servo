@@ -2,10 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! An audio-only `<audio>`/`<video>` player: buffers the fetched bytes, decodes them with
-//! symphonia on its own thread a little ahead of playback, and plays through the shared output.
-//! Files with no decodable audio track (e.g. video-only) report an error, as unsupported media.
+//! The `<audio>`/`<video>` player: buffers the fetched bytes, decodes the audio with symphonia on
+//! its own thread a little ahead of playback, and plays it through the shared output. With the
+//! video features, a WebM's video track is decoded on the same thread (webm/mod.rs) and its pictures
+//! go to the element's renderer when the clock reaches them: the audio clock, or the wall clock
+//! when there is no audio (or it has ended). Files with neither report an error.
 
+#[cfg(feature = "video")]
+use std::collections::VecDeque;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -18,6 +22,9 @@ use servo_base::generic_channel::GenericCallback;
 use servo_media::MediaInstanceError;
 use servo_media_player::audio::AudioRenderer;
 use servo_media_player::metadata::Metadata;
+use servo_media_player::video::VideoFrameRenderer;
+#[cfg(feature = "video")]
+use servo_media_player::video::{Buffer, VideoFrame, VideoFrameData};
 use servo_media_player::{PlaybackState, Player, PlayerError, PlayerEvent};
 use servo_media_streams::registry::MediaStreamId;
 use servo_media_traits::MediaInstance;
@@ -38,6 +45,9 @@ const LOW_WATER_SECS: f64 = 0.5;
 const HIGH_WATER_SECS: f64 = 1.0;
 const POSITION_INTERVAL: Duration = Duration::from_millis(100);
 const TICK: Duration = Duration::from_millis(15);
+/// Decoded pictures kept ahead of the clock.
+#[cfg(feature = "video")]
+const VIDEO_AHEAD: usize = 4;
 
 struct PlayState {
     fifo: FrameQueue,
@@ -151,6 +161,7 @@ impl NativePlayer {
         id: usize,
         sender: GenericCallback<PlayerEvent>,
         renderer: Option<Arc<Mutex<dyn AudioRenderer>>>,
+        video_renderer: Option<Arc<Mutex<dyn VideoFrameRenderer>>>,
     ) -> Self {
         let shared = Arc::new(PlayerShared {
             state: Mutex::new(PlayState {
@@ -175,7 +186,7 @@ impl NativePlayer {
         let shared_ = shared.clone();
         thread::Builder::new()
             .name("PartiiAudioPlayer".to_owned())
-            .spawn(move || PlayerThread::new(shared_, sender).run(rx))
+            .spawn(move || PlayerThread::new(shared_, sender, video_renderer).run(rx))
             .expect("Failed to spawn the player thread");
         Self {
             id,
@@ -354,7 +365,7 @@ impl MediaInstance for NativePlayer {
 }
 
 /// An in-memory media source that symphonia can seek in, sharing the bytes between reopenings.
-struct SharedBytes(Cursor<Arc<Vec<u8>>>);
+pub(crate) struct SharedBytes(pub(crate) Cursor<Arc<Vec<u8>>>);
 
 impl Read for SharedBytes {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -550,6 +561,39 @@ impl Stream {
     }
 }
 
+/// A picture handed to the video renderer.
+#[cfg(feature = "video")]
+struct RawFrame(Arc<Vec<u8>>);
+
+#[cfg(feature = "video")]
+impl Buffer for RawFrame {
+    fn to_vec(&self) -> Option<VideoFrameData> {
+        Some(VideoFrameData::Raw(self.0.clone()))
+    }
+}
+
+#[cfg(feature = "video")]
+struct VideoState {
+    stream: crate::webm::VideoStream,
+    renderer: Arc<Mutex<dyn VideoFrameRenderer>>,
+    /// Decoded pictures, in presentation order.
+    queue: VecDeque<crate::webm::Picture>,
+    /// After a seek: pictures before this time only replace each other (the last one before
+    /// the target is shown if none starts exactly there).
+    seek_target: Option<f64>,
+    /// The presentation time of the picture on screen.
+    shown: Option<f64>,
+    scratch: Vec<crate::webm::Picture>,
+}
+
+#[cfg(feature = "video")]
+impl VideoState {
+    /// The video has shown its last picture.
+    fn done(&self) -> bool {
+        self.stream.finished && self.queue.is_empty()
+    }
+}
+
 struct PlayerThread {
     shared: Arc<PlayerShared>,
     events: GenericCallback<PlayerEvent>,
@@ -559,10 +603,21 @@ struct PlayerThread {
     ended_sent: bool,
     last_position: Instant,
     scratch: Vec<[f32; 2]>,
+    #[cfg_attr(not(feature = "video"), allow(dead_code))]
+    video_renderer: Option<Arc<Mutex<dyn VideoFrameRenderer>>>,
+    #[cfg(feature = "video")]
+    video: Option<VideoState>,
+    /// The playback position (seconds): the audio's while it plays, else advanced by wall time.
+    clock: f64,
+    clock_tick: Instant,
 }
 
 impl PlayerThread {
-    fn new(shared: Arc<PlayerShared>, events: GenericCallback<PlayerEvent>) -> Self {
+    fn new(
+        shared: Arc<PlayerShared>,
+        events: GenericCallback<PlayerEvent>,
+        video_renderer: Option<Arc<Mutex<dyn VideoFrameRenderer>>>,
+    ) -> Self {
         Self {
             shared,
             events,
@@ -572,6 +627,43 @@ impl PlayerThread {
             ended_sent: false,
             last_position: Instant::now(),
             scratch: Vec::new(),
+            video_renderer,
+            #[cfg(feature = "video")]
+            video: None,
+            clock: 0.,
+            clock_tick: Instant::now(),
+        }
+    }
+
+    #[cfg(feature = "video")]
+    fn has_video(&self) -> bool {
+        self.video.is_some()
+    }
+
+    #[cfg(not(feature = "video"))]
+    fn has_video(&self) -> bool {
+        false
+    }
+
+    /// A file is open (audio, video or both).
+    fn is_open(&self) -> bool {
+        self.stream.is_some() || self.has_video()
+    }
+
+    /// Advances `clock`: to the audio position while the audio plays, else by wall time.
+    fn tick_clock(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.clock_tick).as_secs_f64();
+        self.clock_tick = now;
+        let st = self.shared.state.lock().unwrap();
+        let audio_live = self
+            .stream
+            .as_ref()
+            .is_some_and(|s| !(s.finished && st.fifo.is_empty()));
+        if audio_live {
+            self.clock = st.position();
+        } else if st.playing && !st.suspended {
+            self.clock += dt * st.playback_rate;
         }
     }
 
@@ -616,13 +708,13 @@ impl PlayerThread {
             Cmd::Open(bytes) => self.open(bytes),
             Cmd::Play => {
                 self.want_play = true;
-                if self.stream.is_some() {
+                if self.is_open() {
                     self.set_playing(true);
                 }
             },
             Cmd::Pause => {
                 self.want_play = false;
-                if self.stream.is_some() {
+                if self.is_open() {
                     self.set_playing(false);
                 }
             },
@@ -647,31 +739,91 @@ impl PlayerThread {
         }
     }
 
+    /// Opens the video track for a `<video>` element (one with a renderer). Its error, if any,
+    /// is returned for when there is no audio either.
+    #[cfg(feature = "video")]
+    fn open_video(&mut self, bytes: &Arc<Vec<u8>>) -> Result<(), String> {
+        let Some(renderer) = self.video_renderer.clone() else {
+            return Err("no video renderer".to_owned());
+        };
+        let stream = crate::webm::VideoStream::open(bytes.clone())?;
+        self.video = Some(VideoState {
+            stream,
+            renderer,
+            queue: VecDeque::new(),
+            seek_target: None,
+            shown: None,
+            scratch: Vec::new(),
+        });
+        Ok(())
+    }
+
+    #[cfg(not(feature = "video"))]
+    fn open_video(&mut self, _: &Arc<Vec<u8>>) -> Result<(), String> {
+        Err("video is not built in".to_owned())
+    }
+
+    /// The video track's size and duration, if there is one.
+    fn video_info(&self) -> Option<(u32, u32, Option<f64>)> {
+        #[cfg(feature = "video")]
+        if let Some(v) = self.video.as_ref() {
+            return Some((v.stream.width, v.stream.height, v.stream.duration));
+        }
+        None
+    }
+
     fn open(&mut self, bytes: Arc<Vec<u8>>) {
-        let (stream, duration) = match open_stream(bytes) {
-            Ok(s) => s,
+        let audio = open_stream(bytes.clone());
+        let video = self.open_video(&bytes);
+        let (stream, audio_duration) = match audio {
+            Ok((stream, duration)) => (Some(stream), duration),
             Err(e) => {
-                self.emit(PlayerEvent::Error(e));
-                return;
+                if video.is_err() {
+                    self.emit(PlayerEvent::Error(e));
+                    return;
+                }
+                (None, None)
             },
         };
+        if let Err(e) = &video {
+            if self.video_renderer.is_some() {
+                log::debug!("player: no video ({e})");
+            }
+        }
         {
             let mut st = self.shared.state.lock().unwrap();
-            st.src_rate = stream.rate;
+            st.src_rate = stream.as_ref().map_or(0, |s| s.rate);
             st.fifo.clear();
             st.base_time = 0.;
             st.consumed = 0;
         }
-        self.stream = Some(stream);
+        let has_audio = stream.is_some();
+        self.stream = stream;
+        self.clock = 0.;
+        self.clock_tick = Instant::now();
+        let video_info = self.video_info();
+        let duration = match (audio_duration, video_info.and_then(|v| v.2)) {
+            (Some(a), Some(v)) => Some(a.max(v)),
+            (a, v) => a.or(v),
+        };
         self.set_duration(duration);
+        let (width, height) = video_info.map_or((0, 0), |v| (v.0, v.1));
         let metadata = Metadata {
             duration: duration.map(Duration::from_secs_f64),
-            width: 0,
-            height: 0,
+            width,
+            height,
             format: String::new(),
             is_seekable: true,
-            video_tracks: vec![],
-            audio_tracks: vec!["audio".to_owned()],
+            video_tracks: if video_info.is_some() {
+                vec!["video".to_owned()]
+            } else {
+                vec![]
+            },
+            audio_tracks: if has_audio {
+                vec!["audio".to_owned()]
+            } else {
+                vec![]
+            },
             is_live: false,
             title: None,
         };
@@ -681,8 +833,9 @@ impl PlayerThread {
                 d,
             ))));
         }
-        // Preroll: decode a little before reporting we can play.
+        // Preroll: decode a little (and show the first picture) before reporting we can play.
         self.fill();
+        self.present();
         if self.want_play {
             self.set_playing(true);
         } else {
@@ -691,14 +844,25 @@ impl PlayerThread {
     }
 
     fn seek(&mut self, time: f64) {
-        let Some(stream) = self.stream.as_mut() else {
+        if !self.is_open() {
             return;
-        };
+        }
         let time = match self.duration {
             Some(d) => time.min(d),
             None => time,
         };
-        if !stream.seek(time) {
+        #[cfg(feature = "video")]
+        if let Some(v) = self.video.as_mut() {
+            v.stream.seek(time);
+            v.queue.clear();
+            v.seek_target = Some(time);
+            v.shown = None;
+        }
+        self.clock = time;
+        self.clock_tick = Instant::now();
+        if let Some(stream) = self.stream.as_mut() &&
+            !stream.seek(time)
+        {
             // Reopen and skip forward by decoding.
             let bytes = stream.bytes.clone();
             match open_stream(bytes) {
@@ -721,12 +885,14 @@ impl PlayerThread {
         }
         self.ended_sent = false;
         self.fill();
+        self.present();
         self.emit(PlayerEvent::SeekDone(time));
         self.emit(PlayerEvent::PositionChanged(time));
         self.last_position = Instant::now();
     }
 
     fn fill(&mut self) {
+        self.fill_video();
         let Some(stream) = self.stream.as_mut() else {
             return;
         };
@@ -754,22 +920,90 @@ impl PlayerThread {
         }
     }
 
-    fn report(&mut self) {
-        let Some(stream) = self.stream.as_ref() else {
+    /// Decodes pictures until a few are queued ahead of the clock.
+    #[cfg(feature = "video")]
+    fn fill_video(&mut self) {
+        let Some(v) = self.video.as_mut() else {
             return;
         };
-        let (playing, position, empty) = {
-            let st = self.shared.state.lock().unwrap();
-            (
-                st.playing && !st.suspended,
-                st.position(),
-                st.fifo.is_empty(),
-            )
+        while v.queue.len() < VIDEO_AHEAD && !v.stream.finished {
+            v.stream.next(&mut v.scratch);
+            for pic in v.scratch.drain(..) {
+                match v.seek_target {
+                    Some(target) if pic.ts < target - 1e-6 => {
+                        v.queue.clear();
+                        v.queue.push_back(pic);
+                    },
+                    _ => {
+                        v.seek_target = None;
+                        v.queue.push_back(pic);
+                    },
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "video"))]
+    fn fill_video(&mut self) {}
+
+    /// Shows the latest picture the clock has reached (the first one before any is shown).
+    #[cfg(feature = "video")]
+    fn present(&mut self) {
+        let clock = self.clock;
+        let Some(v) = self.video.as_mut() else {
+            return;
         };
+        let mut next = None;
+        while v.queue.front().is_some_and(|p| p.ts <= clock + 1e-6) {
+            next = v.queue.pop_front();
+        }
+        if next.is_none() && v.shown.is_none() {
+            next = v.queue.pop_front();
+        }
+        let Some(pic) = next else {
+            return;
+        };
+        v.shown = Some(pic.ts);
+        let frame = VideoFrame::new(
+            pic.width as i32,
+            pic.height as i32,
+            Arc::new(RawFrame(Arc::new(pic.bgra))),
+        );
+        if let Some(frame) = frame {
+            v.renderer.lock().unwrap().render(frame);
+            self.emit(PlayerEvent::VideoFrameUpdated);
+        }
+    }
+
+    #[cfg(not(feature = "video"))]
+    fn present(&mut self) {}
+
+    #[cfg(feature = "video")]
+    fn video_done(&self) -> bool {
+        self.video.as_ref().is_none_or(VideoState::done)
+    }
+
+    #[cfg(not(feature = "video"))]
+    fn video_done(&self) -> bool {
+        true
+    }
+
+    fn report(&mut self) {
+        if !self.is_open() {
+            return;
+        }
+        self.tick_clock();
+        self.present();
+        let (playing, empty) = {
+            let st = self.shared.state.lock().unwrap();
+            (st.playing && !st.suspended, st.fifo.is_empty())
+        };
+        let position = self.clock;
         if !playing {
             return;
         }
-        if stream.finished && empty {
+        let audio_done = self.stream.as_ref().is_none_or(|s| s.finished && empty);
+        if audio_done && self.video_done() {
             if !self.ended_sent {
                 self.ended_sent = true;
                 // Make the final position the duration, so the DOM sees playback reach the end.

@@ -19,6 +19,8 @@ pub mod player;
 pub mod queue;
 pub mod resample;
 pub mod sink;
+#[cfg(feature = "video")]
+mod webm;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -126,10 +128,31 @@ fn codec_supported(codec: &str) -> bool {
     if codec == "opus" {
         return cfg!(feature = "opus");
     }
+    if video_codec_supported(&codec) {
+        return true;
+    }
     matches!(
         codec.as_str(),
         "vorbis" | "mp3" | "mp4a.40.34" | "mp4a.6b" | "mp4a.69" | "flac" | "1" | "pcm"
     )
+}
+
+#[cfg(feature = "video")]
+fn video_codec_supported(codec: &str) -> bool {
+    webm::codec_supported(codec)
+}
+
+#[cfg(not(feature = "video"))]
+fn video_codec_supported(_: &str) -> bool {
+    false
+}
+
+/// WebM/Matroska video is playable: a video codec is built in.
+fn video_containers() -> bool {
+    #[cfg(feature = "video")]
+    return webm::any_decoder();
+    #[cfg(not(feature = "video"))]
+    false
 }
 
 pub fn can_play_type(media_type: &str) -> SupportsMediaType {
@@ -166,7 +189,7 @@ pub fn can_play_type(media_type: &str) -> SupportsMediaType {
             "audio/m4a" |
             "audio/webm" |
             "audio/x-matroska"
-    );
+    ) || (video_containers() && matches!(essence.as_str(), "video/webm" | "video/x-matroska"));
     if !container_ok {
         return SupportsMediaType::No;
     }
@@ -188,7 +211,7 @@ impl Backend for NativeBackend {
         context_id: &ClientContextId,
         stream_type: StreamType,
         sender: GenericCallback<PlayerEvent>,
-        _video_renderer: Option<Arc<Mutex<dyn video::VideoFrameRenderer>>>,
+        video_renderer: Option<Arc<Mutex<dyn video::VideoFrameRenderer>>>,
         audio_renderer: Option<Arc<Mutex<dyn audio::AudioRenderer>>>,
         _gl_context: Box<dyn PlayerGLContext>,
     ) -> Arc<Mutex<dyn Player>> {
@@ -201,6 +224,7 @@ impl Backend for NativeBackend {
             id,
             sender,
             audio_renderer,
+            video_renderer,
         )));
         let weak: Weak<Mutex<player::NativePlayer>> = Arc::downgrade(&player);
         self.register(context_id, id, weak);
@@ -355,6 +379,23 @@ mod tests {
             SupportsMediaType::Probably
         );
         assert_eq!(can_play_type("video/mp4"), SupportsMediaType::No);
+        let vpx = if cfg!(feature = "vpx") {
+            SupportsMediaType::Probably
+        } else {
+            SupportsMediaType::No
+        };
+        let av1 = if cfg!(feature = "av1") {
+            SupportsMediaType::Probably
+        } else {
+            SupportsMediaType::No
+        };
+        assert_eq!(can_play_type("video/webm; codecs=\"vp8, vorbis\""), vpx);
+        assert_eq!(can_play_type("video/webm; codecs=\"vp09.00.10.08\""), vpx);
+        assert_eq!(can_play_type("video/webm; codecs=av01.0.04M.08"), av1);
+        assert_eq!(
+            can_play_type("video/webm; codecs=\"avc1.42E01E\""),
+            SupportsMediaType::No
+        );
         assert_eq!(can_play_type("audio/mpeg"), SupportsMediaType::Maybe);
         assert_eq!(can_play_type("audio/ogg;"), SupportsMediaType::Maybe);
         assert_eq!(can_play_type("audio/ogg;codecs"), SupportsMediaType::Maybe);

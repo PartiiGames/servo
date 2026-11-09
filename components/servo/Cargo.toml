@@ -65,6 +65,9 @@ media-native = ["dep:servo-media-native"]
 media-native-device = ["media-native", "servo-media-native/device"]
 # Opus decoding in the native backend, through libopus (bundled, built with cmake).
 media-native-opus = ["media-native", "servo-media-native/opus"]
+# <video> in the native backend: WebM with VP8/VP9 (system libvpx) and AV1 (rav1d).
+media-native-vpx = ["media-native", "servo-media-native/vpx"]
+media-native-av1 = ["media-native", "servo-media-native/av1"]
 
 # Allows multiprocess and ipc mode. If enabled this still needs the correct preference flags to use multi process mode.
 multiprocess = ["servo-base/multiprocess", "servo-constellation/multiprocess"]

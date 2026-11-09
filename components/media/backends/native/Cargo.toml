@@ -7,7 +7,7 @@ edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "A pure-Rust servo-media backend: cpal for output, symphonia for decoding (audio only)."
+description = "A pure-Rust servo-media backend: cpal for output, symphonia for audio decoding; WebM video (VP8/VP9 through libvpx, AV1 through rav1d) with the video features."
 
 [lib]
 name = "servo_media_native"
@@ -28,6 +28,14 @@ servo-media-webrtc = { workspace = true }
 symphonia = { version = "0.5.5", default-features = false, features = ["adpcm", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 # Opus (Ogg and WebM) through libopus, built from its bundled source with cmake (BSD-3-Clause).
 symphonia-adapter-libopus = { version = "0.2.9", default-features = false, features = ["bundled"], optional = true }
+# WebM/Matroska demuxing for <video> (Zlib OR MIT OR Apache-2.0).
+matroska-demuxer = { version = "0.8.1", optional = true }
+# VP8/VP9 decoding: libvpx 1.17.0 built from the vendored source and linked statically (BSD-3-Clause).
+partii-libvpx-sys = { path = "libvpx-sys", optional = true }
+# AV1 decoding: rav1d, the Rust port of dav1d (BSD-2-Clause), without its assembly (that needs nasm,
+# which the build nodes don't have).
+rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
+libc = { workspace = true, optional = true }
 
 # cpal's own ALSA binding: to keep alsa-lib's probe errors off stderr when there's no sound card.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
@@ -40,6 +48,12 @@ default = ["device"]
 device = ["dep:cpal", "dep:alsa"]
 # Opus decoding (decodeAudioData, <audio>, canPlayType "codecs=opus") through libopus.
 opus = ["dep:symphonia-adapter-libopus"]
+# <video>: WebM/Matroska demuxing and frames to the video renderer (no decoder by itself).
+video = ["dep:matroska-demuxer"]
+# VP8 and VP9 through libvpx, built from libvpx-sys/libvpx (sh, perl and make to build).
+vpx = ["video", "dep:partii-libvpx-sys"]
+# AV1 through rav1d (pure Rust).
+av1 = ["video", "dep:rav1d", "dep:libc"]
 
 [lints]
 workspace = true
