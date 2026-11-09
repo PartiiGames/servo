@@ -25,7 +25,7 @@ servo-media-player = { workspace = true }
 servo-media-streams = { workspace = true }
 servo-media-traits = { workspace = true }
 servo-media-webrtc = { workspace = true }
-symphonia = { version = "0.5.5", default-features = false, features = ["aac", "adpcm", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+symphonia = { version = "0.5.5", default-features = false, features = ["adpcm", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 
 # cpal's own ALSA binding: to keep alsa-lib's probe errors off stderr when there's no sound card.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]

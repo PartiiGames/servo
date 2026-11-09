@@ -118,15 +118,14 @@ impl NativeBackend {
     }
 }
 
-/// What symphonia (as built here) decodes. Opus is not supported by symphonia 0.5.
+/// What symphonia (as built here) decodes. Opus is not supported by symphonia 0.5; AAC is not built
+/// (royalty-free codecs only): mp4a.40.34/6b/69 are MP3 in MP4.
 fn codec_supported(codec: &str) -> bool {
     let codec = codec.trim().trim_matches('"').to_ascii_lowercase();
     matches!(
         codec.as_str(),
         "vorbis" | "mp3" | "mp4a.40.34" | "mp4a.6b" | "mp4a.69" | "flac" | "1" | "pcm"
-    ) || codec.starts_with("mp4a.40")
-        || codec == "mp4a.67"
-        || codec == "aac"
+    )
 }
 
 pub fn can_play_type(media_type: &str) -> SupportsMediaType {
@@ -161,8 +160,6 @@ pub fn can_play_type(media_type: &str) -> SupportsMediaType {
             "audio/mp4" |
             "audio/x-m4a" |
             "audio/m4a" |
-            "audio/aac" |
-            "audio/x-aac" |
             "audio/webm" |
             "audio/x-matroska"
     );
@@ -340,8 +337,14 @@ mod tests {
             can_play_type("audio/ogg; codecs=\"opus\""),
             SupportsMediaType::No
         );
+        // No AAC (royalty-free codecs only, 2026-11-09): mp4/m4a with AAC and ADTS .aac are "".
         assert_eq!(
             can_play_type("audio/mp4; codecs=\"mp4a.40.2\""),
+            SupportsMediaType::No
+        );
+        assert_eq!(can_play_type("audio/aac"), SupportsMediaType::No);
+        assert_eq!(
+            can_play_type("audio/mp4; codecs=\"mp4a.40.34\""),
             SupportsMediaType::Probably
         );
         assert_eq!(can_play_type("video/mp4"), SupportsMediaType::No);

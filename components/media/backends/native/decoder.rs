@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! `decodeAudioData` on symphonia: ogg/vorbis, mp3, wav (PCM, ADPCM), flac, mp4/m4a (AAC),
+//! `decodeAudioData` on symphonia: ogg/vorbis, mp3, wav (PCM, ADPCM), flac, mp3 in mp4,
 //! webm/mkv (where the codec is one of these). Output is resampled to the context's rate.
 
 use std::io::Cursor;
