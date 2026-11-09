@@ -449,9 +449,33 @@ pub(crate) fn vtable_for(node: &Node) -> &dyn VirtualMethods {
         NodeTypeId::Element(ElementTypeId::SVGElement(SVGElementTypeId::SVGGraphicsElement(
             SVGGraphicsElementTypeId::SVGAElement,
         ))) => node.downcast::<SVGAElement>().unwrap() as &dyn VirtualMethods,
-        NodeTypeId::Element(ElementTypeId::SVGElement(SVGElementTypeId::SVGElement)) => {
-            node.downcast::<SVGElement>().unwrap() as &dyn VirtualMethods
-        },
+        // The filter elements add no hooks of their own to SVGElement's.
+        NodeTypeId::Element(ElementTypeId::SVGElement(
+            SVGElementTypeId::SVGElement
+            | SVGElementTypeId::SVGFilterElement
+            | SVGElementTypeId::SVGFEBlendElement
+            | SVGElementTypeId::SVGFEColorMatrixElement
+            | SVGElementTypeId::SVGFEComponentTransferElement
+            | SVGElementTypeId::SVGComponentTransferFunctionElement(_)
+            | SVGElementTypeId::SVGFECompositeElement
+            | SVGElementTypeId::SVGFEConvolveMatrixElement
+            | SVGElementTypeId::SVGFEDiffuseLightingElement
+            | SVGElementTypeId::SVGFEDisplacementMapElement
+            | SVGElementTypeId::SVGFEDistantLightElement
+            | SVGElementTypeId::SVGFEDropShadowElement
+            | SVGElementTypeId::SVGFEFloodElement
+            | SVGElementTypeId::SVGFEGaussianBlurElement
+            | SVGElementTypeId::SVGFEImageElement
+            | SVGElementTypeId::SVGFEMergeElement
+            | SVGElementTypeId::SVGFEMergeNodeElement
+            | SVGElementTypeId::SVGFEMorphologyElement
+            | SVGElementTypeId::SVGFEOffsetElement
+            | SVGElementTypeId::SVGFEPointLightElement
+            | SVGElementTypeId::SVGFESpecularLightingElement
+            | SVGElementTypeId::SVGFESpotLightElement
+            | SVGElementTypeId::SVGFETileElement
+            | SVGElementTypeId::SVGFETurbulenceElement,
+        )) => node.downcast::<SVGElement>().unwrap() as &dyn VirtualMethods,
         NodeTypeId::Element(ElementTypeId::Element) => {
             node.downcast::<Element>().unwrap() as &dyn VirtualMethods
         },

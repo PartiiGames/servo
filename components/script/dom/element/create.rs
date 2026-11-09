@@ -91,6 +91,32 @@ use crate::dom::svg::svgcircleelement::SVGCircleElement;
 use crate::dom::svg::svgdefselement::SVGDefsElement;
 use crate::dom::svg::svgelement::SVGElement;
 use crate::dom::svg::svgellipseelement::SVGEllipseElement;
+use crate::dom::svg::svgfeblendelement::SVGFEBlendElement;
+use crate::dom::svg::svgfecolormatrixelement::SVGFEColorMatrixElement;
+use crate::dom::svg::svgfecomponenttransferelement::SVGFEComponentTransferElement;
+use crate::dom::svg::svgfecompositeelement::SVGFECompositeElement;
+use crate::dom::svg::svgfeconvolvematrixelement::SVGFEConvolveMatrixElement;
+use crate::dom::svg::svgfediffuselightingelement::SVGFEDiffuseLightingElement;
+use crate::dom::svg::svgfedisplacementmapelement::SVGFEDisplacementMapElement;
+use crate::dom::svg::svgfedistantlightelement::SVGFEDistantLightElement;
+use crate::dom::svg::svgfedropshadowelement::SVGFEDropShadowElement;
+use crate::dom::svg::svgfefloodelement::SVGFEFloodElement;
+use crate::dom::svg::svgfefuncaelement::SVGFEFuncAElement;
+use crate::dom::svg::svgfefuncbelement::SVGFEFuncBElement;
+use crate::dom::svg::svgfefuncgelement::SVGFEFuncGElement;
+use crate::dom::svg::svgfefuncrelement::SVGFEFuncRElement;
+use crate::dom::svg::svgfegaussianblurelement::SVGFEGaussianBlurElement;
+use crate::dom::svg::svgfeimageelement::SVGFEImageElement;
+use crate::dom::svg::svgfemergeelement::SVGFEMergeElement;
+use crate::dom::svg::svgfemergenodeelement::SVGFEMergeNodeElement;
+use crate::dom::svg::svgfemorphologyelement::SVGFEMorphologyElement;
+use crate::dom::svg::svgfeoffsetelement::SVGFEOffsetElement;
+use crate::dom::svg::svgfepointlightelement::SVGFEPointLightElement;
+use crate::dom::svg::svgfespecularlightingelement::SVGFESpecularLightingElement;
+use crate::dom::svg::svgfespotlightelement::SVGFESpotLightElement;
+use crate::dom::svg::svgfetileelement::SVGFETileElement;
+use crate::dom::svg::svgfeturbulenceelement::SVGFETurbulenceElement;
+use crate::dom::svg::svgfilterelement::SVGFilterElement;
 use crate::dom::svg::svggelement::SVGGElement;
 use crate::dom::svg::svgimageelement::SVGImageElement;
 use crate::dom::svg::svglineargradientelement::SVGLinearGradientElement;
@@ -131,6 +157,32 @@ fn create_svg_element(
         local_name!("circle") => make!(SVGCircleElement),
         local_name!("defs") => make!(SVGDefsElement),
         local_name!("ellipse") => make!(SVGEllipseElement),
+        local_name!("feBlend") => make!(SVGFEBlendElement),
+        local_name!("feColorMatrix") => make!(SVGFEColorMatrixElement),
+        local_name!("feComponentTransfer") => make!(SVGFEComponentTransferElement),
+        local_name!("feComposite") => make!(SVGFECompositeElement),
+        local_name!("feConvolveMatrix") => make!(SVGFEConvolveMatrixElement),
+        local_name!("feDiffuseLighting") => make!(SVGFEDiffuseLightingElement),
+        local_name!("feDisplacementMap") => make!(SVGFEDisplacementMapElement),
+        local_name!("feDistantLight") => make!(SVGFEDistantLightElement),
+        local_name!("feDropShadow") => make!(SVGFEDropShadowElement),
+        local_name!("feFlood") => make!(SVGFEFloodElement),
+        local_name!("feFuncA") => make!(SVGFEFuncAElement),
+        local_name!("feFuncB") => make!(SVGFEFuncBElement),
+        local_name!("feFuncG") => make!(SVGFEFuncGElement),
+        local_name!("feFuncR") => make!(SVGFEFuncRElement),
+        local_name!("feGaussianBlur") => make!(SVGFEGaussianBlurElement),
+        local_name!("feImage") => make!(SVGFEImageElement),
+        local_name!("feMerge") => make!(SVGFEMergeElement),
+        local_name!("feMergeNode") => make!(SVGFEMergeNodeElement),
+        local_name!("feMorphology") => make!(SVGFEMorphologyElement),
+        local_name!("feOffset") => make!(SVGFEOffsetElement),
+        local_name!("fePointLight") => make!(SVGFEPointLightElement),
+        local_name!("feSpecularLighting") => make!(SVGFESpecularLightingElement),
+        local_name!("feSpotLight") => make!(SVGFESpotLightElement),
+        local_name!("feTile") => make!(SVGFETileElement),
+        local_name!("feTurbulence") => make!(SVGFETurbulenceElement),
+        local_name!("filter") => make!(SVGFilterElement),
         local_name!("g") => make!(SVGGElement),
         local_name!("image") => make!(SVGImageElement),
         local_name!("line") => make!(SVGLineElement),
