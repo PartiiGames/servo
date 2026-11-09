@@ -847,17 +847,17 @@ affects = "layout"
 type = "Color"
 initial = "computed::Color::BLACK"
 struct = "svg"
-engine = "gecko"
 spec = "https://drafts.fxtf.org/filter-effects-1/#FloodColorProperty"
 affects = "paint"
+servo_restyle_damage = "repaint"
 
 [flood-opacity]
 type = "Opacity"
 initial = "1.0"
 struct = "svg"
-engine = "gecko"
 spec = "https://drafts.fxtf.org/filter-effects-1/#FloodOpacityProperty"
 affects = "paint"
+servo_restyle_damage = "repaint"
 
 [font-family]
 type = "FontFamily"
@@ -1255,9 +1255,9 @@ affects = "layout"
 type = "Color"
 initial = "computed::Color::WHITE"
 struct = "svg"
-engine = "gecko"
 spec = "https://drafts.fxtf.org/filter-effects-1#LightingColorProperty"
 affects = "paint"
+servo_restyle_damage = "repaint"
 
 [line-height]
 type = "LineHeight"
@@ -3902,10 +3902,10 @@ keyword = { values = ["srgb", "auto", "linearrgb"] }
 
 [color-interpolation-filters]
 struct = "inherited_svg"
-engine = "gecko"
 spec = "https://svgwg.org/svg2-draft/painting.html#ColorInterpolationFiltersProperty"
 animation_type = "discrete"
 affects = "paint"
+servo_restyle_damage = "repaint"
 keyword = { values = ["linearrgb", "auto", "srgb"], gecko_enum_prefix = "StyleColorInterpolation" }
 
 [shape-rendering]
