@@ -22,6 +22,7 @@ use crate::dom::bindings::codegen::Bindings::EXTTextureFilterAnisotropicBinding:
 use crate::dom::bindings::codegen::Bindings::OESStandardDerivativesBinding::OESStandardDerivativesConstants;
 use crate::dom::bindings::codegen::Bindings::OESTextureHalfFloatBinding::OESTextureHalfFloatConstants;
 use crate::dom::bindings::codegen::Bindings::OESVertexArrayObjectBinding::OESVertexArrayObjectConstants;
+use crate::dom::bindings::codegen::Bindings::WEBGLStencilTexturingBinding::WEBGLStencilTexturingConstants;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::webgl::extensions::extcolorbufferfloat::EXTColorBufferFloat;
@@ -67,14 +68,18 @@ const DEFAULT_DISABLED_GET_PARAMETER_NAMES_WEBGL2: [GLenum; 1] =
 // Param names that are implemented for glGetTexParameter in a WebGL 1.0 context
 // but must trigger a InvalidEnum error until the related WebGL Extensions are enabled.
 // Example: https://www.khronos.org/registry/webgl/extensions/OES_standard_derivatives/
-const DEFAULT_DISABLED_GET_TEX_PARAMETER_NAMES_WEBGL1: [GLenum; 1] =
-    [EXTTextureFilterAnisotropicConstants::TEXTURE_MAX_ANISOTROPY_EXT];
+const DEFAULT_DISABLED_GET_TEX_PARAMETER_NAMES_WEBGL1: [GLenum; 2] = [
+    EXTTextureFilterAnisotropicConstants::TEXTURE_MAX_ANISOTROPY_EXT,
+    WEBGLStencilTexturingConstants::DEPTH_STENCIL_TEXTURE_MODE_WEBGL,
+];
 
 // Param names that are implemented for glGetTexParameter in a WebGL 2.0 context
 // but must trigger a InvalidEnum error until the related WebGL Extensions are enabled.
 // Example: https://www.khronos.org/registry/webgl/extensions/EXT_texture_filter_anisotropic/
-const DEFAULT_DISABLED_GET_TEX_PARAMETER_NAMES_WEBGL2: [GLenum; 1] =
-    [EXTTextureFilterAnisotropicConstants::TEXTURE_MAX_ANISOTROPY_EXT];
+const DEFAULT_DISABLED_GET_TEX_PARAMETER_NAMES_WEBGL2: [GLenum; 2] = [
+    EXTTextureFilterAnisotropicConstants::TEXTURE_MAX_ANISOTROPY_EXT,
+    WEBGLStencilTexturingConstants::DEPTH_STENCIL_TEXTURE_MODE_WEBGL,
+];
 
 // Param names that are implemented for glGetVertexAttrib in a WebGL 1.0 context
 // but must trigger a InvalidEnum error until the related WebGL Extensions are enabled.
@@ -446,6 +451,8 @@ impl WebGLExtensions {
         self.register::<ext::webglcompressedtextures3tc::WEBGLCompressedTextureS3TC>();
         self.register::<ext::webgldrawinstancedbasevertexbaseinstance::WEBGLDrawInstancedBaseVertexBaseInstance>();
         self.register::<ext::webglmultidraw::WEBGLMultiDraw>();
+        self.register::<ext::oesdrawbuffersindexed::OESDrawBuffersIndexed>();
+        self.register::<ext::webglstenciltexturing::WEBGLStencilTexturing>();
         self.register::<ext::webglmultidrawinstancedbasevertexbaseinstance::WEBGLMultiDrawInstancedBaseVertexBaseInstance>();
     }
 
