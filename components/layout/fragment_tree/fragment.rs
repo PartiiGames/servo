@@ -122,9 +122,6 @@ pub(crate) struct ImageFragment {
     pub clip: PhysicalRect<Au>,
     pub image_key: Option<ImageKey>,
     pub showing_broken_image_icon: bool,
-    /// Rasterized inline SVG (its content may be visible while the `<svg>` box is
-    /// `visibility: hidden`).
-    pub is_vector: bool,
     pub url: Option<ServoUrl>,
     /// The intrinsic (natural) width of the image, if known.
     pub natural_width: Option<Au>,

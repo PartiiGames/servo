@@ -28,7 +28,7 @@ use webrender_api::units::{LayoutPoint, LayoutRect, LayoutVector2D};
 
 use crate::display_list::paint_traversal::{PaintTraversal, PaintTraversalHandler};
 use crate::display_list::{StackingContext, StackingContextTree, ToWebRender, TraversalState};
-use crate::fragment_tree::{BoxFragmentWithStyle, ImageFragment, TextFragment};
+use crate::fragment_tree::{BoxFragmentWithStyle, FragmentFlags, TextFragment};
 use crate::geom::PhysicalRect;
 
 struct Layer {
@@ -221,7 +221,9 @@ impl PaintTraversalHandler for VisibilityTest<'_> {
             &style,
             fragment.border_rect(),
             shadows.into_iter(),
-            false,
+            // An inline <svg>'s content can be visible (and draw shadows anywhere in its box)
+            // while the <svg> itself is visibility: hidden: its whole box counts.
+            fragment.base.flags.contains(FragmentFlags::IS_SVG_ELEMENT),
         );
     }
 
@@ -256,28 +258,5 @@ impl PaintTraversalHandler for VisibilityTest<'_> {
             shadows.into_iter(),
             false,
         );
-    }
-
-    /// Inline SVG: its content can be visible (and draw shadows anywhere in its box) while the
-    /// `<svg>` itself is `visibility: hidden`, so the whole box counts, whatever its
-    /// visibility.
-    fn visit_image(
-        &mut self,
-        state: &TraversalState,
-        containing_block: PhysicalRect<Au>,
-        fragment: &Arc<ImageFragment>,
-    ) {
-        if !fragment.is_vector {
-            return;
-        }
-        let Some(node) = fragment.base.tag.as_ref().map(|tag| tag.node) else {
-            return;
-        };
-        let style = fragment.style.borrow();
-        let rect = fragment
-            .base
-            .rect()
-            .translate(containing_block.origin.to_vector() - state.origin.to_vector());
-        self.visit_painted(state, node, &style, rect, std::iter::empty(), true);
     }
 }

@@ -21,7 +21,7 @@ use crate::flow::BlockFormattingContext;
 use crate::fragment_tree::{BaseFragmentInfo, FragmentFlags};
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::positioned::{LayoutRootLayoutInputs, PositioningContext};
-use crate::replaced::ReplacedContents;
+use crate::replaced::{ReplacedContentKind, ReplacedContents};
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
 };
@@ -198,6 +198,9 @@ impl IndependentFormattingContext {
         let non_replaced_contents = match contents {
             Contents::Replaced(contents) => {
                 base_fragment_info.flags.insert(FragmentFlags::IS_REPLACED);
+                if matches!(contents.kind, ReplacedContentKind::SVGElement { .. }) {
+                    base_fragment_info.flags.insert(FragmentFlags::IS_SVG_ELEMENT);
+                }
 
                 // Some replaced elements can have inner widgets, e.g. `<video controls>`.
                 let node = node_and_style_info.node;

@@ -276,6 +276,8 @@ bitflags! {
         const IS_INPUT_ELEMENT = 1 << 12;
         /// Whether this is a <button> element, or an <input> that uses button layout.
         const IS_BUTTON = 1 << 13;
+        /// Whether this is the box of an inline `<svg>` (replaced vector content).
+        const IS_SVG_ELEMENT = 1 << 14;
     }
 }
 
