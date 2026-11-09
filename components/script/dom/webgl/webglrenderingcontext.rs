@@ -1230,6 +1230,33 @@ impl WebGLRenderingContext {
         no_gc: &NoGC,
         source: TexImageSource,
     ) -> Fallible<Option<TexPixels>> {
+        // Partii (measurement): PARTII_FRAME_PROF=trace logs texImage/texSubImage source reads of 8 ms or more.
+        if !crate::partii_frame_prof::trace() {
+            return self.get_image_pixels_traced_inner(no_gc, source);
+        }
+        let kind = match &source {
+            TexImageSource::ImageBitmap(_) => "ImageBitmap",
+            TexImageSource::ImageData(_) => "ImageData",
+            TexImageSource::HTMLImageElement(_) => "HTMLImageElement",
+            TexImageSource::HTMLCanvasElement(_) => "HTMLCanvasElement",
+            TexImageSource::OffscreenCanvas(_) => "OffscreenCanvas",
+            TexImageSource::HTMLVideoElement(_) => "HTMLVideoElement",
+        };
+        let (wall, t) = (crate::partii_frame_prof::wall_ms(), std::time::Instant::now());
+        let r = self.get_image_pixels_traced_inner(no_gc, source);
+        let size = match &r {
+            Ok(Some(p)) => format!("{}x{}", p.size().width, p.size().height),
+            _ => "-".into(),
+        };
+        crate::partii_frame_prof::trace_span(&format!("teximage:{kind}:{size}"), wall, t.elapsed());
+        r
+    }
+
+    fn get_image_pixels_traced_inner(
+        &self,
+        no_gc: &NoGC,
+        source: TexImageSource,
+    ) -> Fallible<Option<TexPixels>> {
         Ok(Some(match source {
             TexImageSource::ImageBitmap(bitmap) => {
                 if !bitmap.origin_is_clean() {
