@@ -149,6 +149,17 @@ pub(crate) struct FetchRecord {
     /// TODO: In the specification this is in the [`Request`], so it should be moved there and the
     /// [`Request`] stored here, which requires making everything traceable.
     done: bool,
+    /// Partii: drops the listener's context and global handle (`NetworkListener::release_handle`).
+    #[ignore_malloc_size_of = "closure"]
+    release: Option<Box<dyn Fn()>>,
+}
+
+impl FetchRecord {
+    fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
 }
 
 /// <https://fetch.spec.whatwg.org/#concept-fetch-group>
@@ -186,6 +197,7 @@ impl FetchGroup {
                     self.core_resource_thread.clone(),
                 )),
                 done: false,
+                release: Some(listener.release_handle()),
             },
         );
         fetch_async(
@@ -244,6 +256,8 @@ impl FetchGroup {
             }
             if !controller.keep_alive() {
                 controller.terminate();
+                // Partii: the terminated fetch's listener lets go of the page now.
+                fetch_record.release();
                 cancelled_any = true;
                 return false;
             }
@@ -254,6 +268,13 @@ impl FetchGroup {
         self.process_deferred_fetches(global);
 
         cancelled_any
+    }
+
+    /// Partii: at teardown, every listener still waiting on the network lets go of the page.
+    pub(crate) fn release_listeners(&mut self) {
+        for record in self.fetch_records.values_mut() {
+            record.release();
+        }
     }
 
     /// <https://fetch.spec.whatwg.org/#process-deferred-fetches>
@@ -295,6 +316,9 @@ impl FetchGroup {
     pub(crate) fn mark_fetch_request_as_done(&mut self, request_id: &RequestId) {
         if let Some(fetch_record) = self.fetch_records.get_mut(request_id) {
             fetch_record.done = true;
+            // Partii: the listener ends with its response; the hook must not outlive it here
+            // (it holds a handle to this global, from inside this global).
+            fetch_record.release = None;
         }
     }
 }
