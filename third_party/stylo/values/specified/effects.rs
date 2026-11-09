@@ -25,11 +25,8 @@ use crate::values::generics::effects::SimpleShadow as GenericSimpleShadow;
 use crate::values::generics::{NonNegative, ZeroToOne};
 use crate::values::specified::color::Color;
 use crate::values::specified::length::{Length, NonNegativeLength};
-#[cfg(feature = "gecko")]
 use crate::values::specified::url::SpecifiedUrl;
 use crate::values::specified::{Angle, NonNegativeNumberOrPercentage, Number, NumberOrPercentage};
-#[cfg(feature = "servo")]
-use crate::values::Impossible;
 use crate::Zero;
 use cssparser::{match_ignore_ascii_case, Parser};
 use style_traits::{ParseError, StyleParseErrorKind};
@@ -39,12 +36,7 @@ pub type BoxShadow =
     GenericBoxShadow<Option<Color>, Length, Option<NonNegativeLength>, Option<Length>>;
 
 /// A specified value for a single `filter`.
-#[cfg(feature = "gecko")]
 pub type SpecifiedFilter = GenericFilter<Angle, FilterFactor, Length, SimpleShadow, SpecifiedUrl>;
-
-/// A specified value for a single `filter`.
-#[cfg(feature = "servo")]
-pub type SpecifiedFilter = GenericFilter<Angle, FilterFactor, Length, SimpleShadow, Impossible>;
 
 pub use self::SpecifiedFilter as Filter;
 
@@ -283,6 +275,8 @@ impl Filter {
             },
             #[cfg(feature = "gecko")]
             Filter::Url(ref url) => Ok(ComputedFilter::Url(ComputedUrl(url.clone()))),
+            // Servo has no context-free url() resolution here (callers such as the canvas
+            // `filter` attribute then ignore the whole filter list).
             #[cfg(feature = "servo")]
             Filter::Url(_) => Err(()),
         }
@@ -292,11 +286,8 @@ impl Filter {
 impl Parse for Filter {
     #[inline]
     fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
-        #[cfg(feature = "gecko")]
-        {
-            if let Ok(url) = input.try_parse(|i| SpecifiedUrl::parse(context, i)) {
-                return Ok(GenericFilter::Url(url));
-            }
+        if let Ok(url) = input.try_parse(|i| SpecifiedUrl::parse(context, i)) {
+            return Ok(GenericFilter::Url(url));
         }
         let function = match input.expect_function() {
             Ok(f) => f.clone(),

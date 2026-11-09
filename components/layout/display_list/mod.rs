@@ -57,7 +57,7 @@ use wr::units::LayoutVector2D;
 
 use crate::context::{ImageResolver, ResolvedImage};
 use crate::display_list::background::BackgroundPainter;
-use crate::display_list::conversions::FilterToWebRender;
+use crate::display_list::conversions::filter_list_to_webrender;
 pub(crate) use crate::display_list::conversions::ToWebRender;
 use crate::display_list::paint_traversal::{PaintTraversal, PaintTraversalHandler, TraversalState};
 use crate::fragment_tree::{
@@ -507,12 +507,7 @@ impl DisplayListBuilder<'_> {
 
                 // Create the filter pipeline.
                 let current_color = &style.get_inherited_text().color;
-                filters = effects
-                    .filter
-                    .0
-                    .iter()
-                    .map(|filter| FilterToWebRender::to_webrender(filter, current_color))
-                    .collect();
+                filters = filter_list_to_webrender(&effects.filter.0, current_color);
                 if effects.opacity != 1.0 {
                     filters.push(wr::FilterOp::Opacity(
                         effects.opacity.into(),
@@ -1683,12 +1678,10 @@ impl<'a> BuilderForBoxFragment<'a> {
             return;
         }
         let current_color = &style.get_inherited_text().color;
-        let filters: Vec<_> = effects
-            .backdrop_filter
-            .0
-            .iter()
-            .map(|filter| FilterToWebRender::to_webrender(filter, current_color))
-            .collect();
+        let filters = filter_list_to_webrender(&effects.backdrop_filter.0, current_color);
+        if filters.is_empty() {
+            return;
+        }
         let mut common = builder.common_properties(state, self.border_rect, style);
         if let Some(clip_chain_id) = self.border_edge_clip(builder, state, false) {
             common.clip_chain_id = clip_chain_id;

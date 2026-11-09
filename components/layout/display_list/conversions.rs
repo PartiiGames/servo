@@ -27,10 +27,28 @@ pub trait FilterToWebRender {
     fn to_webrender(&self, current_color: &AbsoluteColor) -> Self::Type;
 }
 
+/// The WebRender filter chain for a `filter` or `backdrop-filter` list.
+///
+/// Servo does not resolve `url()` references to SVG `<filter>` elements yet, and a reference that
+/// cannot be resolved makes the UA ignore the whole filter chain
+/// (<https://drafts.fxtf.org/filter-effects/#FilterProperty>), so a list with a `url()` in it
+/// yields no filters at all.
+pub(crate) fn filter_list_to_webrender(
+    filters: &[ComputedFilter],
+    current_color: &AbsoluteColor,
+) -> Vec<FilterOp> {
+    filters
+        .iter()
+        .map(|filter| filter.to_webrender(current_color))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
+}
+
 impl FilterToWebRender for ComputedFilter {
-    type Type = FilterOp;
+    /// `None` for a `url()` reference, which Servo does not resolve.
+    type Type = Option<FilterOp>;
     fn to_webrender(&self, current_color: &AbsoluteColor) -> Self::Type {
-        match *self {
+        Some(match *self {
             ComputedFilter::Blur(radius) => FilterOp::Blur(radius.px(), radius.px()),
             ComputedFilter::Brightness(amount) => FilterOp::Brightness(amount.0),
             ComputedFilter::Contrast(amount) => FilterOp::Contrast(amount.0),
@@ -45,9 +63,8 @@ impl FilterToWebRender for ComputedFilter {
                 offset: units::LayoutVector2D::new(shadow.horizontal.px(), shadow.vertical.px()),
                 color: super::rgba(shadow.color.clone().resolve_to_absolute(current_color)),
             }),
-            // Statically check that Url is impossible.
-            ComputedFilter::Url(ref url) => match *url {},
-        }
+            ComputedFilter::Url(_) => return None,
+        })
     }
 }
 
