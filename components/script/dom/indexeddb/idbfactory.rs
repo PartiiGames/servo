@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 use std::cell::Cell;
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -61,6 +62,13 @@ pub struct IDBFactory {
 
     /// Partii: set once the global's connections were closed at teardown.
     closed_for_teardown: Cell<bool>,
+
+    /// Partii: the handle the backend callback roots this factory with. The callback lives in
+    /// `callback` and in the backend, so the handle would keep the factory, and with it the
+    /// whole discarded page, alive forever; teardown empties the slot.
+    #[no_trace]
+    #[ignore_malloc_size_of = "a shared handle"]
+    callback_listener: Arc<Mutex<Option<Trusted<IDBFactory>>>>,
 }
 
 impl IDBFactory {
@@ -70,6 +78,7 @@ impl IDBFactory {
             connections: Default::default(),
             indexeddb_transactions: Default::default(),
             callback: Default::default(),
+            callback_listener: Default::default(),
             closed_for_teardown: Cell::new(false),
         }
     }
@@ -213,14 +222,21 @@ impl IDBFactory {
         }
 
         let global = self.global();
-        let response_listener = Trusted::new(self);
+        let response_listener = self.callback_listener.clone();
+        if !self.closed_for_teardown.get() {
+            *response_listener.lock().expect("poisoned") = Some(Trusted::new(self));
+        }
 
         let task_source = global
             .task_manager()
             .database_access_task_source()
             .to_sendable();
         let callback = GenericCallback::new(move |message| {
-            let response_listener = response_listener.clone();
+            // Partii: the page was torn down; nothing is left to answer.
+            let Some(response_listener) = response_listener.lock().expect("poisoned").clone()
+            else {
+                return;
+            };
             let response = match message {
                 Ok(inner) => inner,
                 Err(err) => return error!("Error in IndexedDB factory callback {:?}.", err),
@@ -507,6 +523,9 @@ impl IDBFactory {
         if self.closed_for_teardown.replace(true) {
             return;
         }
+        // Partii: let the factory (and its page) go once the closes below are sent.
+        let _ = self.callback_listener.lock().map(|mut l| l.take());
+        self.callback.borrow_mut().take();
         let global = self.global();
         let connections = self.connections.borrow();
         let pending_upgrades = connections
