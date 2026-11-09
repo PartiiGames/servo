@@ -2716,6 +2716,16 @@ impl Window {
         cx: &mut JSContext,
         reflow_goal: ReflowGoal,
     ) -> (ReflowPhasesRun, ReflowStatistics) {
+        // Partii (measurement): PARTII_FRAME_PROF=trace logs reflows of 8 ms or more.
+        let _partii_prof = crate::partii_frame_prof::trace().then(|| {
+            struct S(f64, std::time::Instant, String);
+            impl Drop for S {
+                fn drop(&mut self) {
+                    crate::partii_frame_prof::trace_span(&self.2, self.0, self.1.elapsed());
+                }
+            }
+            S(crate::partii_frame_prof::wall_ms(), std::time::Instant::now(), format!("reflow:{reflow_goal:?}"))
+        });
         let document = self.Document();
 
         // Never reflow inactive Documents.
