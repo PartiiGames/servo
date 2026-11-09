@@ -54,6 +54,11 @@ pub(crate) struct TaskQueue<T> {
     throttled: DomRefCell<FxHashMap<TaskSourceName, VecDeque<QueuedTask>>>,
     /// Tasks for not fully-active documents.
     inactive: DomRefCell<FxHashMap<PipelineId, VecDeque<QueuedTask>>>,
+    /// Partii: pipelines that have exited. A task queued for one after its exit (a timer that
+    /// fires, a fetch that completes, an observer notification) would otherwise be held back in
+    /// `inactive` forever, and with the `Trusted` handles it carries, keep the discarded page
+    /// (its window, WebGL contexts, media players) alive. Pipeline ids are never reused.
+    exited: DomRefCell<FxHashSet<PipelineId>>,
 }
 
 impl<T: QueuedTaskConversion> TaskQueue<T> {
@@ -65,6 +70,7 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
             taken_task_counter: Default::default(),
             throttled: Default::default(),
             inactive: Default::default(),
+            exited: Default::default(),
         }
     }
 
@@ -73,6 +79,7 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
     /// the next time the queue is processed.
     pub(crate) fn remove_tasks_for_exiting_pipeline(&self, pipeline_id: &PipelineId) {
         self.inactive.borrow_mut().remove(pipeline_id);
+        self.exited.borrow_mut().insert(*pipeline_id);
     }
 
     /// Release previously held-back tasks for documents that are now fully-active.
@@ -96,6 +103,10 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
     /// Hold back tasks for currently not fully-active documents.
     /// <https://html.spec.whatwg.org/multipage/#event-loop-processing-model:fully-active>
     fn store_task_for_inactive_pipeline(&self, msg: T, pipeline_id: &PipelineId) {
+        if self.exited.borrow().contains(pipeline_id) {
+            // Partii: the pipeline is gone; its task will never run. Drop it (and what it holds).
+            return;
+        }
         let mut inactive = self.inactive.borrow_mut();
         let inactive_queue = inactive.entry(*pipeline_id).or_default();
         inactive_queue.push_back(
