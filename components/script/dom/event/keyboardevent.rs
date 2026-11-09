@@ -186,11 +186,9 @@ impl KeyboardEventMethods<crate::DomTypeHolder> for KeyboardEvent {
         event_type: DOMString,
         init: &KeyboardEventBinding::KeyboardEventInit,
     ) -> Fallible<DomRoot<KeyboardEvent>> {
-        let mut modifiers = Modifiers::empty();
-        modifiers.set(Modifiers::CONTROL, init.parent.ctrlKey);
-        modifiers.set(Modifiers::ALT, init.parent.altKey);
-        modifiers.set(Modifiers::SHIFT, init.parent.shiftKey);
-        modifiers.set(Modifiers::META, init.parent.metaKey);
+        // All of EventModifierInit (modifierAltGraph, modifierCapsLock, ...), not only the four
+        // key flags.
+        let modifiers = init.parent.modifiers();
         let event = KeyboardEvent::new_with_proto(
             cx,
             window,
@@ -223,10 +221,14 @@ impl KeyboardEventMethods<crate::DomTypeHolder> for KeyboardEvent {
         view_arg: Option<&Window>,
         key_arg: DOMString,
         location_arg: u32,
-        _modifiers_list_arg: DOMString,
-        repeat: bool,
-        _locale: DOMString,
+        ctrl_key: bool,
+        alt_key: bool,
+        shift_key: bool,
+        meta_key: bool,
     ) {
+        if self.upcast::<Event>().dispatching() {
+            return;
+        }
         self.init_event(
             event_type.into(),
             can_bubble_arg,
@@ -234,8 +236,14 @@ impl KeyboardEventMethods<crate::DomTypeHolder> for KeyboardEvent {
             view_arg,
             key_arg,
             location_arg,
-            repeat,
+            false,
         );
+        let mut modifiers = Modifiers::empty();
+        modifiers.set(Modifiers::CONTROL, ctrl_key);
+        modifiers.set(Modifiers::ALT, alt_key);
+        modifiers.set(Modifiers::SHIFT, shift_key);
+        modifiers.set(Modifiers::META, meta_key);
+        self.modifiers.set(modifiers);
     }
 
     /// <https://w3c.github.io/uievents/#dom-keyboardevent-initkeyboardevent>
@@ -292,10 +300,12 @@ impl KeyboardEventMethods<crate::DomTypeHolder> for KeyboardEvent {
             "Control" => Modifiers::CONTROL,
             "Fn" => Modifiers::FN,
             "FnLock" => Modifiers::FN_LOCK,
+            "Hyper" => Modifiers::HYPER,
             "Meta" => Modifiers::META,
             "NumLock" => Modifiers::NUM_LOCK,
             "ScrollLock" => Modifiers::SCROLL_LOCK,
             "Shift" => Modifiers::SHIFT,
+            "Super" => Modifiers::SUPER,
             "Symbol" => Modifiers::SYMBOL,
             "SymbolLock" => Modifiers::SYMBOL_LOCK,
             _ => return false,

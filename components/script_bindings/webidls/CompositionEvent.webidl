@@ -14,6 +14,14 @@ interface CompositionEvent : UIEvent {
   readonly attribute DOMString data;
 };
 
+// https://w3c.github.io/uievents/#idl-interface-CompositionEvent-initializers
+partial interface CompositionEvent {
+  // Originally introduced (and deprecated) in DOM Level 3
+  undefined initCompositionEvent(DOMString typeArg, optional boolean bubblesArg = false,
+                                 optional boolean cancelableArg = false, optional Window? viewArg = null,
+                                 optional DOMString dataArg = "");
+};
+
 // https://w3c.github.io/uievents/#idl-compositioneventinit
 dictionary CompositionEventInit : UIEventInit {
   DOMString data = "";

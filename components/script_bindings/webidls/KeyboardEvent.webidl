@@ -30,9 +30,11 @@ interface KeyboardEvent : UIEvent {
 // https://w3c.github.io/uievents/#idl-interface-KeyboardEvent-initializers
 partial interface KeyboardEvent {
     // Originally introduced (and deprecated) in DOM Level 3
-    undefined initKeyboardEvent (DOMString typeArg, boolean bubblesArg, boolean cancelableArg, Window? viewArg,
-                            DOMString keyArg, unsigned long locationArg, DOMString modifiersListArg,
-                            boolean repeat, DOMString locale);
+    undefined initKeyboardEvent (DOMString typeArg, optional boolean bubblesArg = false,
+                                 optional boolean cancelableArg = false, optional Window? viewArg = null,
+                                 optional DOMString keyArg = "", optional unsigned long locationArg = 0,
+                                 optional boolean ctrlKey = false, optional boolean altKey = false,
+                                 optional boolean shiftKey = false, optional boolean metaKey = false);
 };
 
 // https://w3c.github.io/uievents/#legacy-interface-KeyboardEvent

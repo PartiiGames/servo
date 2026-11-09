@@ -616,7 +616,8 @@ impl<T: ClipboardProvider> TextInput<T> {
     }
 
     pub(crate) fn handle_compositionend(&mut self, event: &CompositionEvent) -> KeyReaction {
-        let insertion = event.data().str();
+        let data = event.data();
+        let insertion = data.str();
         // An empty end (a cancel), or the commit of the text the preedit already shows: keep the
         // text, drop the preedit selection, leave the caret after it. No input event, as in
         // Chromium (the last compositionupdate fired it).
@@ -634,7 +635,8 @@ impl<T: ClipboardProvider> TextInput<T> {
     }
 
     pub(crate) fn handle_compositionupdate(&mut self, event: &CompositionEvent) -> KeyReaction {
-        let insertion = event.data().str();
+        let data = event.data();
+        let insertion = data.str();
         if insertion.is_empty() {
             // The IME cleared its preedit (the user deleted it, or is about to cancel or commit):
             // remove the preedit text, which is the selection.

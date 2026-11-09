@@ -589,34 +589,34 @@ impl<D: crate::DomTypes> EventModifierInit<D> {
         if self.metaKey {
             modifiers.insert(Modifiers::META);
         }
-        if self.keyModifierStateAltGraph {
+        if self.modifierAltGraph {
             modifiers.insert(Modifiers::ALT_GRAPH);
         }
-        if self.keyModifierStateCapsLock {
+        if self.modifierCapsLock {
             modifiers.insert(Modifiers::CAPS_LOCK);
         }
-        if self.keyModifierStateFn {
+        if self.modifierFn {
             modifiers.insert(Modifiers::FN);
         }
-        if self.keyModifierStateFnLock {
+        if self.modifierFnLock {
             modifiers.insert(Modifiers::FN_LOCK);
         }
-        if self.keyModifierStateHyper {
+        if self.modifierHyper {
             modifiers.insert(Modifiers::HYPER);
         }
-        if self.keyModifierStateNumLock {
+        if self.modifierNumLock {
             modifiers.insert(Modifiers::NUM_LOCK);
         }
-        if self.keyModifierStateScrollLock {
+        if self.modifierScrollLock {
             modifiers.insert(Modifiers::SCROLL_LOCK);
         }
-        if self.keyModifierStateSuper {
+        if self.modifierSuper {
             modifiers.insert(Modifiers::SUPER);
         }
-        if self.keyModifierStateSymbol {
+        if self.modifierSymbol {
             modifiers.insert(Modifiers::SYMBOL);
         }
-        if self.keyModifierStateSymbolLock {
+        if self.modifierSymbolLock {
             modifiers.insert(Modifiers::SYMBOL_LOCK);
         }
         modifiers

@@ -26,10 +26,10 @@ partial interface UIEvent {
     // Deprecated in DOM Level 3
     undefined initUIEvent (
       DOMString typeArg,
-      boolean bubblesArg,
-      boolean cancelableArg,
-      Window? viewArg,
-      long detailArg
+      optional boolean bubblesArg = false,
+      optional boolean cancelableArg = false,
+      optional Window? viewArg = null,
+      optional long detailArg = 0
     );
 
     readonly attribute unsigned long which;

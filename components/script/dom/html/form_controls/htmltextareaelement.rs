@@ -804,7 +804,7 @@ impl VirtualMethods for HTMLTextAreaElement {
                 {
                     self.fire_composition_beforeinput(
                         cx,
-                        compositionevent.data().clone(),
+                        compositionevent.data(),
                         event.type_() == atom!("compositionupdate"),
                     );
                 }

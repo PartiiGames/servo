@@ -5,6 +5,7 @@
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::rust::HandleObject;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{reflect_dom_object, reflect_dom_object_with_proto};
 use style::Atom;
 
@@ -13,22 +14,24 @@ use crate::dom::bindings::codegen::Bindings::CompositionEventBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::UIEventBinding::UIEvent_Binding::UIEventMethods;
 use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
+use crate::dom::event::Event;
 use crate::dom::uievent::UIEvent;
 use crate::dom::window::Window;
 
 #[dom_struct]
 pub(crate) struct CompositionEvent {
     uievent: UIEvent,
-    data: DOMString,
+    data: DomRefCell<DOMString>,
 }
 
 impl CompositionEvent {
     pub(crate) fn new_inherited() -> CompositionEvent {
         CompositionEvent {
             uievent: UIEvent::new_inherited(),
-            data: DOMString::new(),
+            data: Default::default(),
         }
     }
 
@@ -71,7 +74,7 @@ impl CompositionEvent {
             cx,
             Box::new(CompositionEvent {
                 uievent: UIEvent::new_inherited(),
-                data,
+                data: DomRefCell::new(data),
             }),
             window,
             proto,
@@ -81,8 +84,8 @@ impl CompositionEvent {
         ev
     }
 
-    pub(crate) fn data(&self) -> &DOMString {
-        &self.data
+    pub(crate) fn data(&self) -> DOMString {
+        self.data.borrow().clone()
     }
 }
 
@@ -111,7 +114,24 @@ impl CompositionEventMethods<crate::DomTypeHolder> for CompositionEvent {
 
     /// <https://w3c.github.io/uievents/#dom-compositionevent-data>
     fn Data(&self) -> DOMString {
-        self.data.clone()
+        self.data.borrow().clone()
+    }
+
+    /// <https://w3c.github.io/uievents/#dom-compositionevent-initcompositionevent>
+    fn InitCompositionEvent(
+        &self,
+        event_type: DOMString,
+        can_bubble: bool,
+        cancelable: bool,
+        view: Option<&Window>,
+        data: DOMString,
+    ) {
+        if self.upcast::<Event>().dispatching() {
+            return;
+        }
+        self.uievent
+            .init_event(event_type.into(), can_bubble, cancelable, view, 0);
+        *self.data.borrow_mut() = data;
     }
 
     /// <https://dom.spec.whatwg.org/#dom-event-istrusted>

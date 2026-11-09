@@ -2351,7 +2351,7 @@ impl VirtualMethods for HTMLInputElement {
                 {
                     self.fire_composition_beforeinput(
                         cx,
-                        compositionevent.data().clone(),
+                        compositionevent.data(),
                         event.type_() == atom!("compositionupdate"),
                     );
                 }
