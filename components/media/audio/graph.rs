@@ -423,11 +423,14 @@ impl AudioGraph {
         // is a sink. And so is any other node whose output goes nowhere (a source never
         // connected, a chain left dangling): a scheduled source must still play out, fire
         // `ended` and become removable (node lifetime). Idle ones are skipped (`is_inactive`).
+        // ScriptProcessorNodes too: `audioprocess` fires whether or not the output is used.
         // Media element and stream sources are left out: they pull from outside the graph.
         for ix in self.graph.node_indices() {
             let node_type = self.graph[ix].node.borrow().node_type();
             let root = match node_type {
-                AudioNodeType::AnalyserNode | AudioNodeType::AudioWorkletNode => true,
+                AudioNodeType::AnalyserNode |
+                AudioNodeType::AudioWorkletNode |
+                AudioNodeType::ScriptProcessorNode => true,
                 AudioNodeType::AudioListenerNode |
                 AudioNodeType::MediaElementSourceNode |
                 AudioNodeType::MediaStreamSourceNode => false,

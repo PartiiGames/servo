@@ -8,6 +8,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use servo_media_streams::{MediaSocket, MediaStreamId};
 
 use crate::analyser_node::AnalyserNode;
+use crate::script_processor_node::ScriptProcessorNode;
 use crate::audio_worklet_node::AudioWorkletNode;
 use crate::audio_node::{AudioNodeEngine, AudioNodeInit, AudioNodeMessage, BlockInfo, ChannelInfo};
 use crate::biquad_filter_node::BiquadFilterNode;
@@ -335,6 +336,9 @@ impl AudioRenderThread {
         let mut is_dest = false;
         let node: Box<dyn AudioNodeEngine> = match node_type {
             AudioNodeInit::AnalyserNode(sender) => Box::new(AnalyserNode::new(sender, ch)),
+            AudioNodeInit::ScriptProcessorNode(options) => {
+                Box::new(ScriptProcessorNode::new(options, ch))
+            },
             AudioNodeInit::AudioBufferSourceNode(options) => {
                 Box::new(AudioBufferSourceNode::new(options, ch))
             },

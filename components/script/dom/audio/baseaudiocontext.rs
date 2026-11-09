@@ -44,6 +44,7 @@ use crate::dom::audio::gainnode::GainNode;
 use crate::dom::audio::iirfilternode::IIRFilterNode;
 use crate::dom::audio::oscillatornode::OscillatorNode;
 use crate::dom::audio::pannernode::PannerNode;
+use crate::dom::audio::scriptprocessornode::ScriptProcessorNode;
 use crate::dom::audio::stereopannernode::StereoPannerNode;
 use crate::dom::audio::waveshapernode::WaveShaperNode;
 use crate::dom::bindings::buffer_source::HeapBufferSource;
@@ -555,6 +556,24 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
         options.imag = Some(imag);
         options.parent = constraints_copy;
         PeriodicWave::Constructor(cx, self.global().as_window(), None, self, &options)
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createscriptprocessor>
+    fn CreateScriptProcessor(
+        &self,
+        cx: &mut JSContext,
+        buffer_size: u32,
+        number_of_input_channels: u32,
+        number_of_output_channels: u32,
+    ) -> Fallible<DomRoot<ScriptProcessorNode>> {
+        ScriptProcessorNode::new(
+            cx,
+            self.global().as_window(),
+            self,
+            buffer_size,
+            number_of_input_channels,
+            number_of_output_channels,
+        )
     }
 
     /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createanalyser>

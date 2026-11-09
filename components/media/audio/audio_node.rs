@@ -24,6 +24,7 @@ use crate::iir_filter_node::IIRFilterNodeOptions;
 use crate::media_element_source_node::MediaElementSourceNodeMessage;
 use crate::oscillator_node::{OscillatorNodeMessage, OscillatorNodeOptions};
 use crate::panner_node::{PannerNodeMessage, PannerNodeOptions};
+use crate::script_processor_node::ScriptProcessorNodeOptions;
 use crate::param::{Param, ParamRate, ParamType, UserAutomationEvent};
 use crate::stereo_panner::StereoPannerOptions;
 use crate::wave_shaper_node::{WaveShaperNodeMessage, WaveShaperNodeOptions};
@@ -50,7 +51,7 @@ pub enum AudioNodeInit {
     OscillatorNode(OscillatorNodeOptions),
     PannerNode(PannerNodeOptions),
     PeriodicWave,
-    ScriptProcessorNode,
+    ScriptProcessorNode(ScriptProcessorNodeOptions),
     StereoPannerNode(StereoPannerOptions),
     WaveShaperNode(WaveShaperNodeOptions),
 }

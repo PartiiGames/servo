@@ -23,6 +23,7 @@ use servo_media::audio::param::ParamType;
 use crate::conversions::Convert;
 use crate::dom::audio::audioparam::AudioParam;
 use crate::dom::audio::baseaudiocontext::BaseAudioContext;
+use crate::dom::audio::scriptprocessornode::ScriptProcessorNode;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
     AudioNodeMethods, AudioNodeOptions, ChannelCountMode, ChannelInterpretation,
 };
@@ -414,6 +415,13 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             EventTargetTypeId::AudioNode(AudioNodeTypeId::ConvolverNode) if value > 2 => {
                 return Err(Error::NotSupported(None));
             },
+            // <https://webaudio.github.io/web-audio-api/#dom-scriptprocessornode-channelcount>
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::ScriptProcessorNode) => {
+                let node = self.downcast::<ScriptProcessorNode>().unwrap();
+                if value != node.input_channels().max(1) {
+                    return Err(Error::NotSupported(None));
+                }
+            },
             // XXX We do not support any of the other AudioNodes with
             // constraints yet. Add more cases here as we add support
             // for new AudioNodes.
@@ -475,6 +483,12 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
             // <https://webaudio.github.io/web-audio-api/#dom-convolvernode-channelcountmode>
             EventTargetTypeId::AudioNode(AudioNodeTypeId::ConvolverNode)
                 if value == ChannelCountMode::Max =>
+            {
+                return Err(Error::NotSupported(None));
+            },
+            // <https://webaudio.github.io/web-audio-api/#dom-scriptprocessornode-channelcountmode>
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::ScriptProcessorNode)
+                if value != ChannelCountMode::Explicit =>
             {
                 return Err(Error::NotSupported(None));
             },
