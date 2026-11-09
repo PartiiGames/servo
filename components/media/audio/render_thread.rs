@@ -248,6 +248,9 @@ pub struct AudioRenderThread {
     pub muted: bool,
     /// sinkId {type: "none"}: render, but output silence.
     output_none: bool,
+    /// Offline: ScriptProcessorNode audioprocess events not answered yet; rendering waits for
+    /// them between quanta (serving control messages meanwhile).
+    script_pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Scheduled offline suspensions, by frame.
     suspend_points: std::collections::BTreeMap<u64, SuspendCallback>,
     /// PARTII_AUDIO_GRAPH_STATS: log the graph's node count about once a second when it
@@ -289,6 +292,7 @@ impl AudioRenderThread {
             current_frame: Tick(0),
             muted: false,
             output_none: false,
+            script_pending: Default::default(),
             suspend_points: Default::default(),
             graph_stats: std::env::var_os("PARTII_AUDIO_GRAPH_STATS").is_some(),
             graph_stats_last: 0,
@@ -343,7 +347,9 @@ impl AudioRenderThread {
         let node: Box<dyn AudioNodeEngine> = match node_type {
             AudioNodeInit::AnalyserNode(sender) => Box::new(AnalyserNode::new(sender, ch)),
             AudioNodeInit::ScriptProcessorNode(options) => {
-                Box::new(ScriptProcessorNode::new(options, ch))
+                let pending = matches!(self.sink, Sink::Offline(_))
+                    .then(|| self.script_pending.clone());
+                Box::new(ScriptProcessorNode::new(options, ch, pending))
             },
             AudioNodeInit::AudioBufferSourceNode(options) => {
                 Box::new(AudioBufferSourceNode::new(options, ch))
@@ -551,6 +557,35 @@ impl AudioRenderThread {
 
                 if self.state == ProcessingState::Suspended {
                     // Bail out if we just suspended processing.
+                    continue;
+                }
+
+                // Offline: wait for the page's ScriptProcessorNode answers before the next
+                // quantum (at most 10 s in all, in case the main thread is stuck).
+                if self.script_pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                    let started = std::time::Instant::now();
+                    let mut stop = false;
+                    while self.script_pending.load(std::sync::atomic::Ordering::SeqCst) > 0 &&
+                        started.elapsed() < std::time::Duration::from_secs(10)
+                    {
+                        match event_queue.recv_timeout(std::time::Duration::from_millis(1)) {
+                            Ok(msg) => {
+                                if handle_msg(self, msg) {
+                                    stop = true;
+                                    break;
+                                }
+                            },
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {},
+                            Err(_) => break,
+                        }
+                    }
+                    if stop {
+                        break;
+                    }
+                    if self.script_pending.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                        self.script_pending.store(0, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    // A message may have suspended or closed us.
                     continue;
                 }
 

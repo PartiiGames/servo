@@ -16,7 +16,7 @@ use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_media::audio::audio_node::AudioNodeInit;
 use stylo_atoms::Atom;
 use servo_media::audio::script_processor_node::{
-    ScriptProcessorHandle, ScriptProcessorNodeOptions,
+    ScriptProcessorDone, ScriptProcessorHandle, ScriptProcessorNodeOptions,
 };
 
 use crate::dom::audio::audiobuffer::AudioBuffer;
@@ -37,15 +37,16 @@ use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::window::Window;
 use crate::tasks::task_source::SendableTaskSource;
 
-/// Output buffers the page filled, waiting for the render thread.
-type Outputs = Arc<Mutex<VecDeque<Vec<Vec<f32>>>>>;
+/// Output buffers the page filled (with their input buffer's index), waiting for the render
+/// thread.
+type Outputs = Arc<Mutex<VecDeque<(u64, Vec<Vec<f32>>)>>>;
 
 /// The buffer size createScriptProcessor(0) picks: Blink's choice for a real-time context
 /// (1024 frames, ~21 ms at 48 kHz).
 const DEFAULT_BUFFER_SIZE: u32 = 1024;
-/// Buffers queued for the render thread beyond this are dropped (a page that can't keep up
-/// shouldn't build up latency).
-const MAX_QUEUED_OUTPUTS: usize = 4;
+/// Buffers queued for the render thread beyond this are dropped (the render thread drops late
+/// ones anyway; this only bounds memory if it has stopped pulling).
+const MAX_QUEUED_OUTPUTS: usize = 8;
 
 #[dom_struct]
 pub(crate) struct ScriptProcessorNode {
@@ -66,17 +67,24 @@ struct Handle {
 }
 
 impl ScriptProcessorHandle for Handle {
-    fn audio_process(&mut self, input: Vec<Vec<f32>>, playback_time: f64) {
+    fn audio_process(
+        &mut self,
+        index: u64,
+        input: Vec<Vec<f32>>,
+        playback_time: f64,
+        done: ScriptProcessorDone,
+    ) {
         let Some(node) = self.node.lock().unwrap().clone() else {
             return;
         };
         self.task_source
             .queue(task!(script_processor_audio_process: move |cx| {
-                node.root().audio_process(cx, input, playback_time);
+                node.root().audio_process(cx, index, input, playback_time);
+                done.done();
             }));
     }
 
-    fn take_output(&mut self) -> Option<Vec<Vec<f32>>> {
+    fn take_output(&mut self) -> Option<(u64, Vec<Vec<f32>>)> {
         self.outputs.lock().unwrap().pop_front()
     }
 }
@@ -146,7 +154,13 @@ impl ScriptProcessorNode {
     }
 
     /// One input buffer from the render thread: fire `audioprocess`, then send the output.
-    fn audio_process(&self, cx: &mut JSContext, input: Vec<Vec<f32>>, playback_time: f64) {
+    fn audio_process(
+        &self,
+        cx: &mut JSContext,
+        index: u64,
+        input: Vec<Vec<f32>>,
+        playback_time: f64,
+    ) {
         let context = self.node.Context();
         let global = self.global();
         let window = global.as_window();
@@ -183,7 +197,7 @@ impl ScriptProcessorNode {
             .cloned()
             .collect();
         let mut queue = self.outputs.lock().unwrap();
-        queue.push_back(output);
+        queue.push_back((index, output));
         while queue.len() > MAX_QUEUED_OUTPUTS {
             queue.pop_front();
         }
