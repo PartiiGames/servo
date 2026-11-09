@@ -2577,6 +2577,12 @@ impl Window {
 
         // Partii: the same for the handle this window's module scripts share.
         self.as_global_scope().release_module_owner();
+
+        // Partii: each fetched module's record is a permanent root (`ModuleObject` holds a
+        // `RootedTraceableBox`), and the record sits in this document's module map: the root
+        // holds the module, the module its realm's global, the global this document. Drop the
+        // map so the page can be collected.
+        self.Document().module_map().borrow_mut().clear();
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>
