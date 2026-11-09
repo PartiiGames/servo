@@ -259,6 +259,8 @@ thread_local! {
     /// Black remarks in the current GC: count, edges shaded, longest, total.
     static BLACK_REMARKS: Cell<(u32, usize, Duration, Duration)> =
         const { Cell::new((0, 0, Duration::ZERO, Duration::ZERO)) };
+    /// Black remark time not yet claimed by a slice measurement (`take_pending_remark`).
+    static PENDING_REMARK: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     /// Whether the scheduler itself is running a slice (else a slice is SpiderMonkey's own).
     static OUR_SLICE: Cell<bool> = const { Cell::new(false) };
     /// When SpiderMonkey's own slice in progress began.
@@ -761,6 +763,13 @@ fn black_remark_before_slice(cx: *mut RawJSContext) {
         let (n, edges, max, total) = b.get();
         b.set((n + 1, edges + done.edges, max.max(took), total + took));
     });
+    PENDING_REMARK.with(|p| p.set(p.get() + took));
+}
+
+/// The black remark time since the last call: the remark runs right before a slice, outside it, so
+/// a measurement of the slice's pause (`PARTII_GC_STATS`) adds this to it.
+pub(crate) fn take_pending_remark() -> Duration {
+    PENDING_REMARK.with(|p| p.replace(Duration::ZERO))
 }
 
 /// The roots both remarks re-trace: Servo's (`ROOTS_TRACER`), and mozjs's set of
