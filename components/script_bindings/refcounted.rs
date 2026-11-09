@@ -85,7 +85,9 @@ impl<T: DomObject> Trusted<T> {
     /// Create a new `Trusted<T>` instance from an existing DOM pointer. The DOM object will
     /// be prevented from being GCed for the duration of the resulting `Trusted<T>` object's
     /// lifetime.
+    #[track_caller]
     pub fn new(ptr: &T) -> Trusted<T> {
+        partii_trusted_census::note_site(ptr as *const T as *const _);
         fn add_live_reference(
             ptr: *const libc::c_void,
         ) -> (Arc<TrustedReference>, *const LiveDOMReferences) {
@@ -150,12 +152,14 @@ pub unsafe fn trace_live_domreferences(tracer: *mut JSTracer) {
                     *by_class
                         .entry(partii_trusted_census::class_name(reflector))
                         .or_default() += 1;
+                    partii_trusted_census::count_sites(*obj, reflector);
                 }
                 trace_reflector(tracer, "refcounted", reflector);
             }
         }
         if census {
             partii_trusted_census::print(table.len(), by_class);
+            partii_trusted_census::print_sites(&table);
         }
     })
 }
@@ -165,10 +169,14 @@ pub unsafe fn trace_live_domreferences(tracer: *mut JSTracer) {
 /// with it, for a node, its document and window) until the handle is dropped, so a count that only
 /// grows names what keeps discarded pages alive.
 mod partii_trusted_census {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::panic::Location;
     use std::sync::OnceLock;
+    use std::sync::Weak;
 
     use rustc_hash::FxHashMap;
+
+    use super::TrustedReference;
 
     use crate::reflector::Reflector;
 
@@ -183,6 +191,65 @@ mod partii_trusted_census {
     }
 
     thread_local!(static GCS: Cell<u64> = const { Cell::new(0) });
+
+    type Sites = Vec<&'static Location<'static>>;
+
+    thread_local! {
+        /// Where `Trusted::new` was called for each object (at most four sites an object).
+        static SITES: RefCell<FxHashMap<*const libc::c_void, Sites>> = RefCell::new(FxHashMap::default());
+        /// Live objects counted by class and creation sites, filled during a census.
+        static BY_SITE: RefCell<FxHashMap<String, usize>> = RefCell::new(FxHashMap::default());
+    }
+
+    #[track_caller]
+    pub(super) fn note_site(ptr: *const libc::c_void) {
+        if every().is_none() {
+            return;
+        }
+        let here = Location::caller();
+        SITES.with(|s| {
+            let mut s = s.borrow_mut();
+            let v = s.entry(ptr).or_default();
+            if v.len() < 4 && !v.iter().any(|l| l == &here) {
+                v.push(here);
+            }
+        });
+    }
+
+    pub(super) unsafe fn count_sites(ptr: *const libc::c_void, reflector: &Reflector) {
+        let class = unsafe { class_name(reflector) };
+        let key = SITES.with(|s| {
+            let s = s.borrow();
+            let sites = s.get(&ptr).map(|v| {
+                v.iter()
+                    .map(|l| {
+                        let f = l.file();
+                        let f = f.rsplit('/').take(2).collect::<Vec<_>>();
+                        format!("{}/{}:{}", f.get(1).unwrap_or(&""), f[0], l.line())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|")
+            });
+            format!("{class}@{}", sites.unwrap_or_else(|| "?".into()))
+        });
+        BY_SITE.with(|b| *b.borrow_mut().entry(key).or_default() += 1);
+    }
+
+    pub(super) fn print_sites(table: &FxHashMap<*const libc::c_void, Weak<TrustedReference>>) {
+        // Forget the sites of objects no longer held.
+        SITES.with(|s| s.borrow_mut().retain(|k, _| table.contains_key(k)));
+        let mut v: Vec<(String, usize)> = BY_SITE.with(|b| b.borrow_mut().drain().collect());
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        for (k, n) in v.iter().take(12) {
+            eprintln!(
+                "partii-trusted-site: thread={} gc={} n={} {}",
+                std::thread::current().name().unwrap_or("?"),
+                GCS.with(|c| c.get()),
+                n,
+                k
+            );
+        }
+    }
 
     pub(super) fn due() -> bool {
         let Some(n) = every() else { return false };
