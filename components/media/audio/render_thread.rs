@@ -146,6 +146,9 @@ pub enum AudioRenderThreadMsg {
     SetSinkEosCallback(#[ignore_malloc_size_of = "Fn"] SinkEosCallback),
 
     SetMute(bool),
+    /// AudioContext sinkId {type: "none"}: keep rendering (time advances, analysers and
+    /// script processors see the graph) but send silence to the device.
+    SetOutputNone(bool),
 
     /// Run an embedder task on the render thread, between render quanta.
     RunTask(#[ignore_malloc_size_of = "Fn"] RenderThreadTask),
@@ -243,6 +246,8 @@ pub struct AudioRenderThread {
     pub current_time: f64,
     pub current_frame: Tick,
     pub muted: bool,
+    /// sinkId {type: "none"}: render, but output silence.
+    output_none: bool,
     /// Scheduled offline suspensions, by frame.
     suspend_points: std::collections::BTreeMap<u64, SuspendCallback>,
     /// PARTII_AUDIO_GRAPH_STATS: log the graph's node count about once a second when it
@@ -283,6 +288,7 @@ impl AudioRenderThread {
             current_time: 0.,
             current_frame: Tick(0),
             muted: false,
+            output_none: false,
             suspend_points: Default::default(),
             graph_stats: std::env::var_os("PARTII_AUDIO_GRAPH_STATS").is_some(),
             graph_stats_last: 0,
@@ -420,7 +426,11 @@ impl AudioRenderThread {
             frame: self.current_frame,
             time: self.current_time,
         };
-        self.graph.process(&info)
+        let data = self.graph.process(&info);
+        if self.output_none {
+            return Chunk::explicit_silence();
+        }
+        data
     }
 
     fn log_graph_stats(&mut self) {
@@ -503,6 +513,9 @@ impl AudioRenderThread {
                 },
                 AudioRenderThreadMsg::SetMute(val) => {
                     context.set_mute(val);
+                },
+                AudioRenderThreadMsg::SetOutputNone(val) => {
+                    context.output_none = val;
                 },
                 AudioRenderThreadMsg::RunTask(task) => task(),
                 AudioRenderThreadMsg::SuspendAt(frame, callback) => {

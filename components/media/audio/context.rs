@@ -390,6 +390,11 @@ impl AudioContext {
     fn set_mute(&self, val: bool) {
         let _ = self.sender.send(AudioRenderThreadMsg::SetMute(val));
     }
+
+    /// sinkId {type: "none"}: keep rendering without sending sound to the device.
+    pub fn set_output_none(&self, val: bool) {
+        let _ = self.sender.send(AudioRenderThreadMsg::SetOutputNone(val));
+    }
 }
 
 impl Drop for AudioContext {

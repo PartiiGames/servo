@@ -12,9 +12,24 @@ enum AudioContextLatencyCategory {
   "playback"
 };
 
+enum AudioSinkType {
+  "none"
+};
+
+dictionary AudioSinkOptions {
+  required AudioSinkType type;
+};
+
+// https://webaudio.github.io/web-audio-api/#AudioSinkInfo
+[Exposed=Window]
+interface AudioSinkInfo {
+  readonly attribute AudioSinkType type;
+};
+
 dictionary AudioContextOptions {
   (AudioContextLatencyCategory or double) latencyHint = "interactive";
   float sampleRate;
+  (DOMString or AudioSinkOptions) sinkId;
 };
 
 dictionary AudioTimestamp {
@@ -27,11 +42,15 @@ interface AudioContext : BaseAudioContext {
   [Throws] constructor(optional AudioContextOptions contextOptions = {});
   readonly attribute double baseLatency;
   readonly attribute double outputLatency;
+  [SecureContext] readonly attribute (DOMString or AudioSinkInfo) sinkId;
+  attribute EventHandler onsinkchange;
+  attribute EventHandler onerror;
 
   AudioTimestamp getOutputTimestamp();
 
   Promise<undefined> suspend();
   Promise<undefined> close();
+  [SecureContext] Promise<undefined> setSinkId((DOMString or AudioSinkOptions) sinkId);
 
   [Throws] MediaElementAudioSourceNode createMediaElementSource(HTMLMediaElement mediaElement);
   [Throws] MediaStreamAudioSourceNode createMediaStreamSource(MediaStream mediaStream);

@@ -12,6 +12,7 @@ pub(crate) mod audionode;
 pub(crate) mod audioparam;
 pub(crate) mod audioparammap;
 pub(crate) mod audioprocessingevent;
+pub(crate) mod audiosinkinfo;
 pub(crate) mod audioscheduledsourcenode;
 pub(crate) mod audiotrack;
 pub(crate) mod audiotracklist;

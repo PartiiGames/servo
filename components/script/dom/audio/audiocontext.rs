@@ -9,6 +9,7 @@ use js::rust::HandleObject;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_base::id::PipelineId;
 use servo_media::ServoMedia;
+use stylo_atoms::Atom;
 use servo_media::audio::context::{LatencyCategory, ProcessingState, RealTimeAudioContextOptions};
 
 use crate::conversions::Convert;
@@ -17,12 +18,20 @@ use crate::dom::audio::mediaelementaudiosourcenode::MediaElementAudioSourceNode;
 use crate::dom::audio::mediastreamaudiodestinationnode::MediaStreamAudioDestinationNode;
 use crate::dom::audio::mediastreamaudiosourcenode::MediaStreamAudioSourceNode;
 use crate::dom::audio::mediastreamtrackaudiosourcenode::MediaStreamTrackAudioSourceNode;
+use crate::dom::audio::audiosinkinfo::AudioSinkInfo;
+use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::AudioContextBinding::{
-    AudioContextLatencyCategory, AudioContextMethods, AudioContextOptions, AudioTimestamp,
+    AudioContextLatencyCategory, AudioContextMethods, AudioContextOptions, AudioSinkInfoMethods,
+    AudioSinkType, AudioTimestamp,
 };
+use crate::dom::bindings::codegen::UnionTypes::{StringOrAudioSinkInfo, StringOrAudioSinkOptions};
+use crate::dom::bindings::root::MutNullableDom;
+use crate::dom::bindings::str::DOMString;
+use crate::dom::eventtarget::EventTarget;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::AudioNodeOptions;
 use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::AudioContextState;
 use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContext_Binding::BaseAudioContextMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::codegen::UnionTypes::AudioContextLatencyCategoryOrDouble;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -44,6 +53,12 @@ pub(crate) struct AudioContext {
     base_latency: f64,
     /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-outputlatency>
     output_latency: f64,
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-sink-id-slot> when it is a
+    /// device id. Only "" (the default device) is valid: there is no device enumeration.
+    sink_id: DomRefCell<DOMString>,
+    /// The [[sink ID]] slot when it is an AudioSinkInfo (`{type: "none"}`: render, but play
+    /// nothing).
+    sink_info: MutNullableDom<AudioSinkInfo>,
 }
 
 impl AudioContext {
@@ -93,6 +108,8 @@ impl AudioContext {
             latency_hint,
             base_latency,
             output_latency,
+            sink_id: Default::default(),
+            sink_info: Default::default(),
         })
     }
 
@@ -106,8 +123,57 @@ impl AudioContext {
         let pipeline_id = window.pipeline_id();
         let context = AudioContext::new_inherited(options, pipeline_id)?;
         let context = reflect_dom_object_with_proto(cx, Box::new(context), window, proto);
+        // Step 10.1: the sinkId option.
+        match options.sinkId.as_ref() {
+            Some(StringOrAudioSinkOptions::String(id)) if !id.is_empty() => {
+                // Not a known device: fire `error` and keep the default device.
+                window
+                    .as_global_scope()
+                    .task_manager()
+                    .dom_manipulation_task_source()
+                    .queue_simple_event(context.upcast(), atom!("error"));
+            },
+            Some(StringOrAudioSinkOptions::AudioSinkOptions(sink)) => {
+                context.set_sink_none(cx, window, sink.type_);
+            },
+            _ => {},
+        }
         context.resume(window);
         Ok(context)
+    }
+
+    /// [[sink ID]] becomes an AudioSinkInfo: keep rendering, send nothing to the device.
+    fn set_sink_none(&self, cx: &mut JSContext, window: &Window, sink_type: AudioSinkType) {
+        self.sink_info
+            .set(Some(&AudioSinkInfo::new(cx, window, sink_type)));
+        *self.sink_id.borrow_mut() = DOMString::new();
+        self.context
+            .audio_context_impl()
+            .lock()
+            .unwrap()
+            .set_output_none(true);
+    }
+
+    /// [[sink ID]] becomes the default device ("").
+    fn set_sink_default(&self) {
+        self.sink_info.set(None);
+        *self.sink_id.borrow_mut() = DOMString::new();
+        self.context
+            .audio_context_impl()
+            .lock()
+            .unwrap()
+            .set_output_none(false);
+    }
+
+    /// Whether `sink` names the current [[sink ID]].
+    fn is_current_sink(&self, sink: &StringOrAudioSinkOptions) -> bool {
+        match (sink, self.sink_info.get()) {
+            (StringOrAudioSinkOptions::String(id), None) => *id == *self.sink_id.borrow(),
+            (StringOrAudioSinkOptions::AudioSinkOptions(options), Some(info)) => {
+                options.type_ == info.Type()
+            },
+            _ => false,
+        }
     }
 
     fn resume(&self, window: &Window) {
@@ -141,6 +207,13 @@ impl AudioContextMethods<crate::DomTypeHolder> for AudioContext {
         proto: Option<HandleObject>,
         options: &AudioContextOptions,
     ) -> Fallible<DomRoot<AudioContext>> {
+        // Step 1: a document that is not fully active (a removed or navigated-away frame)
+        // can't make a context.
+        if !window.Document().is_fully_active() {
+            return Err(Error::InvalidState(Some(
+                "The document is not fully active.".into(),
+            )));
+        }
         AudioContext::new(cx, window, proto, options)
     }
 
@@ -152,6 +225,67 @@ impl AudioContextMethods<crate::DomTypeHolder> for AudioContext {
     /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-outputlatency>
     fn OutputLatency(&self) -> Finite<f64> {
         Finite::wrap(self.output_latency)
+    }
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-sinkid>
+    fn SinkId(&self) -> StringOrAudioSinkInfo {
+        match self.sink_info.get() {
+            Some(info) => StringOrAudioSinkInfo::AudioSinkInfo(info),
+            None => StringOrAudioSinkInfo::String(self.sink_id.borrow().clone()),
+        }
+    }
+
+    // <https://webaudio.github.io/web-audio-api/#dom-audiocontext-onsinkchange>
+    event_handler!(sinkchange, GetOnsinkchange, SetOnsinkchange);
+
+    // <https://webaudio.github.io/web-audio-api/#dom-audiocontext-onerror>
+    event_handler!(error, GetOnerror, SetOnerror);
+
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-setsinkid>
+    fn SetSinkId(&self, cx: &mut CurrentRealm, sink: StringOrAudioSinkOptions) -> RootedPromise {
+        let promise = Promise::new_in_realm(cx);
+        // Step 2.
+        if self.context.reject_if_not_fully_active(cx, &promise) {
+            return promise;
+        }
+        if self.context.control_thread_state() == ProcessingState::Closed {
+            promise.reject_error(cx, Error::InvalidState(None));
+            return promise;
+        }
+        // Step 3.
+        if self.is_current_sink(&sink) {
+            promise.resolve_native(cx, &());
+            return promise;
+        }
+        // Step 4, validating sinkId: "" (the default device) and {type: "none"} only; there is
+        // no device enumeration to match other ids against.
+        if let StringOrAudioSinkOptions::String(ref id) = sink &&
+            !id.is_empty()
+        {
+            promise.reject_error(cx, Error::NotFound(None));
+            return promise;
+        }
+        // Steps 5-6: switch, then (from a task) fire sinkchange and resolve.
+        match sink {
+            StringOrAudioSinkOptions::AudioSinkOptions(options) => {
+                let global = self.global();
+                self.set_sink_none(cx, global.as_window(), options.type_);
+            },
+            StringOrAudioSinkOptions::String(_) => self.set_sink_default(),
+        }
+        let context = Trusted::new(self);
+        let trusted_promise = TrustedPromise::from(&promise);
+        self.global()
+            .task_manager()
+            .dom_manipulation_task_source()
+            .queue(task!(sink_change: move |cx| {
+                let context = context.root();
+                context
+                    .upcast::<EventTarget>()
+                    .fire_event(cx, Atom::from("sinkchange"));
+                trusted_promise.root(cx).resolve_native(cx, &());
+            }));
+        promise
     }
 
     /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-outputlatency>
