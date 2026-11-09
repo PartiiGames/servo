@@ -144,6 +144,9 @@ impl OfflineAudioContextMethods<crate::DomTypeHolder> for OfflineAudioContext {
     /// <https://webaudio.github.io/web-audio-api/#dom-offlineaudiocontext-startrendering>
     fn StartRendering(&self, cx: &mut CurrentRealm) -> RootedPromise {
         let promise = Promise::new_in_realm(cx);
+        if self.context.reject_if_not_fully_active(cx, &promise) {
+            return promise;
+        }
         // > If the [[control thread state]] on the OfflineAudioContext is closed, reject
         // > promise with InvalidStateError.
         if self.rendering_started.get() || self.context.State() == AudioContextState::Closed {
@@ -246,6 +249,9 @@ impl OfflineAudioContextMethods<crate::DomTypeHolder> for OfflineAudioContext {
     /// <https://webaudio.github.io/web-audio-api/#dom-offlineaudiocontext-resume>
     fn Resume(&self, cx: &mut CurrentRealm) -> RootedPromise {
         let promise = Promise::new_in_realm(cx);
+        if self.context.reject_if_not_fully_active(cx, &promise) {
+            return promise;
+        }
         // > Abort these steps and reject promise with InvalidStateError when any of following
         // > conditions is true: the [[control thread state]] is closed; [[rendering started]]
         // > is false.
