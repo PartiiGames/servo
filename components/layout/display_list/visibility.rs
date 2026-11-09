@@ -28,7 +28,7 @@ use webrender_api::units::{LayoutPoint, LayoutRect, LayoutVector2D};
 
 use crate::display_list::paint_traversal::{PaintTraversal, PaintTraversalHandler};
 use crate::display_list::{StackingContext, StackingContextTree, ToWebRender, TraversalState};
-use crate::fragment_tree::{BoxFragmentWithStyle, TextFragment};
+use crate::fragment_tree::{BoxFragmentWithStyle, ImageFragment, TextFragment};
 use crate::geom::PhysicalRect;
 
 struct Layer {
@@ -117,6 +117,7 @@ impl<'a> VisibilityTest<'a> {
         m.m12 == 0. && m.m21 == 0. && m.m11 == m.m22 && m.m11 >= 1.
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn visit_painted(
         &mut self,
         state: &TraversalState,
@@ -124,6 +125,7 @@ impl<'a> VisibilityTest<'a> {
         style: &ComputedValues,
         rect: PhysicalRect<Au>,
         shadows: impl Iterator<Item = (f32, f32, f32)>,
+        ignore_visibility: bool,
     ) {
         let rect = rect.translate(state.origin.to_vector()).to_webrender();
         if node == self.target {
@@ -143,7 +145,7 @@ impl<'a> VisibilityTest<'a> {
         if self.target_rect.is_none() || self.subtree.contains(&node) {
             return;
         }
-        if style.get_inherited_box().visibility != Visibility::Visible ||
+        if (!ignore_visibility && style.get_inherited_box().visibility != Visibility::Visible) ||
             self.effective_opacity() <= 0.
         {
             return;
@@ -219,6 +221,7 @@ impl PaintTraversalHandler for VisibilityTest<'_> {
             &style,
             fragment.border_rect(),
             shadows.into_iter(),
+            false,
         );
     }
 
@@ -251,6 +254,30 @@ impl PaintTraversalHandler for VisibilityTest<'_> {
             &style,
             fragment.base.rect(),
             shadows.into_iter(),
+            false,
         );
+    }
+
+    /// Inline SVG: its content can be visible (and draw shadows anywhere in its box) while the
+    /// `<svg>` itself is `visibility: hidden`, so the whole box counts, whatever its
+    /// visibility.
+    fn visit_image(
+        &mut self,
+        state: &TraversalState,
+        containing_block: PhysicalRect<Au>,
+        fragment: &Arc<ImageFragment>,
+    ) {
+        if !fragment.is_vector {
+            return;
+        }
+        let Some(node) = fragment.base.tag.as_ref().map(|tag| tag.node) else {
+            return;
+        };
+        let style = fragment.style.borrow();
+        let rect = fragment
+            .base
+            .rect()
+            .translate(containing_block.origin.to_vector() - state.origin.to_vector());
+        self.visit_painted(state, node, &style, rect, std::iter::empty(), true);
     }
 }

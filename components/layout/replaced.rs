@@ -564,6 +564,7 @@ impl ReplacedContents {
                         natural_height: self.natural_size.height,
                         selected: self.selected.clone(),
                         prefer_compositor_surface: false,
+                        is_vector: false,
                     }))
                 })
                 .into_iter()
@@ -581,6 +582,7 @@ impl ReplacedContents {
                     natural_height: self.natural_size.height,
                     selected: self.selected.clone(),
                     prefer_compositor_surface: false,
+                    is_vector: false,
                 }))]
             },
             ReplacedContentKind::IFrame(iframe) => {
@@ -628,6 +630,7 @@ impl ReplacedContents {
                     natural_height: self.natural_size.height,
                     selected: self.selected.clone(),
                     prefer_compositor_surface: canvas_compositor_surface(),
+                    is_vector: false,
                 }))]
             },
             ReplacedContentKind::SVGElement {
@@ -686,6 +689,7 @@ impl ReplacedContents {
                             natural_height: self.natural_size.height,
                             selected: self.selected.clone(),
                             prefer_compositor_surface: false,
+                            is_vector: true,
                         }))
                     })
                     .into_iter()
