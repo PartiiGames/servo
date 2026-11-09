@@ -106,15 +106,25 @@ impl AudioContext {
         let pipeline_id = window.pipeline_id();
         let context = AudioContext::new_inherited(options, pipeline_id)?;
         let context = reflect_dom_object_with_proto(cx, Box::new(context), window, proto);
-        context.resume();
+        context.resume(window);
         Ok(context)
     }
 
-    fn resume(&self) {
+    fn resume(&self, window: &Window) {
         // Step 5.
         if self.context.is_allowed_to_start() {
             // Step 6.
             self.context.resume();
+            // DEVIATION, as in Chrome: once the page has had a user gesture (sticky activation),
+            // a context that is allowed to start reads "running" straight from the constructor;
+            // statechange still fires, from a task. Per spec it reads "suspended" until a task
+            // updates it, and Phaser, which marks its sound manager locked when the new context is
+            // "suspended" and waits for another mousedown/keydown to unlock it, stayed locked when
+            // its game was made after the first click (probes/audio-lifecycle phaser.sound).
+            // Without a gesture (every WPT page) the state starts "suspended", as specified.
+            if window.has_sticky_activation() {
+                self.context.set_state_and_notify(AudioContextState::Running);
+            }
         }
     }
 
