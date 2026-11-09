@@ -89,3 +89,16 @@ fn test_file_urls_are_potentially_trustworthy() {
 
     assert!(url.origin().is_potentially_trustworthy())
 }
+
+// Partii: a page on a tuple-origin app scheme (Tauri's tauri://localhost) owns its blob: URLs.
+#[test]
+fn test_blob_url_of_a_tuple_origin_scheme_has_its_origin() {
+    servo_url::register_tuple_origin_scheme("tauri");
+    let page = ServoUrl::parse("tauri://localhost/index.html").unwrap();
+    let blob = ServoUrl::parse("blob:tauri://localhost/2f6e2a3c-6f4b-4d2b-9a59-7f4f0b1c2d3e").unwrap();
+    assert!(blob.origin().is_tuple());
+    assert_eq!(blob.origin(), page.origin());
+    // Other schemes keep the URL standard's rules.
+    assert!(!ServoUrl::parse("blob:partii-unregistered://x/1").unwrap().origin().is_tuple());
+    assert_eq!(ServoUrl::parse("blob:https://a.example/1").unwrap().origin(), ServoUrl::parse("https://a.example/").unwrap().origin());
+}
