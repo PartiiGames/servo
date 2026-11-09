@@ -2582,7 +2582,8 @@ impl Window {
         // `RootedTraceableBox`), and the record sits in this document's module map: the root
         // holds the module, the module its realm's global, the global this document. Drop the
         // map so the page can be collected.
-        self.Document().module_map().borrow_mut().clear();
+        let module_map = std::mem::take(&mut self.Document().module_map().borrow_mut().0);
+        drop(module_map);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>
