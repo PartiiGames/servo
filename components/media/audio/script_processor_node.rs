@@ -312,8 +312,8 @@ mod tests {
                 frame: Tick(i * 128),
                 time: i as f64,
             };
-            // The answer to buffer 0 is held back past its turn (frame 512).
-            if i == 3 {
+            // The answer to buffer 0 (queued at block 1) is held back past its turn (frame 512).
+            if i == 2 {
                 let held = page.lock().unwrap().outputs.pop_front().unwrap();
                 assert_eq!(held.0, 0);
             }
