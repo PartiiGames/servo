@@ -994,6 +994,7 @@ mod gc_stats {
         slices: u32,
         cycle: u64,
         minors: u32,
+        remark: std::time::Duration,
     }
 
     thread_local!(static STATS: RefCell<Option<Stats>> = const { RefCell::new(None) });
@@ -1026,6 +1027,7 @@ mod gc_stats {
                     slices: 0,
                     cycle: 0,
                     minors: 0,
+                    remark: std::time::Duration::ZERO,
                 });
             }
             if let Some(stats) = cell.as_mut() {
@@ -1061,15 +1063,21 @@ mod gc_stats {
                 s.slices = 0;
                 s.cycle_start = Some(Instant::now());
             },
-            GCProgress::GC_SLICE_BEGIN => s.slice_start = Some(Instant::now()),
+            GCProgress::GC_SLICE_BEGIN => {
+                s.slice_start = Some(Instant::now());
+                // The black remark that ran right before this slice (outside it) is part of the pause.
+                s.remark = crate::runtime::gc_scheduler::take_pending_remark();
+            },
             GCProgress::GC_SLICE_END => {
                 let Some(start) = s.slice_start.take() else { return };
                 s.slices += 1;
+                let remark = s.remark.as_secs_f64() * 1000.0;
                 let _ = writeln!(
                     s.out,
-                    "{{\"k\":\"slice\",\"t\":{:.1},\"ms\":{:.3},\"cycle\":{},\"n\":{},\"reason\":\"{:?}\",\"zone\":{},\"bytes\":{}}}",
+                    "{{\"k\":\"slice\",\"t\":{:.1},\"ms\":{:.3},\"remark\":{:.3},\"cycle\":{},\"n\":{},\"reason\":\"{:?}\",\"zone\":{},\"bytes\":{}}}",
                     ms(*START),
-                    ms(start),
+                    ms(start) + remark,
+                    remark,
                     s.cycle,
                     s.slices,
                     reason.unwrap_or(GCReason::NO_REASON),
