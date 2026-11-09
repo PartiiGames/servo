@@ -38,7 +38,8 @@ pub const MAX_BLUR_STD_DEVIATION: f32 = 4.0;
 /// image again. A backdrop-filter blur (edge mode Mirror; nothing else uses it) halves until the
 /// std deviation is at most `PARTII_WR_BACKDROP_BLUR_SIGMA` (default 2.0), so a full-window
 /// `blur(8px)` runs its two blur passes at a quarter of the size in each direction (1/16 of the
-/// pixels) instead of a half, with half as many taps. The blurred image has nothing finer than
+/// pixels) instead of a half, with half as many taps (images of 256+ px a side; see
+/// `blur_should_downscale`). The blurred image has nothing finer than
 /// the lower resolution can hold, so the upscaled result looks the same (Chrome lowers backdrop
 /// filter resolution the same way: cc's backdrop_filter_quality). `=4` is upstream. Other blurs
 /// (filter: blur(), shadows, SVG) keep 4.
@@ -47,6 +48,21 @@ pub fn max_blur_std_deviation(edge_mode: BlurEdgeMode) -> f32 {
         BlurEdgeMode::Mirror => partii_backdrop_blur_sigma(),
         BlurEdgeMode::Duplicate => MAX_BLUR_STD_DEVIATION,
     }
+}
+
+/// The smallest image (each side, device pixels) that the extra backdrop halvings (below
+/// MAX_BLUR_STD_DEVIATION) still apply to: on a small image another pass costs more than the
+/// pixels it saves (each pass is a render target switch; on software GL that dominates).
+const PARTII_EXTRA_HALVING_MIN_SIZE: f32 = 256.0;
+
+/// Whether a blur of `std_dev` over an image of `size` halves the image once more first.
+pub fn blur_should_downscale(std_dev: DeviceSize, size: DeviceSize, edge_mode: BlurEdgeMode) -> bool {
+    if std_dev.width > MAX_BLUR_STD_DEVIATION && std_dev.height > MAX_BLUR_STD_DEVIATION {
+        return true;
+    }
+    let max = max_blur_std_deviation(edge_mode);
+    std_dev.width > max && std_dev.height > max &&
+        size.width >= PARTII_EXTRA_HALVING_MIN_SIZE && size.height >= PARTII_EXTRA_HALVING_MIN_SIZE
 }
 
 fn partii_backdrop_blur_sigma() -> f32 {
@@ -303,10 +319,9 @@ impl BlurTask {
         mut std_dev: DeviceSize,
         edge_mode: BlurEdgeMode,
     ) -> DeviceSize {
-        let max_std_dev = max_blur_std_deviation(edge_mode);
         let mut adjusted_size = original_size;
         let mut scale_factor = 1.0;
-        while std_dev.width > max_std_dev && std_dev.height > max_std_dev {
+        while blur_should_downscale(std_dev, adjusted_size, edge_mode) {
             if adjusted_size.width < MIN_DOWNSCALING_RT_SIZE as f32 ||
                adjusted_size.height < MIN_DOWNSCALING_RT_SIZE as f32 {
                 break;
@@ -1037,9 +1052,11 @@ impl RenderTask {
         let mut downscaling_src_task_id = src_task_id;
         let mut scale_factor = 1.0;
         let mut n_downscales = 1;
-        let max_std_dev = max_blur_std_deviation(edge_mode);
-        while adjusted_blur_std_deviation.width > max_std_dev &&
-              adjusted_blur_std_deviation.height > max_std_dev {
+        while blur_should_downscale(
+            adjusted_blur_std_deviation,
+            adjusted_blur_target_size.to_f32(),
+            edge_mode,
+        ) {
             if adjusted_blur_target_size.width < MIN_DOWNSCALING_RT_SIZE ||
                adjusted_blur_target_size.height < MIN_DOWNSCALING_RT_SIZE {
                 break;
