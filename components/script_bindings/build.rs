@@ -148,12 +148,25 @@ fn find_python() -> Command {
 }
 
 /// Partii: compiles incremental_gc_shim.cpp (a JS::CallbackTracer for the incremental GC's black
-/// remark) against the SpiderMonkey headers of the mozjs_sys build next to ours. mozjs_sys doesn't
-/// export its include directory, so it is found among the sibling build directories (this crate
-/// depends on mozjs_sys directly, so its build script has run). With several, the newest wins.
-/// Without headers (mozjs_sys linked from its prebuilt archive, which ships none) the shim is left
-/// out: `partii_gc_shim` stays unset, the black remark is a no-op and incremental sweeping stays
-/// off, so such builds keep stage-1 behaviour instead of failing.
+/// remark) against the SpiderMonkey headers of the mozjs_sys build we link. mozjs_sys doesn't
+/// export its build directory, so it is found among the sibling build directories (this crate
+/// depends on mozjs_sys directly, so its build script has run, and its output is one of them).
+///
+/// The headers must come from the same SpiderMonkey build as the library, by construction:
+/// - Which build: every sibling `mozjs_sys-*/out/build` with bindings (`jsapi.rs`) counts. Exactly one,
+///   or several with byte-identical bindings; otherwise (two configurations in one target dir) it is
+///   ambiguous and the shim is left out.
+/// - Its headers belong to its library when either
+///   - it was unpacked from a Partii mozjs archive (tools/gc/mozjs-archive.sh in partii-runtime: the
+///     library, bindings and headers of one from-source build, with `partii-mozjs.txt` naming the
+///     bindings' length and FNV-1a hash), and the bindings there still match that note; or
+///   - it is a from-source build (`MOZJS_FROM_SOURCE=1`) that never unpacked servo/mozjs's prebuilt
+///     archive (no `libmozjs-*.tar.gz` next to it; that archive ships no headers and would leave
+///     older ones beside a different library).
+/// - `PARTII_MOZJS_HEADERS=<dir>` overrides all of it (a headers bundle; the caller vouches for it).
+/// Without such headers (servo/mozjs's prebuilt archive) the shim is left out: `partii_gc_shim`
+/// stays unset, the black remark is a no-op and incremental sweeping stays off, so such builds keep
+/// stage-1 behaviour instead of failing. The runtime still compares `sizeof(JSTracer)` as a last check.
 fn build_incremental_gc_shim() {
     println!("cargo::rerun-if-changed=incremental_gc_shim.cpp");
     println!("cargo::rustc-check-cfg=cfg(partii_gc_shim)");
@@ -166,46 +179,35 @@ fn build_incremental_gc_shim() {
         .and_then(|p| p.parent())
         .unwrap()
         .to_path_buf();
-    let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&build_root)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with("mozjs_sys-"))
-        .map(|e| e.path().join("out").join("build"))
-        .filter(|b| {
-            b.join("dist/include/jsapi.h").exists() && b.join("js/src/js-confdefs.h").exists()
-        })
-        .filter_map(|b| {
-            Some((
-                std::fs::metadata(b.join("js/src/js-confdefs.h"))
-                    .ok()?
-                    .modified()
-                    .ok()?,
-                b,
-            ))
-        })
-        .collect();
-    found.sort();
-    // PARTII_MOZJS_HEADERS: a headers bundle (`dist/include` and `js/src/js-confdefs.h`, as a
-    // mozjs_sys build lays them out) from a from-source build of the same mozjs_sys version and
-    // features, for builds that link the prebuilt archive. It wins over sibling builds.
+    let has_headers = |b: &std::path::Path| {
+        b.join("dist/include/jsapi.h").exists() && b.join("js/src/js-confdefs.h").exists()
+    };
     println!("cargo::rerun-if-env-changed=PARTII_MOZJS_HEADERS");
-    if let Some(dir) = env::var_os("PARTII_MOZJS_HEADERS").map(PathBuf::from) {
-        if dir.join("dist/include/jsapi.h").exists() && dir.join("js/src/js-confdefs.h").exists() {
-            found.push((std::time::SystemTime::now(), dir));
+    let chosen = if let Some(dir) = env::var_os("PARTII_MOZJS_HEADERS").map(PathBuf::from) {
+        if has_headers(&dir) {
+            Ok(dir)
         } else {
-            println!(
-                "cargo::warning=incremental_gc_shim: PARTII_MOZJS_HEADERS={} has no dist/include/jsapi.h or js/src/js-confdefs.h",
+            Err(format!(
+                "PARTII_MOZJS_HEADERS={} has no dist/include/jsapi.h or js/src/js-confdefs.h",
                 dir.display()
-            );
+            ))
         }
-    }
-    let Some((_, build_dir)) = found.pop() else {
-        println!(
-            "cargo::warning=incremental_gc_shim: no SpiderMonkey headers under {} (prebuilt mozjs archive?); \
-             built without the black remark (MOZJS_FROM_SOURCE=1 builds it)",
-            build_root.display()
-        );
-        return;
+    } else {
+        choose_mozjs_build(&build_root, has_headers)
+    };
+    let build_dir = match chosen {
+        Ok(dir) => {
+            println!("cargo::rerun-if-changed={}", dir.join("jsapi.rs").display());
+            println!("cargo::rerun-if-changed={}", dir.join("js/src/js-confdefs.h").display());
+            dir
+        },
+        Err(why) => {
+            println!(
+                "cargo::warning=incremental_gc_shim: {why}; built without the black remark \
+                 (MOZJS_FROM_SOURCE=1, or MOZJS_ARCHIVE=<a Partii mozjs archive>, builds it)"
+            );
+            return;
+        },
     };
     println!(
         "cargo::warning=incremental_gc_shim: SpiderMonkey headers from {}",
@@ -234,4 +236,71 @@ fn build_incremental_gc_shim() {
     }
     cc.compile("partii_incremental_gc_shim");
     println!("cargo::rustc-cfg=partii_gc_shim");
+}
+
+/// FNV-1a, 64 bit (tools/gc/mozjs-archive.sh writes the same for jsapi.rs into partii-mozjs.txt).
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// The mozjs_sys build we link and whose headers belong to it, or why there is none (see
+/// `build_incremental_gc_shim`).
+fn choose_mozjs_build(
+    build_root: &std::path::Path,
+    has_headers: impl Fn(&std::path::Path) -> bool,
+) -> Result<PathBuf, String> {
+    let builds: Vec<(PathBuf, Vec<u8>)> = std::fs::read_dir(build_root)
+        .map_err(|e| format!("can't list {}: {e}", build_root.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("mozjs_sys-"))
+        .map(|e| e.path().join("out").join("build"))
+        .filter_map(|b| Some((b.clone(), std::fs::read(b.join("jsapi.rs")).ok()?)))
+        .collect();
+    let Some((_, first)) = builds.first() else {
+        return Err(format!("no mozjs_sys build under {}", build_root.display()));
+    };
+    if builds.iter().any(|(_, bindings)| bindings != first) {
+        return Err(format!(
+            "{} mozjs_sys builds with different bindings under {} (which one is linked is unknown)",
+            builds.len(),
+            build_root.display()
+        ));
+    }
+    let hash = format!("fnv1a64 {:016x} bytes {}", fnv1a64(first), first.len());
+    let mut why = Vec::new();
+    for (b, _) in &builds {
+        if !has_headers(b) {
+            why.push(format!("{}: no headers (servo/mozjs prebuilt archive?)", b.display()));
+            continue;
+        }
+        if let Ok(note) = std::fs::read_to_string(b.join("partii-mozjs.txt")) {
+            if note.lines().any(|l| l.trim() == format!("jsapi.rs {hash}")) {
+                println!("cargo::warning=incremental_gc_shim: Partii mozjs archive in {} ({})", b.display(),
+                    note.lines().next().unwrap_or("").trim());
+                return Ok(b.clone());
+            }
+        }
+        let out = b.parent().unwrap();
+        let unpacked_prebuilt = std::fs::read_dir(out)
+            .map(|d| {
+                d.filter_map(|e| e.ok()).any(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.starts_with("libmozjs-") && n.ends_with(".tar.gz")
+                })
+            })
+            .unwrap_or(true);
+        if !unpacked_prebuilt && b.join("js/src/build").is_dir() {
+            return Ok(b.clone());
+        }
+        why.push(format!(
+            "{}: headers not proven to match the library (servo/mozjs archive unpacked over a source build?)",
+            b.display()
+        ));
+    }
+    Err(why.join("; "))
 }
