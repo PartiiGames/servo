@@ -3505,6 +3505,8 @@ impl ScriptThread {
         self.devtools_state.notify_pipeline_exited(pipeline_id);
         self.pipeline_to_node_ids.borrow_mut().remove(&pipeline_id);
 
+        partii_js_heap_dump::maybe_dump(cx);
+
         debug!("{pipeline_id}: Finished pipeline exit");
     }
 
@@ -5034,4 +5036,64 @@ fn obtain_a_browsing_context(
 /// Partii: one display frame at `shell_refresh_rate_hz` (default 60).
 fn frame_period() -> Duration {
     Duration::from_nanos(1_000_000_000 / pref!(shell_refresh_rate_hz).clamp(1, 1000) as u64)
+}
+
+/// Partii (bd stream), diagnosis: `PARTII_JS_HEAP_DUMP_AT_EXIT=N` runs a full GC at the Nth pipeline
+/// exit on this thread and writes SpiderMonkey's heap graph (`js::DumpHeap`: roots, then every cell
+/// and its edges) to `PARTII_JS_HEAP_DUMP_FILE` (default `/tmp/partii-js-heap-<pid>.txt`), so the
+/// path from a discarded page's Window to whatever still roots it can be read off
+/// (`tools/bd/jsheap-paths.py` in the runtime repo).
+mod partii_js_heap_dump {
+    use std::cell::Cell;
+
+    use js::jsapi::GCReason;
+    use js::rust::wrappers2::JS_GC;
+
+    unsafe extern "C" {
+        // js::DumpHeap(JSContext*, FILE*, js::DumpHeapNurseryBehaviour, mozilla::MallocSizeOf)
+        // (js/public/friend/DumpFunctions.h; not in mozjs's generated bindings).
+        #[link_name = "_ZN2js8DumpHeapEP9JSContextP8_IO_FILENS_24DumpHeapNurseryBehaviourEPFmPKvE"]
+        fn partii_js_dump_heap(
+            cx: *mut js::jsapi::JSContext,
+            fp: *mut libc::FILE,
+            nursery: u32,
+            malloc_size_of: Option<unsafe extern "C" fn(*const libc::c_void) -> usize>,
+        );
+    }
+
+    thread_local!(static EXITS: Cell<u64> = const { Cell::new(0) });
+
+    #[expect(unsafe_code)]
+    pub(super) fn maybe_dump(cx: &mut js::context::JSContext) {
+        let Some(at) = std::env::var("PARTII_JS_HEAP_DUMP_AT_EXIT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        else {
+            return;
+        };
+        let n = EXITS.with(|c| {
+            c.set(c.get() + 1);
+            c.get()
+        });
+        if n != at {
+            return;
+        }
+        let path = std::env::var("PARTII_JS_HEAP_DUMP_FILE")
+            .unwrap_or_else(|_| format!("/tmp/partii-js-heap-{}.txt", std::process::id()));
+        let Ok(cpath) = std::ffi::CString::new(path.clone()) else {
+            return;
+        };
+        unsafe {
+            JS_GC(cx, GCReason::API);
+            let fp = libc::fopen(cpath.as_ptr(), c"w".as_ptr());
+            if fp.is_null() {
+                eprintln!("partii-js-heap-dump: cannot open {path}");
+                return;
+            }
+            // 0 = CollectNurseryBeforeDump.
+            partii_js_dump_heap(cx.raw_cx(), fp, 0, None);
+            libc::fclose(fp);
+        }
+        eprintln!("partii-js-heap-dump: exit {n}: wrote {path}");
+    }
 }
