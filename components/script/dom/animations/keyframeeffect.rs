@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
 use std::ffi::CString;
 use std::ops::ControlFlow;
 use std::ptr::{self, NonNull};
@@ -22,8 +23,9 @@ use js::rust::{
 };
 use rustc_hash::FxHashMap;
 use script_bindings::cell::DomRefCell;
+use script_bindings::codegen::GenericBindings::AnimationEffectBinding::OptionalEffectTiming;
 use script_bindings::codegen::GenericBindings::KeyframeEffectBinding::{
-    BaseKeyframe, CompositeOperationOrAuto,
+    BaseKeyframe, CompositeOperation, CompositeOperationOrAuto,
 };
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::codegen::GenericUnionTypes::UnrestrictedDoubleOrKeyframeEffectOptions;
@@ -34,13 +36,17 @@ use script_bindings::num::Finite;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use script_bindings::root::DomRoot;
 use script_bindings::str::DOMString;
-use style::parser::ParserContext;
+use style::animation::ScriptKeyframe;
+use style::parser::{Parse, ParserContext};
+use style::properties::longhands::animation_composition::computed_value::single_value::T as AnimationComposition;
 use style::properties::generated::PropertyDeclaration;
 use style::properties::{
     Importance, LonghandId, NonCustomPropertyId, PropertyDeclarationBlock, PropertyId,
     SourcePropertyDeclaration,
 };
 use style::stylesheets::CssRuleType;
+use style::values::computed::TimingFunction as ComputedTimingFunction;
+use style::values::specified::TimingFunction;
 use style_traits::{CssWriter, ParsingMode, ToCss};
 
 use crate::css::css::parser_context_for_document;
@@ -49,6 +55,7 @@ use crate::dom::animationeffect::AnimationEffect;
 use crate::dom::bindings::codegen::Bindings::KeyframeEffectBinding::{
     BaseComputedKeyframe, KeyframeEffectMethods,
 };
+use crate::dom::bindings::codegen::UnionTypes::UnrestrictedDoubleOrString;
 use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::element::Element;
 use crate::dom::window::Window;
@@ -68,6 +75,13 @@ pub(crate) struct KeyframeEffect {
 
     /// <https://drafts.csswg.org/web-animations-1/#keyframe>
     keyframes: DomRefCell<Vec<Keyframe>>,
+
+    /// <https://drafts.csswg.org/web-animations-1/#effect-composite-operation>
+    composite: Cell<CompositeOperation>,
+
+    /// Bumped whenever the keyframes or the target change, so the animation knows when style
+    /// has to recompute the keyframe values.
+    generation: Cell<u64>,
 }
 
 impl KeyframeEffect {
@@ -76,7 +90,73 @@ impl KeyframeEffect {
             animationeffect: AnimationEffect::new_inherited(window),
             target_element: Default::default(),
             keyframes: Default::default(),
+            composite: Cell::new(CompositeOperation::Replace),
+            generation: Cell::new(0),
         }
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#effect-target-target-element>
+    pub(crate) fn target(&self) -> Option<DomRoot<Element>> {
+        self.target_element.get()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.get()
+    }
+
+    pub(crate) fn composite_for_style(&self) -> AnimationComposition {
+        composite_for_style(self.composite.get())
+    }
+
+    fn changed(&self, cx: &mut JSContext) {
+        self.generation.set(self.generation.get() + 1);
+        if let Some(animation) = self.upcast::<AnimationEffect>().animation() {
+            animation.effect_timing_changed(cx);
+        }
+    }
+
+    /// The keyframes as style uses them: computed offsets, parsed easing functions, one
+    /// declaration block per keyframe.
+    /// <https://drafts.csswg.org/web-animations-1/#compute-missing-keyframe-offsets>
+    pub(crate) fn keyframes_for_style(&self) -> Vec<ScriptKeyframe> {
+        let keyframes = self.keyframes.borrow();
+        let offsets =
+            compute_missing_keyframe_offsets(&keyframes.iter().map(|k| k.offset).collect::<Vec<_>>());
+        let document = self.upcast::<AnimationEffect>().window().Document();
+        let urlextradata = document.url().into_url().into();
+        let parser_context = parser_context_for_document(
+            &document,
+            CssRuleType::Style,
+            ParsingMode::DEFAULT,
+            &urlextradata,
+        );
+        keyframes
+            .iter()
+            .zip(offsets)
+            .map(|(keyframe, offset)| {
+                let mut declarations = PropertyDeclarationBlock::new();
+                for pair in keyframe.declarations.iter() {
+                    for declaration in pair.block.declarations() {
+                        declarations.push(declaration.clone(), Importance::Normal);
+                    }
+                }
+                ScriptKeyframe {
+                    offset,
+                    timing_function: parse_easing(&keyframe.easing_function.str(), &parser_context)
+                        .map(|easing| easing.to_computed_value_without_context())
+                        .unwrap_or_else(ComputedTimingFunction::linear),
+                    composite: match keyframe.composite {
+                        CompositeOperationOrAuto::Auto => None,
+                        CompositeOperationOrAuto::Replace => Some(AnimationComposition::Replace),
+                        CompositeOperationOrAuto::Add => Some(AnimationComposition::Add),
+                        CompositeOperationOrAuto::Accumulate => {
+                            Some(AnimationComposition::Accumulate)
+                        },
+                    },
+                    declarations,
+                }
+            })
+            .collect()
     }
 
     fn new_with_proto(
@@ -100,8 +180,8 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         _: Option<HandleObject>,
         target: Option<&Element>,
         keyframes: *mut JSObject,
-        _options: UnrestrictedDoubleOrKeyframeEffectOptions,
-    ) -> DomRoot<KeyframeEffect> {
+        options: UnrestrictedDoubleOrKeyframeEffectOptions,
+    ) -> Fallible<DomRoot<KeyframeEffect>> {
         // Step 1. Create a new KeyframeEffect object, effect.
         let effect = KeyframeEffect::new(cx, window);
 
@@ -111,25 +191,93 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         // TODO: Step 3. Set the target pseudo-selector to the result corresponding to
         // the first matching condition below:
 
-        // TODO: Step 4. Let timing input be the result corresponding to the first matching
+        // Step 4. Let timing input be the result corresponding to the first matching
         // condition below:
+        // If options is a KeyframeEffectOptions object, let timing input be options.
+        // Otherwise, if options is a double, let timing input be a new EffectTiming object with all
+        // members set to their default values and duration set to options.
+        let (timing, composite) = match &options {
+            UnrestrictedDoubleOrKeyframeEffectOptions::UnrestrictedDouble(duration) => (
+                OptionalEffectTiming {
+                    delay: Some(Finite::wrap(0.)),
+                    endDelay: Some(Finite::wrap(0.)),
+                    fill: None,
+                    iterationStart: Some(Finite::wrap(0.)),
+                    iterations: Some(1.),
+                    duration: Some(UnrestrictedDoubleOrString::UnrestrictedDouble(*duration)),
+                    direction: None,
+                    easing: None,
+                },
+                CompositeOperation::Replace,
+            ),
+            UnrestrictedDoubleOrKeyframeEffectOptions::KeyframeEffectOptions(options) => {
+                let timing = &options.parent;
+                (
+                    OptionalEffectTiming {
+                        delay: Some(timing.delay),
+                        endDelay: Some(timing.endDelay),
+                        fill: Some(timing.fill),
+                        iterationStart: Some(timing.iterationStart),
+                        iterations: Some(timing.iterations),
+                        duration: Some(match &timing.duration {
+                            UnrestrictedDoubleOrString::UnrestrictedDouble(duration) => {
+                                UnrestrictedDoubleOrString::UnrestrictedDouble(*duration)
+                            },
+                            UnrestrictedDoubleOrString::String(string) => {
+                                UnrestrictedDoubleOrString::String(string.clone())
+                            },
+                        }),
+                        direction: Some(timing.direction),
+                        easing: Some(timing.easing.clone()),
+                    },
+                    options.composite,
+                )
+            },
+        };
 
         // Step 5. Call the procedure to update the timing properties of an animation effect of
         // effect from timing input.
         // If that procedure causes an exception to be thrown, propagate the exception and abort this procedure.
+        effect
+            .upcast::<AnimationEffect>()
+            .update_the_timing_properties(&timing)?;
 
-        // TODO: Step 6. If options is a KeyframeEffectOptions object, assign the composite property of effect
+        // Step 6. If options is a KeyframeEffectOptions object, assign the composite property of effect
         // to the corresponding value from options.
-        //
-        // When assigning this property, the error-handling defined for the corresponding setter on the
-        //  KeyframeEffect interface is applied. If the setter requires an exception to be thrown for the value
-        //  specified by options, this procedure must throw the same exception and abort all further steps.
+        effect.composite.set(composite);
 
         // Step 7. Initialize the set of keyframes by performing the procedure defined for setKeyframes()
         // passing keyframes as the input.
-        effect.SetKeyframes(cx, keyframes);
+        let document = window.Document();
+        *effect.keyframes.safe_borrow_mut(cx.no_gc()) =
+            process_a_keyframes_argument(cx, &document, keyframes)?;
 
-        effect
+        Ok(effect)
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-target>
+    fn GetTarget(&self) -> Option<DomRoot<Element>> {
+        self.target_element.get()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-target>
+    fn SetTarget(&self, cx: &mut JSContext, target: Option<&Element>) {
+        if self.target_element.get().as_deref() == target {
+            return;
+        }
+        self.target_element.set(target);
+        self.changed(cx);
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-composite>
+    fn Composite(&self) -> CompositeOperation {
+        self.composite.get()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-composite>
+    fn SetComposite(&self, cx: &mut JSContext, composite: CompositeOperation) {
+        self.composite.set(composite);
+        self.changed(cx);
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-getkeyframes>
@@ -153,9 +301,11 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         // the result of applying the procedure compute missing keyframe offsets to the keyframes for this keyframe effect.
         // TODO: We don't compute missing keyframe offsets yet. But that will likely happen in stylo, not here.
         let keyframes = self.keyframes.borrow();
+        let computed_offsets =
+            compute_missing_keyframe_offsets(&keyframes.iter().map(|k| k.offset).collect::<Vec<_>>());
 
         // Step 3. For each keyframe in keyframes perform the following steps:
-        for keyframe in keyframes.iter() {
+        for (keyframe, computed_offset) in keyframes.iter().zip(computed_offsets) {
             // Step 3.1 Initialize a dictionary object, output keyframe, using the following definition:
             // TODO Step 3.2 Set the offset, computedOffset, easing, and composite members of output keyframe
             // to the respective keyframe offset, computed keyframe offset, keyframe-specific easing function,
@@ -163,9 +313,7 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
             let base_keyframe = BaseComputedKeyframe {
                 composite: keyframe.composite,
                 offset: keyframe.offset,
-                // FIXME: We don't post-process the offset of keyframes to find suitable offset values for null
-                // keyframe offsets yet, so we just use the offset as-is.
-                computedOffset: keyframe.offset,
+                computedOffset: Finite::wrap(computed_offset),
                 easing: keyframe.easing_function.clone(),
             };
             rooted!(&in(cx) let mut output_keyframe = unsafe { JS_NewObject(cx, ptr::null()) });
@@ -237,15 +385,15 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-setkeyframes>
-    fn SetKeyframes(&self, cx: &mut JSContext, keyframes: *mut JSObject) {
+    fn SetKeyframes(&self, cx: &mut JSContext, keyframes: *mut JSObject) -> Fallible<()> {
         // > This effect’s set of keyframes is replaced with the result of performing the procedure to
         // > process a keyframes argument. If that procedure throws an exception, this effect’s
         // > keyframes are not modified.
         let document = self.upcast::<AnimationEffect>().window().Document();
-        let Ok(keyframes) = process_a_keyframes_argument(cx, &document, keyframes) else {
-            return;
-        };
+        let keyframes = process_a_keyframes_argument(cx, &document, keyframes)?;
         *self.keyframes.safe_borrow_mut(cx.no_gc()) = keyframes;
+        self.changed(cx);
+        Ok(())
     }
 }
 
@@ -578,4 +726,56 @@ fn animation_property_name_to_idl_attribute_name(property_name: &str) -> String 
     }
 
     idl_attribute_name
+}
+
+fn composite_for_style(composite: CompositeOperation) -> AnimationComposition {
+    match composite {
+        CompositeOperation::Replace => AnimationComposition::Replace,
+        CompositeOperation::Add => AnimationComposition::Add,
+        CompositeOperation::Accumulate => AnimationComposition::Accumulate,
+    }
+}
+
+fn parse_easing(input: &str, parser_context: &ParserContext<'_>) -> Option<TimingFunction> {
+    let mut parser = Parser::new(input);
+    parser
+        .parse_entirely(|parser| TimingFunction::parse(parser_context, parser))
+        .ok()
+}
+
+/// <https://drafts.csswg.org/web-animations-1/#compute-missing-keyframe-offsets>
+fn compute_missing_keyframe_offsets(offsets: &[Option<Finite<f64>>]) -> Vec<f64> {
+    let mut computed: Vec<Option<f64>> = offsets.iter().map(|offset| offset.map(|o| *o)).collect();
+    // Step 2. If keyframes contains more than one keyframe and the computed keyframe offset of the
+    // first keyframe in keyframes is null, set the computed keyframe offset of the first keyframe to 0.
+    if computed.len() > 1 && computed[0].is_none() {
+        computed[0] = Some(0.);
+    }
+    // Step 3. If the computed keyframe offset of the last keyframe in keyframes is null, set its
+    // computed keyframe offset to 1.
+    if let Some(last) = computed.last_mut() {
+        if last.is_none() {
+            *last = Some(1.);
+        }
+    }
+    // Step 4. Spread the keyframes with null offsets evenly between their neighbours.
+    let mut index = 0;
+    while index < computed.len() {
+        if computed[index].is_some() {
+            index += 1;
+            continue;
+        }
+        let previous = index - 1;
+        let next = (index..computed.len())
+            .find(|i| computed[*i].is_some())
+            .unwrap_or(computed.len() - 1);
+        let start = computed[previous].unwrap_or(0.);
+        let end = computed[next].unwrap_or(1.);
+        let span = (next - previous) as f64;
+        for i in index..next {
+            computed[i] = Some(start + (end - start) * (i - previous) as f64 / span);
+        }
+        index = next;
+    }
+    computed.into_iter().map(|offset| offset.unwrap_or(0.)).collect()
 }

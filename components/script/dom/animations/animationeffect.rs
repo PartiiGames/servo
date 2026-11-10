@@ -4,6 +4,7 @@
 
 use cssparser::Parser;
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::AnimationEffectBinding::{
     AnimationEffectMethods, ComputedEffectTiming, EffectTiming, FillMode, OptionalEffectTiming,
@@ -15,7 +16,10 @@ use script_bindings::num::Finite;
 use script_bindings::reflector::Reflector;
 use script_bindings::root::Dom;
 use script_bindings::str::DOMString;
+use style::animation::ScriptAnimationTiming;
 use style::parser::Parse;
+use style::properties::longhands::animation_direction::computed_value::single_value::T as AnimationDirection;
+use style::properties::longhands::animation_fill_mode::computed_value::single_value::T as AnimationFillMode;
 use style::stylesheets::CssRuleType;
 use style::values::generics::easing::TimingKeyword;
 use style::values::specified::TimingFunction;
@@ -23,7 +27,9 @@ use style_traits::{ParsingMode, ToCss};
 
 use crate::css::css::parser_context_for_document;
 use crate::dom::Window;
+use crate::dom::animation::Animation;
 use crate::dom::bindings::codegen::UnionTypes::UnrestrictedDoubleOrString;
+use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 
 /// <https://drafts.csswg.org/web-animations-1/#animationeffect>
 #[dom_struct]
@@ -34,6 +40,9 @@ pub(crate) struct AnimationEffect {
     window: Dom<Window>,
 
     specified_timing_properties: DomRefCell<SpecifiedTimingProperties>,
+
+    /// <https://drafts.csswg.org/web-animations-1/#animation-effect-associated-animation>
+    animation: MutNullableDom<Animation>,
 }
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
@@ -83,11 +92,46 @@ impl AnimationEffect {
                 playback_direction: PlaybackDirection::Normal,
                 easing_function: TimingFunction::Keyword(TimingKeyword::Linear),
             }),
+            animation: Default::default(),
         }
     }
 
     pub(crate) fn window(&self) -> &Window {
         &self.window
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#animation-effect-associated-animation>
+    pub(crate) fn animation(&self) -> Option<DomRoot<Animation>> {
+        self.animation.get()
+    }
+
+    pub(crate) fn set_animation(&self, animation: Option<&Animation>) {
+        self.animation.set(animation);
+    }
+
+    /// The timing of this effect as style samples it (seconds; `auto` resolved).
+    pub(crate) fn script_timing(&self) -> ScriptAnimationTiming {
+        let timing = self.specified_timing_properties.borrow();
+        ScriptAnimationTiming {
+            delay: *timing.start_delay / 1000.,
+            end_delay: *timing.end_delay / 1000.,
+            duration: timing.iteration_duration.computed_value() / 1000.,
+            iterations: timing.iteration_count,
+            iteration_start: *timing.iteration_start,
+            direction: match timing.playback_direction {
+                PlaybackDirection::Normal => AnimationDirection::Normal,
+                PlaybackDirection::Reverse => AnimationDirection::Reverse,
+                PlaybackDirection::Alternate => AnimationDirection::Alternate,
+                PlaybackDirection::Alternate_reverse => AnimationDirection::AlternateReverse,
+            },
+            fill: match timing.fill_mode {
+                FillMode::None | FillMode::Auto => AnimationFillMode::None,
+                FillMode::Forwards => AnimationFillMode::Forwards,
+                FillMode::Backwards => AnimationFillMode::Backwards,
+                FillMode::Both => AnimationFillMode::Both,
+            },
+            easing: timing.easing_function.to_computed_value_without_context(),
+        }
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#update-the-timing-properties-of-an-animation-effect>
@@ -240,6 +284,14 @@ impl AnimationEffectMethods<crate::DomTypeHolder> for AnimationEffect {
     /// <https://drafts.csswg.org/web-animations-1/#dom-animationeffect-getcomputedtiming>
     fn GetComputedTiming(&self) -> ComputedEffectTiming {
         // > Returns the calculated timing properties for this animation effect.
+        let script_timing = self.script_timing();
+        let (local_time, playback_rate) = self
+            .animation
+            .get()
+            .map_or((None, 1.), |animation| {
+                (animation.current_time(), animation.playback_rate())
+            });
+        let computed = script_timing.compute(local_time, playback_rate);
         let specified_timing_properties = self.specified_timing_properties.borrow();
 
         // > while getTiming() can return the string auto, getComputedTiming() must return a number
@@ -274,20 +326,23 @@ impl AnimationEffectMethods<crate::DomTypeHolder> for AnimationEffect {
                 iterationStart: specified_timing_properties.iteration_start,
                 iterations: specified_timing_properties.iteration_count,
             },
-            // FIXME: These are just placeholder values
-            endTime: None,
-            activeDuration: None,
-            localTime: None,
-            progress: None,
-            currentIteration: None,
+            endTime: Some(script_timing.end_time() * 1000.),
+            activeDuration: Some(script_timing.active_duration() * 1000.),
+            localTime: local_time.and_then(|time| Finite::new(time * 1000.)),
+            progress: computed.progress.and_then(Finite::new),
+            currentIteration: computed.current_iteration,
         }
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#dom-animationeffect-updatetiming>
-    fn UpdateTiming(&self, timing: &OptionalEffectTiming) -> Fallible<()> {
+    fn UpdateTiming(&self, cx: &mut JSContext, timing: &OptionalEffectTiming) -> Fallible<()> {
         // > Updates the specified timing properties of this animation effect by performing the procedure
         // > to update the timing properties of an animation effect passing the timing parameter as input.
-        self.update_the_timing_properties(timing)
+        self.update_the_timing_properties(timing)?;
+        if let Some(animation) = self.animation.get() {
+            animation.effect_timing_changed(cx);
+        }
+        Ok(())
     }
 }
 

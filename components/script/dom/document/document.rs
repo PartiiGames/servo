@@ -5297,6 +5297,8 @@ impl Document {
         let current_timeline_value = self.current_animation_timeline_value();
         self.animation_manager
             .update_for_new_timeline_value(&self.window, current_timeline_value);
+        self.animation_manager
+            .update_script_animations(cx, current_timeline_value);
         self.maybe_mark_animating_nodes_as_dirty(cx.no_gc());
 
         // > 3. Perform a microtask checkpoint.

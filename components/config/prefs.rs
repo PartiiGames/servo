@@ -252,10 +252,10 @@ pub struct Preferences {
     pub dom_transient_activation_duration_ms: i64,
     // feature: Web Animations | #36950 | Web/API/Web_Animations_API
     pub dom_web_animations_enabled: bool,
-    /// Expose `Element.animate()`. Separate from `dom_web_animations_enabled` because the
-    /// `Animation` it returns cannot play, pause or seek yet: pages and libraries that
-    /// feature-detect `'animate' in Element.prototype` would take a path that then throws,
-    /// instead of falling back to CSS animations or requestAnimationFrame.
+    /// Expose `Element.animate()` and `Element.getAnimations()`. Separate from
+    /// `dom_web_animations_enabled`: pages and libraries feature-detect
+    /// `'animate' in Element.prototype`, so it is only on where the returned `Animation` plays
+    /// (keyframes sampled by style, play/pause/seek/finish/cancel/reverse, finished promise).
     pub dom_web_animations_animate_enabled: bool,
     /// Expose WebGL's `drawingBufferToneMapping()` (a ColorWeb-CG proposal, not in the WebGL
     /// spec: the Khronos conformance suite counts any extra context method as a failure).

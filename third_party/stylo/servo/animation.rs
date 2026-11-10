@@ -17,8 +17,8 @@ use crate::properties::longhands::animation_fill_mode::computed_value::single_va
 use crate::properties::longhands::animation_play_state::computed_value::single_value::T as AnimationPlayState;
 use crate::properties::AnimationDeclarations;
 use crate::properties::{
-    ComputedValues, Importance, LonghandId, PropertyDeclarationBlock, PropertyDeclarationId,
-    PropertyDeclarationIdSet,
+    ComputedValues, Importance, LonghandId, OwnedPropertyDeclarationId, PropertyDeclarationBlock,
+    PropertyDeclarationId, PropertyDeclarationIdSet,
 };
 use crate::rule_tree::{CascadeLevel, CascadeOrigin, RuleCascadeFlags};
 use crate::selector_parser::PseudoElement;
@@ -1184,6 +1184,9 @@ pub struct ElementAnimationSet {
     /// The transitions for this element.
     pub transitions: Vec<Transition>,
 
+    /// The script-created animations of this element, in composite order (oldest first).
+    pub script_animations: Vec<ScriptAnimation>,
+
     /// Whether or not this ElementAnimationSet has had animations or transitions
     /// which have been added, removed, or had their state changed.
     pub dirty: bool,
@@ -1241,7 +1244,7 @@ impl ElementAnimationSet {
     /// Whether this `ElementAnimationSet` is empty, which means it doesn't
     /// hold any animations in any state.
     pub fn is_empty(&self) -> bool {
-        self.animations.is_empty() && self.transitions.is_empty()
+        self.animations.is_empty() && self.transitions.is_empty() && self.script_animations.is_empty()
     }
 
     /// Whether or not this state needs animation ticks for its transitions
@@ -1254,6 +1257,10 @@ impl ElementAnimationSet {
                 .transitions
                 .iter()
                 .any(|transition| transition.state.needs_to_be_ticked())
+            || self
+                .script_animations
+                .iter()
+                .any(|animation| animation.needs_to_be_ticked())
     }
 
     /// The number of running animations and transitions for this `ElementAnimationSet`.
@@ -1267,13 +1274,109 @@ impl ElementAnimationSet {
                 .iter()
                 .filter(|transition| transition.state.needs_to_be_ticked())
                 .count()
+            + self
+                .script_animations
+                .iter()
+                .filter(|animation| animation.needs_to_be_ticked())
+                .count()
     }
 
     /// If this `ElementAnimationSet` has any any active animations.
     pub fn has_active_animation(&self) -> bool {
-        self.animations
+        !self.script_animations.is_empty()
+            || self
+                .animations
+                .iter()
+                .any(|animation| animation.state != AnimationState::Canceled)
+    }
+
+    /// Whether any script-created animation still needs its keyframe values computed.
+    pub fn script_animations_need_compute(&self) -> bool {
+        self.script_animations
             .iter()
-            .any(|animation| animation.state != AnimationState::Canceled)
+            .any(|animation| animation.computed.is_none())
+    }
+
+    /// Compute the keyframe values of new or changed script-created animations against
+    /// `base_style`. Marks the set dirty if anything was computed.
+    pub fn compute_script_animations<E>(
+        &mut self,
+        element: E,
+        context: &SharedStyleContext,
+        base_style: &Arc<ComputedValues>,
+        resolver: &mut StyleResolverForElement<E>,
+    ) where
+        E: TElement,
+    {
+        for animation in self.script_animations.iter_mut() {
+            if animation.computed.is_none() {
+                animation.compute(element, context, base_style, resolver);
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Add or replace (by id) a script-created animation. A replacement keeps the computed
+    /// keyframe values unless `keyframes_changed`.
+    pub fn set_script_animation(&mut self, mut animation: ScriptAnimation, keyframes_changed: bool) {
+        self.dirty = true;
+        match self
+            .script_animations
+            .iter_mut()
+            .find(|existing| existing.id == animation.id)
+        {
+            Some(existing) => {
+                if !keyframes_changed {
+                    animation.computed = existing.computed.take();
+                }
+                *existing = animation;
+            },
+            None => self.script_animations.push(animation),
+        }
+    }
+
+    /// Remove a script-created animation. Returns true if it was there.
+    pub fn remove_script_animation(&mut self, id: u64) -> bool {
+        let before = self.script_animations.len();
+        self.script_animations.retain(|animation| animation.id != id);
+        let removed = self.script_animations.len() != before;
+        self.dirty |= removed;
+        removed
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#removing-replaced-animations>: the ids of
+    /// finished script animations (not in `persisted`) whose every property is also animated by
+    /// a later finished one. Their effects are removed from this set.
+    pub fn remove_replaced_script_animations(&mut self, now: f64, persisted: &[u64]) -> Vec<u64> {
+        let mut covered: Vec<OwnedPropertyDeclarationId> = Vec::new();
+        let mut removed = Vec::new();
+        for animation in self.script_animations.iter().rev() {
+            if animation.computed.is_none() || !animation.is_finished(now) {
+                continue;
+            }
+            let properties: Vec<OwnedPropertyDeclarationId> = animation
+                .computed_properties()
+                .map(|id| id.to_owned())
+                .collect();
+            if !persisted.contains(&animation.id)
+                && !properties.is_empty()
+                && properties.iter().all(|id| covered.contains(id))
+            {
+                removed.push(animation.id);
+                continue;
+            }
+            for id in properties {
+                if !covered.contains(&id) {
+                    covered.push(id);
+                }
+            }
+        }
+        if !removed.is_empty() {
+            self.script_animations
+                .retain(|animation| !removed.contains(&animation.id));
+            self.dirty = true;
+        }
+        removed
     }
 
     /// If this `ElementAnimationSet` has any any active transitions.
@@ -1606,6 +1709,9 @@ impl ElementAnimationSet {
         for animation in &self.animations {
             animation.get_property_declaration_at_time(now, &mut map);
         }
+        for animation in &self.script_animations {
+            animation.get_property_declaration_at_time(now, &mut map);
+        }
 
         Some(map)
     }
@@ -1919,4 +2025,468 @@ pub fn maybe_start_animations<E>(
 
         animation_state.animations.push(new_animation);
     }
+}
+
+/// The phase of a script-created animation effect.
+/// <https://drafts.csswg.org/web-animations-1/#animation-effect-phases-and-states>
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq)]
+pub enum ScriptAnimationPhase {
+    /// Before the active interval.
+    Before,
+    /// Inside the active interval.
+    Active,
+    /// After the active interval.
+    After,
+}
+
+/// The specified timing of a script-created (Web Animations API) animation effect. Times are
+/// in seconds, like the animation timeline value Servo uses for CSS animations.
+#[derive(Clone, Debug, MallocSizeOf)]
+pub struct ScriptAnimationTiming {
+    /// <https://drafts.csswg.org/web-animations-1/#start-delay>
+    pub delay: f64,
+    /// <https://drafts.csswg.org/web-animations-1/#end-delay>
+    pub end_delay: f64,
+    /// <https://drafts.csswg.org/web-animations-1/#iteration-duration>
+    pub duration: f64,
+    /// <https://drafts.csswg.org/web-animations-1/#iteration-count>
+    pub iterations: f64,
+    /// <https://drafts.csswg.org/web-animations-1/#iteration-start>
+    pub iteration_start: f64,
+    /// <https://drafts.csswg.org/web-animations-1/#playback-direction>
+    pub direction: AnimationDirection,
+    /// <https://drafts.csswg.org/web-animations-1/#fill-mode> (`auto` is `none` for keyframe effects).
+    pub fill: AnimationFillMode,
+    /// <https://drafts.csswg.org/web-animations-1/#animation-effect-easing-function>
+    pub easing: TimingFunction,
+}
+
+/// The calculated timing of a script-created animation effect at some local time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScriptComputedTiming {
+    /// The phase, or `None` when the local time is unresolved (idle).
+    pub phase: Option<ScriptAnimationPhase>,
+    /// <https://drafts.csswg.org/web-animations-1/#active-time>
+    pub active_time: Option<f64>,
+    /// <https://drafts.csswg.org/web-animations-1/#transformed-progress>
+    pub progress: Option<f64>,
+    /// <https://drafts.csswg.org/web-animations-1/#current-iteration>
+    pub current_iteration: Option<f64>,
+}
+
+impl Default for ScriptAnimationTiming {
+    fn default() -> Self {
+        Self {
+            delay: 0.,
+            end_delay: 0.,
+            duration: 0.,
+            iterations: 1.,
+            iteration_start: 0.,
+            direction: AnimationDirection::Normal,
+            fill: AnimationFillMode::None,
+            easing: TimingFunction::linear(),
+        }
+    }
+}
+
+impl ScriptAnimationTiming {
+    /// <https://drafts.csswg.org/web-animations-1/#active-duration>
+    pub fn active_duration(&self) -> f64 {
+        if self.duration == 0. || self.iterations == 0. {
+            0.
+        } else {
+            self.duration * self.iterations
+        }
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#end-time>
+    pub fn end_time(&self) -> f64 {
+        (self.delay + self.active_duration() + self.end_delay).max(0.)
+    }
+
+    /// The Web Animations timing model for one effect: phase, active time, current iteration and
+    /// transformed progress at `local_time`.
+    /// <https://drafts.csswg.org/web-animations-1/#timing-model>
+    pub fn compute(&self, local_time: Option<f64>, playback_rate: f64) -> ScriptComputedTiming {
+        use ScriptAnimationPhase::*;
+        let Some(local_time) = local_time else {
+            return ScriptComputedTiming::default();
+        };
+
+        let active_duration = self.active_duration();
+        let end_time = self.end_time();
+        let before_active_boundary = self.delay.min(end_time).max(0.);
+        let active_after_boundary = (self.delay + active_duration).min(end_time).max(0.);
+        let going_backwards = playback_rate < 0.;
+        let phase = if local_time < before_active_boundary ||
+            (going_backwards && local_time == before_active_boundary)
+        {
+            Before
+        } else if local_time > active_after_boundary ||
+            (!going_backwards && local_time == active_after_boundary)
+        {
+            After
+        } else {
+            Active
+        };
+
+        let fills_backwards = matches!(
+            self.fill,
+            AnimationFillMode::Backwards | AnimationFillMode::Both
+        );
+        let fills_forwards = matches!(
+            self.fill,
+            AnimationFillMode::Forwards | AnimationFillMode::Both
+        );
+        let active_time = match phase {
+            Before => fills_backwards.then(|| (local_time - self.delay).max(0.)),
+            Active => Some(local_time - self.delay),
+            After => fills_forwards.then(|| (local_time - self.delay).min(active_duration).max(0.)),
+        };
+        let mut result = ScriptComputedTiming {
+            phase: Some(phase),
+            active_time,
+            ..Default::default()
+        };
+        let Some(active_time) = active_time else {
+            return result;
+        };
+
+        // <https://drafts.csswg.org/web-animations-1/#overall-progress>
+        let overall_progress = if self.duration == 0. {
+            if phase == Before {
+                self.iteration_start
+            } else {
+                self.iteration_start + self.iterations
+            }
+        } else {
+            active_time / self.duration + self.iteration_start
+        };
+
+        // <https://drafts.csswg.org/web-animations-1/#simple-iteration-progress>
+        let mut simple_iteration_progress = if overall_progress.is_infinite() {
+            self.iteration_start % 1.
+        } else {
+            overall_progress % 1.
+        };
+        if simple_iteration_progress == 0. &&
+            matches!(phase, Active | After) &&
+            active_time == active_duration &&
+            self.iterations != 0.
+        {
+            simple_iteration_progress = 1.;
+        }
+
+        // <https://drafts.csswg.org/web-animations-1/#current-iteration>
+        let current_iteration = if phase == After && self.iterations.is_infinite() {
+            f64::INFINITY
+        } else if simple_iteration_progress == 1. {
+            overall_progress.floor() - 1.
+        } else {
+            overall_progress.floor()
+        };
+
+        // <https://drafts.csswg.org/web-animations-1/#directed-progress>
+        let forwards = match self.direction {
+            AnimationDirection::Normal => true,
+            AnimationDirection::Reverse => false,
+            AnimationDirection::Alternate | AnimationDirection::AlternateReverse => {
+                let mut d = current_iteration;
+                if self.direction == AnimationDirection::AlternateReverse {
+                    d += 1.;
+                }
+                d.is_infinite() || d % 2. == 0.
+            },
+        };
+        let directed_progress = if forwards {
+            simple_iteration_progress
+        } else {
+            1. - simple_iteration_progress
+        };
+
+        // <https://drafts.csswg.org/web-animations-1/#transformed-progress>
+        let before_flag = if (phase == Before && forwards) || (phase == After && !forwards) {
+            BeforeFlag::Set
+        } else {
+            BeforeFlag::Unset
+        };
+        let epsilon = if self.duration > 0. && self.duration.is_finite() {
+            1. / (200. * self.duration)
+        } else {
+            1e-7
+        };
+        result.progress = Some(
+            self.easing
+                .calculate_output(directed_progress, before_flag, epsilon),
+        );
+        result.current_iteration = Some(current_iteration);
+        result
+    }
+}
+
+/// One keyframe of a script-created animation, with its offset already computed.
+#[derive(Clone, Debug, MallocSizeOf)]
+pub struct ScriptKeyframe {
+    /// <https://drafts.csswg.org/web-animations-1/#computed-keyframe-offset>
+    pub offset: f64,
+    /// The easing between this keyframe and the next.
+    pub timing_function: TimingFunction,
+    /// The keyframe's composite operation, `None` for `auto` (the effect's composite operation).
+    pub composite: Option<AnimationComposition>,
+    /// The specified values of this keyframe.
+    #[ignore_malloc_size_of = "Arcs inside"]
+    pub declarations: PropertyDeclarationBlock,
+}
+
+/// A computed keyframe value of one property of a script-created animation.
+#[derive(Clone, Debug, MallocSizeOf)]
+struct ScriptPropertyKeyframe {
+    offset: f64,
+    timing_function: TimingFunction,
+    value: AnimationValue,
+}
+
+/// An animation created by script (`Element.animate()`, `new Animation(new KeyframeEffect(..))`).
+/// Script owns its playback state and replaces this copy whenever it changes; style samples it
+/// in the animations cascade level, after (above) the CSS animations of the element.
+#[derive(Clone, Debug, MallocSizeOf)]
+pub struct ScriptAnimation {
+    /// A unique id, assigned by script.
+    pub id: u64,
+    /// The keyframes, sorted by computed offset.
+    pub keyframes: Vec<ScriptKeyframe>,
+    /// <https://drafts.csswg.org/web-animations-1/#effect-composite-operation>
+    pub composite: AnimationComposition,
+    /// The effect timing.
+    pub timing: ScriptAnimationTiming,
+    /// <https://drafts.csswg.org/web-animations-1/#animation-start-time>, timeline seconds.
+    pub start_time: Option<f64>,
+    /// <https://drafts.csswg.org/web-animations-1/#animation-hold-time>, seconds.
+    pub hold_time: Option<f64>,
+    /// <https://drafts.csswg.org/web-animations-1/#playback-rate>
+    pub playback_rate: f64,
+    /// Per animated property, the computed keyframe values (with the underlying value
+    /// composited in and the implicit 0% / 100% keyframes added). `None` until style computes it.
+    computed: Option<Box<[Box<[ScriptPropertyKeyframe]>]>>,
+}
+
+impl ScriptAnimation {
+    /// A new script animation whose keyframe values style computes on the element's next restyle.
+    pub fn new(
+        id: u64,
+        keyframes: Vec<ScriptKeyframe>,
+        composite: AnimationComposition,
+        timing: ScriptAnimationTiming,
+        start_time: Option<f64>,
+        hold_time: Option<f64>,
+        playback_rate: f64,
+    ) -> Self {
+        Self {
+            id,
+            keyframes,
+            composite,
+            timing,
+            start_time,
+            hold_time,
+            playback_rate,
+            computed: None,
+        }
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#animation-current-time>, which is also the
+    /// effect's local time.
+    pub fn local_time(&self, now: f64) -> Option<f64> {
+        self.hold_time
+            .or_else(|| self.start_time.map(|start| (now - start) * self.playback_rate))
+    }
+
+    /// Whether the time of this animation advances with the timeline.
+    fn needs_to_be_ticked(&self) -> bool {
+        self.hold_time.is_none() && self.start_time.is_some() && self.playback_rate != 0.
+    }
+
+    /// Whether this animation is finished (play state) at `now`.
+    pub fn is_finished(&self, now: f64) -> bool {
+        if self.start_time.is_none() {
+            return false;
+        }
+        let Some(local_time) = self.local_time(now) else {
+            return false;
+        };
+        (self.playback_rate > 0. && local_time >= self.timing.end_time()) ||
+            (self.playback_rate < 0. && local_time <= 0.)
+    }
+
+    /// The properties this animation animates, once computed.
+    fn computed_properties(&self) -> impl Iterator<Item = PropertyDeclarationId<'_>> {
+        self.computed
+            .iter()
+            .flat_map(|properties| properties.iter())
+            .filter_map(|keyframes| keyframes.first().map(|keyframe| keyframe.value.id()))
+    }
+
+    /// Resolve the keyframe values against the element's style.
+    fn compute<E>(
+        &mut self,
+        element: E,
+        context: &SharedStyleContext,
+        base_style: &Arc<ComputedValues>,
+        resolver: &mut StyleResolverForElement<E>,
+    ) where
+        E: TElement,
+    {
+        let mut properties: Vec<(OwnedPropertyDeclarationId, Vec<ScriptPropertyKeyframe>)> =
+            Vec::new();
+        for keyframe in self.keyframes.iter() {
+            let mut intermediate = IntermediateComputedKeyframe::new(keyframe.offset);
+            for declaration in keyframe.declarations.normal_declaration_iter() {
+                if let PropertyDeclarationId::Longhand(id) = declaration.id() {
+                    if id == LonghandId::Display || !id.is_animatable() {
+                        continue;
+                    }
+                }
+                intermediate.declarations.push(
+                    declaration.to_physical(base_style.writing_mode),
+                    Importance::Normal,
+                );
+            }
+            if !intermediate.declarations.any_normal() {
+                continue;
+            }
+            let ids: Vec<OwnedPropertyDeclarationId> = intermediate
+                .declarations
+                .property_ids()
+                .iter()
+                .map(|id| id.to_owned())
+                .collect();
+            let step_style = intermediate.resolve_style(element, context, base_style, resolver);
+            let composite = keyframe.composite.unwrap_or(self.composite);
+            for id in ids {
+                let Some(value) = AnimationValue::from_computed_values(id.as_borrowed(), &step_style)
+                else {
+                    continue;
+                };
+                let value = match AnimationValue::from_computed_values(id.as_borrowed(), base_style)
+                {
+                    Some(underlying) => composite_animation_value(&underlying, value, composite),
+                    None => value,
+                };
+                let keyframe = ScriptPropertyKeyframe {
+                    offset: keyframe.offset,
+                    timing_function: keyframe.timing_function.clone(),
+                    value,
+                };
+                match properties.iter_mut().find(|(existing, _)| *existing == id) {
+                    Some((_, keyframes)) => keyframes.push(keyframe),
+                    None => properties.push((id, vec![keyframe])),
+                }
+            }
+        }
+
+        // <https://drafts.csswg.org/web-animations-1/#the-effect-value-of-a-keyframe-animation-effect>
+        // Steps 9-10: a property with no keyframe at offset 0 (or 1) gets a neutral keyframe there,
+        // whose value composited onto the underlying value is the underlying value.
+        let computed: Vec<Box<[ScriptPropertyKeyframe]>> = properties
+            .into_iter()
+            .filter_map(|(id, mut keyframes)| {
+                let underlying = AnimationValue::from_computed_values(id.as_borrowed(), base_style)?;
+                if keyframes.first().is_none_or(|keyframe| keyframe.offset != 0.) {
+                    keyframes.insert(
+                        0,
+                        ScriptPropertyKeyframe {
+                            offset: 0.,
+                            timing_function: TimingFunction::linear(),
+                            value: underlying.clone(),
+                        },
+                    );
+                }
+                if keyframes.last().is_none_or(|keyframe| keyframe.offset != 1.) {
+                    keyframes.push(ScriptPropertyKeyframe {
+                        offset: 1.,
+                        timing_function: TimingFunction::linear(),
+                        value: underlying,
+                    });
+                }
+                Some(keyframes.into_boxed_slice())
+            })
+            .collect();
+        self.computed = Some(computed.into_boxed_slice());
+    }
+
+    /// Add this animation's values at `now` to `map`.
+    /// <https://drafts.csswg.org/web-animations-1/#the-effect-value-of-a-keyframe-animation-effect>
+    fn get_property_declaration_at_time(&self, now: f64, map: &mut AnimationValueMap) {
+        let Some(computed) = self.computed.as_ref() else {
+            return;
+        };
+        let timing = self
+            .timing
+            .compute(self.local_time(now), self.playback_rate);
+        let Some(progress) = timing.progress else {
+            return;
+        };
+
+        for keyframes in computed.iter() {
+            let Some(value) = sample_script_keyframes(keyframes, progress) else {
+                continue;
+            };
+            map.insert(value.id().to_owned(), value);
+        }
+    }
+}
+
+/// The value of one property's keyframes at iteration progress `progress`.
+fn sample_script_keyframes(
+    keyframes: &[ScriptPropertyKeyframe],
+    progress: f64,
+) -> Option<AnimationValue> {
+    let first = keyframes.first()?;
+    let last = keyframes.last()?;
+    if keyframes.len() == 1 {
+        return Some(first.value.clone());
+    }
+
+    // Step 11: before 0 (after 1) with several keyframes at offset 0 (1), the first (last) wins.
+    if progress < 0. && keyframes.iter().filter(|k| k.offset == 0.).count() > 1 {
+        return Some(first.value.clone());
+    }
+    if progress >= 1. && keyframes.iter().filter(|k| k.offset == 1.).count() > 1 {
+        return Some(last.value.clone());
+    }
+
+    // Step 12: the interval endpoints.
+    let start_index = if progress < 0. {
+        0
+    } else if progress >= 1. {
+        keyframes.len() - 2
+    } else {
+        keyframes
+            .iter()
+            .rposition(|keyframe| keyframe.offset <= progress && keyframe.offset < 1.)
+            .unwrap_or(0)
+            .min(keyframes.len() - 2)
+    };
+    let start = &keyframes[start_index];
+    let end = &keyframes[start_index + 1];
+    let interval = end.offset - start.offset;
+    if interval == 0. {
+        return Some(end.value.clone());
+    }
+    let interval_distance = (progress - start.offset) / interval;
+    let transformed =
+        start
+            .timing_function
+            .calculate_output(interval_distance, BeforeFlag::Unset, 1e-7);
+    Some(
+        start
+            .value
+            .animate(&end.value, Procedure::Interpolate { progress: transformed })
+            .unwrap_or_else(|()| {
+                if transformed < 0.5 {
+                    start.value.clone()
+                } else {
+                    end.value.clone()
+                }
+            }),
+    )
 }

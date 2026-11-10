@@ -755,6 +755,23 @@ trait PrivateMatchMethods: TElement {
             );
         }
 
+        // Script-created animations (Element.animate()) compute their keyframe values against
+        // the element's style the first time it is styled after they were added or changed.
+        if animation_set.script_animations_need_compute() {
+            let mut resolver = StyleResolverForElement::new(
+                *self,
+                context,
+                RuleInclusion::All,
+                PseudoElementResolution::IfApplicable,
+            );
+            animation_set.compute_script_animations::<Self>(
+                *self,
+                &shared_context,
+                &new_values,
+                &mut resolver,
+            );
+        }
+
         animation_set.update_transitions_for_new_style(
             might_need_transitions_update,
             &shared_context,

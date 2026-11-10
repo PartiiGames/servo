@@ -26,13 +26,16 @@ use servo_base::id::PipelineId;
 use servo_constellation_traits::ScriptToConstellationMessage;
 use style::animation::{
     Animation, AnimationSetKey, AnimationState, DocumentAnimationSet, ElementAnimationSet,
-    KeyframesIterationState, Transition,
+    KeyframesIterationState, ScriptAnimation, Transition,
 };
 use style::dom::OpaqueNode;
 use style::selector_parser::PseudoElement;
 use timers::TimerId;
 
+use crate::dom::animation::Animation as DomAnimation;
 use crate::dom::animationevent::AnimationEvent;
+use crate::dom::animationplaybackevent::AnimationPlaybackEvent;
+use crate::dom::bindings::codegen::Bindings::AnimationPlaybackEventBinding::AnimationPlaybackEventInit;
 use crate::dom::bindings::codegen::Bindings::AnimationEventBinding::AnimationEventInit;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventInit;
 use crate::dom::bindings::codegen::Bindings::TransitionEventBinding::TransitionEventInit;
@@ -82,6 +85,26 @@ pub(crate) struct AnimationManager {
     /// The [`TimerId`] of the currently scheduled animated image update callback.
     #[no_trace]
     image_callback_timer_id: Cell<Option<TimerId>>,
+
+    /// Script-created animations (Web Animations API) that are not idle, in composite order.
+    /// Keeps them alive while they play or fill, as the document's animation list does.
+    script_animations: DomRefCell<Vec<Dom<DomAnimation>>>,
+
+    /// `finish`, `cancel` and `remove` events of script-created animations, sent with the other
+    /// animation events.
+    pending_playback_events: DomRefCell<Vec<PendingPlaybackEvent>>,
+}
+
+/// An [`AnimationPlaybackEvent`] waiting to be dispatched.
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+struct PendingPlaybackEvent {
+    target: Dom<DomAnimation>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Atom"]
+    event_type: stylo_atoms::Atom,
+    current_time: Option<f64>,
+    timeline_time: Option<f64>,
 }
 
 impl AnimationManager {
@@ -95,6 +118,120 @@ impl AnimationManager {
             pending_events: Default::default(),
             timeline_value_at_last_dirty: Cell::new(0.0),
             image_callback_timer_id: Default::default(),
+            script_animations: Default::default(),
+            pending_playback_events: Default::default(),
+        }
+    }
+
+    /// Apply (add or replace) a script-created animation on `node` and restyle it.
+    pub(crate) fn set_script_animation(
+        &self,
+        no_gc: &NoGC,
+        node: &Node,
+        animation: ScriptAnimation,
+        keyframes_changed: bool,
+    ) {
+        let opaque_node = node.to_opaque();
+        self.sets
+            .sets
+            .write()
+            .entry(AnimationSetKey::new_for_non_pseudo(opaque_node))
+            .or_default()
+            .set_script_animation(animation, keyframes_changed);
+        self.rooted_animation_nodes
+            .borrow_mut()
+            .entry(NoTrace(opaque_node))
+            .or_insert_with(|| Dom::from_ref(node));
+        node.dirty(no_gc, NodeDamage::Style);
+    }
+
+    /// Remove a script-created animation from `node` and restyle it.
+    pub(crate) fn remove_script_animation(&self, no_gc: &NoGC, node: &Node, id: u64) {
+        let key = AnimationSetKey::new_for_non_pseudo(node.to_opaque());
+        let removed = self
+            .sets
+            .sets
+            .write()
+            .get_mut(&key)
+            .is_some_and(|set| set.remove_script_animation(id));
+        if removed {
+            node.dirty(no_gc, NodeDamage::Style);
+        }
+    }
+
+    /// Keep `animation` in the document's list of animations (composite order = creation order).
+    pub(crate) fn register_script_animation(&self, animation: &DomAnimation) {
+        let mut animations = self.script_animations.borrow_mut();
+        if !animations.iter().any(|existing| &**existing == animation) {
+            animations.push(Dom::from_ref(animation));
+            animations.sort_by_key(|animation| animation.uid());
+        }
+    }
+
+    pub(crate) fn unregister_script_animation(&self, animation: &DomAnimation) {
+        self.script_animations
+            .borrow_mut()
+            .retain(|existing| &**existing != animation);
+    }
+
+    /// The registered script-created animations, in composite order.
+    pub(crate) fn script_animations(&self) -> Vec<DomRoot<DomAnimation>> {
+        self.script_animations
+            .borrow()
+            .iter()
+            .map(|animation| DomRoot::from_ref(&**animation))
+            .collect()
+    }
+
+    pub(crate) fn queue_playback_event(
+        &self,
+        animation: &DomAnimation,
+        event_type: stylo_atoms::Atom,
+        current_time: Option<f64>,
+        timeline_time: Option<f64>,
+    ) {
+        self.pending_playback_events
+            .borrow_mut()
+            .push(PendingPlaybackEvent {
+                target: Dom::from_ref(animation),
+                event_type,
+                current_time,
+                timeline_time,
+            });
+    }
+
+    /// Steps 1-2 of <https://drafts.csswg.org/web-animations-1/#update-animations-and-send-events>
+    /// for script-created animations: update their finished state (finish notifications), then
+    /// remove replaced animations.
+    pub(crate) fn update_script_animations(&self, cx: &mut js::context::JSContext, now: f64) {
+        for animation in self.script_animations() {
+            animation.update_for_new_timeline_value(cx);
+        }
+
+        // <https://drafts.csswg.org/web-animations-1/#removing-replaced-animations>
+        let animations = self.script_animations();
+        if animations.len() < 2 {
+            return;
+        }
+        let persisted: Vec<u64> = animations
+            .iter()
+            .filter(|animation| animation.is_persisted())
+            .map(|animation| animation.uid())
+            .collect();
+        let removed: Vec<u64> = self
+            .sets
+            .sets
+            .write()
+            .iter_mut()
+            .flat_map(|(_, set)| set.remove_replaced_script_animations(now, &persisted))
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        for animation in animations {
+            if removed.contains(&animation.uid()) {
+                animation.remove_replaced(cx);
+            }
         }
     }
 
@@ -616,6 +753,24 @@ impl AnimationManager {
         //
         // Take all of the events here, in case sending one of these events
         // triggers adding new events by forcing a layout.
+        let playback_events =
+            std::mem::take(&mut *self.pending_playback_events.safe_borrow_mut(cx.no_gc()));
+        for event in playback_events {
+            let target = DomRoot::from_ref(&*event.target);
+            let init = AnimationPlaybackEventInit {
+                parent: EventInit {
+                    bubbles: false,
+                    cancelable: false,
+                    composed: false,
+                },
+                currentTime: event.current_time.and_then(Finite::new),
+                timelineTime: event.timeline_time.and_then(Finite::new),
+            };
+            AnimationPlaybackEvent::new(cx, window, event.event_type, &init)
+                .upcast::<Event>()
+                .fire(cx, target.upcast());
+        }
+
         let events = std::mem::take(&mut *self.pending_events.safe_borrow_mut(cx.no_gc()));
         if events.is_empty() {
             return;

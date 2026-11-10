@@ -118,6 +118,12 @@ fn is_end(position: &StepPosition) -> bool {
 }
 
 impl<Integer, Number, LinearStops> TimingFunction<Integer, Number, LinearStops> {
+    /// `linear`
+    #[inline]
+    pub fn linear() -> Self {
+        TimingFunction::Keyword(TimingKeyword::Linear)
+    }
+
     /// `ease`
     #[inline]
     pub fn ease() -> Self {
