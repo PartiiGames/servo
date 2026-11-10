@@ -148,6 +148,8 @@ pub struct GLState {
     /// The stand-in for the default framebuffer after drawingBufferStorage with a format the
     /// surface can't have (SRGB8_ALPHA8, RGBA16F).
     storage: Option<StorageFramebuffer>,
+    /// Partii (gaps-3): what the program binary cache needs to know about this context's programs.
+    programs: program_cache::Tracker,
 }
 
 /// Partii (perf): see GLState::zero_level0.
@@ -486,6 +488,7 @@ impl Default for GLState {
             drawing_to_default_framebuffer: true,
             msaa: None,
             storage: None,
+            programs: Default::default(),
         }
     }
 }
@@ -1608,14 +1611,18 @@ impl WebGLImpl {
         match command {
             WebGLCommand::GetContextAttributes(ref sender) => sender.send(*attributes).unwrap(),
             WebGLCommand::ActiveTexture(target) => unsafe { gl.active_texture(target) },
-            WebGLCommand::AttachShader(program_id, shader_id) => unsafe {
-                gl.attach_shader(program_id.glow(), shader_id.glow())
+            WebGLCommand::AttachShader(program_id, shader_id) => {
+                state.programs.attach(program_id, shader_id);
+                unsafe { gl.attach_shader(program_id.glow(), shader_id.glow()) }
             },
-            WebGLCommand::DetachShader(program_id, shader_id) => unsafe {
-                gl.detach_shader(program_id.glow(), shader_id.glow())
+            WebGLCommand::DetachShader(program_id, shader_id) => {
+                state.programs.detach(program_id, shader_id);
+                unsafe { gl.detach_shader(program_id.glow(), shader_id.glow()) }
             },
-            WebGLCommand::BindAttribLocation(program_id, index, ref name) => unsafe {
-                gl.bind_attrib_location(program_id.glow(), index, &to_name_in_compiled_shader(name))
+            WebGLCommand::BindAttribLocation(program_id, index, ref name) => {
+                let name = to_name_in_compiled_shader(name);
+                state.programs.bind_attrib(program_id, index, &name);
+                unsafe { gl.bind_attrib_location(program_id.glow(), index, &name) }
             },
             WebGLCommand::BlendColor(r, g, b, a) => unsafe { gl.blend_color(r, g, b, a) },
             WebGLCommand::BlendEquation(mode) => unsafe { gl.blend_equation(mode) },
@@ -2018,6 +2025,7 @@ impl WebGLImpl {
                     .iter()
                     .map(|varying| to_name_in_compiled_shader(varying))
                     .collect();
+                state.programs.tf_varyings(program, &varyings, buffer_mode);
                 let varyings_refs: Vec<&str> = varyings.iter().map(String::as_ref).collect();
                 unsafe {
                     gl.transform_feedback_varyings(
@@ -2053,7 +2061,8 @@ impl WebGLImpl {
                 Self::program_info_log(gl, program_id, chan)
             },
             WebGLCommand::CompileShader(shader_id, ref source, ref translation, ref sender) => {
-                let info = Self::translate_shader(gl, source, translation);
+                let info = Self::translate_shader_cached(gl, source, translation);
+                state.programs.compiled(shader_id, info.object_code.as_deref());
                 if let Some(ref object_code) = info.object_code {
                     Self::compile_shader(gl, shader_id, object_code);
                 }
@@ -2113,8 +2122,14 @@ impl WebGLImpl {
                 unsafe { gl.delete_renderbuffer(id.glow()) }
             },
             WebGLCommand::DeleteTexture(id) => unsafe { gl.delete_texture(id.glow()) },
-            WebGLCommand::DeleteProgram(id) => unsafe { gl.delete_program(id.glow()) },
-            WebGLCommand::DeleteShader(id) => unsafe { gl.delete_shader(id.glow()) },
+            WebGLCommand::DeleteProgram(id) => {
+                state.programs.delete_program(id);
+                unsafe { gl.delete_program(id.glow()) }
+            },
+            WebGLCommand::DeleteShader(id) => {
+                state.programs.delete_shader(id);
+                unsafe { gl.delete_shader(id.glow()) }
+            },
             WebGLCommand::BindBuffer(target, id) => unsafe {
                 gl.bind_buffer(target, id.map(WebGLBufferId::glow))
             },
@@ -3027,7 +3042,7 @@ impl WebGLImpl {
             WebGLCommand::LinkProgram(program_id, ref sender) => {
                 // Script resolves links lazily (KHR_parallel_shader_compile), so the program may
                 // be gone before the answer arrives; that is not an error.
-                let _ = sender.send(Self::link_program(gl, program_id));
+                let _ = sender.send(Self::link_program(gl, &mut state.programs, program_id));
                 return;
             },
             WebGLCommand::UseProgram(program_id) => unsafe {
@@ -3887,9 +3902,12 @@ impl WebGLImpl {
         state.restore_invariant(gl);
     }
 
-    fn link_program(gl: &Gl, program: WebGLProgramId) -> ProgramLinkInfo {
-        unsafe { gl.link_program(program.glow()) };
-        let linked = unsafe { gl.get_program_link_status(program.glow()) };
+    fn link_program(
+        gl: &Gl,
+        programs: &mut program_cache::Tracker,
+        program: WebGLProgramId,
+    ) -> ProgramLinkInfo {
+        let linked = programs.link(gl, program);
         if !linked {
             return ProgramLinkInfo {
                 linked: false,
@@ -4197,6 +4215,37 @@ impl WebGLImpl {
 
     #[inline]
     /// Translates a WebGL shader with ANGLE into the GLSL this context takes.
+    /// Partii (gaps-3): `translate_shader` through a per-thread cache of its results, keyed by the source and
+    /// everything the translation reads (`ShaderTranslation`; the GL is this thread's). A game that makes a new
+    /// context for every round (Phaser's `new Game`) recompiles the same shaders each time; ANGLE's translation
+    /// of them is the same every time. 256 shaders, least recently used out. `PARTII_SHADER_CACHE=0` turns it off.
+    fn translate_shader_cached(gl: &Gl, source: &str, t: &ShaderTranslation) -> ShaderCompileInfo {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("PARTII_SHADER_CACHE").map_or(true, |v| v != "0")) {
+            return Self::translate_shader(gl, source, t);
+        }
+        thread_local!(static CACHE: std::cell::RefCell<Vec<(String, String, ShaderCompileInfo)>> = const { std::cell::RefCell::new(Vec::new()) });
+        let key = format!("{t:?}");
+        let hit = CACHE.with_borrow_mut(|c| {
+            let i = c.iter().position(|(k, s, _)| *k == key && s == source)?;
+            let e = c.remove(i);
+            let info = e.2.clone();
+            c.push(e);
+            Some(info)
+        });
+        if let Some(info) = hit {
+            return info;
+        }
+        let info = Self::translate_shader(gl, source, t);
+        CACHE.with_borrow_mut(|c| {
+            c.push((key, source.to_owned(), info.clone()));
+            if c.len() > 256 {
+                c.remove(0);
+            }
+        });
+        info
+    }
+
     fn translate_shader(gl: &Gl, source: &str, t: &ShaderTranslation) -> ShaderCompileInfo {
         static INITIALIZATION: std::sync::Once = std::sync::Once::new();
         INITIALIZATION.call_once(|| mozangle::shaders::initialize().unwrap());
@@ -5796,5 +5845,159 @@ fn command_kind(command: &WebGLCommand) -> &'static str {
         WebGLCommand::PixelStorei(..) => "PixelStorei",
         WebGLCommand::SetViewport(..) => "SetViewport",
         _ => "other",
+    }
+}
+
+/// Partii (gaps-3): linked programs' binaries, per WebGL thread, so a program linked again from the same
+/// translated shaders loads its binary (glProgramBinary) instead of compiling and linking them again. A game
+/// that makes a new WebGL context for every round (Phaser's `new Game`, Rocket to Heaven's deaths and reloads)
+/// links the same ~10 programs each time; on Mesa's llvmpipe that is most of a 100-190 ms frame gap. The key is
+/// everything a link reads besides the GL: the attached shaders' translated sources, the attribute bindings and
+/// the transform feedback varyings, in the order the content set them. A binary the driver refuses (an
+/// upgraded driver) falls back to linking. `PARTII_PROGRAM_CACHE=0` turns it off.
+mod program_cache {
+    use std::cell::RefCell;
+
+    use glow::HasContext;
+    use rustc_hash::FxHashMap;
+    use servo_canvas_traits::webgl::{WebGLProgramId, WebGLShaderId};
+
+    use super::Gl;
+
+    /// The context's view of its programs and shaders (GL names are per context): kept in its GLState.
+    #[derive(Debug, Default)]
+    pub(super) struct Tracker {
+        /// Each shader's translated source, from its last compile that translated.
+        shaders: FxHashMap<WebGLShaderId, String>,
+        /// Each program's attached shaders.
+        attached: FxHashMap<WebGLProgramId, Vec<WebGLShaderId>>,
+        /// Each program's attribute bindings and transform feedback varyings, as set.
+        extra: FxHashMap<WebGLProgramId, String>,
+    }
+
+    const MAX_BINARIES: usize = 256;
+    const MAX_BYTES: usize = 64 << 20;
+    thread_local!(static BINARIES: RefCell<Vec<(String, glow::ProgramBinary)>> = const { RefCell::new(Vec::new()) });
+
+    fn enabled(gl: &Gl) -> bool {
+        thread_local!(static ON: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) });
+        if let Some(on) = ON.get() {
+            return on;
+        }
+        let env = std::env::var("PARTII_PROGRAM_CACHE").map_or(true, |v| v != "0");
+        let version = gl.version();
+        let api = if version.is_embedded {
+            version.major >= 3
+        } else {
+            (version.major, version.minor) >= (4, 1) ||
+                gl.supported_extensions().contains("GL_ARB_get_program_binary")
+        };
+        let formats = api && unsafe { gl.get_parameter_i32(glow::NUM_PROGRAM_BINARY_FORMATS) } > 0;
+        let on = env && formats;
+        ON.set(Some(on));
+        on
+    }
+
+    impl Tracker {
+        pub(super) fn compiled(&mut self, shader: WebGLShaderId, object_code: Option<&str>) {
+            match object_code {
+                Some(code) => {
+                    self.shaders.insert(shader, code.to_owned());
+                },
+                None => {
+                    self.shaders.remove(&shader);
+                },
+            }
+        }
+
+        pub(super) fn attach(&mut self, program: WebGLProgramId, shader: WebGLShaderId) {
+            self.attached.entry(program).or_default().push(shader);
+        }
+
+        pub(super) fn detach(&mut self, program: WebGLProgramId, shader: WebGLShaderId) {
+            if let Some(list) = self.attached.get_mut(&program) {
+                list.retain(|s| *s != shader);
+            }
+        }
+
+        pub(super) fn bind_attrib(&mut self, program: WebGLProgramId, index: u32, name: &str) {
+            let e = self.extra.entry(program).or_default();
+            e.push_str(&format!("attrib {index} {name}\n"));
+        }
+
+        pub(super) fn tf_varyings(&mut self, program: WebGLProgramId, varyings: &[String], mode: u32) {
+            let e = self.extra.entry(program).or_default();
+            e.push_str(&format!("tf {mode} {}\n", varyings.join(" ")));
+        }
+
+        pub(super) fn delete_program(&mut self, program: WebGLProgramId) {
+            self.attached.remove(&program);
+            self.extra.remove(&program);
+        }
+
+        pub(super) fn delete_shader(&mut self, shader: WebGLShaderId) {
+            // GL keeps a deleted shader's compile while it is attached: keep its source for those links.
+            if !self.attached.values().any(|l| l.contains(&shader)) {
+                self.shaders.remove(&shader);
+            }
+        }
+
+        fn key(&self, program: WebGLProgramId) -> Option<String> {
+            let mut key = self.extra.get(&program).cloned().unwrap_or_default();
+            for shader in self.attached.get(&program)? {
+                key.push('\u{0}');
+                key.push_str(self.shaders.get(shader)?);
+            }
+            Some(key)
+        }
+
+        /// glLinkProgram, from the cache when it has this program. Returns the link status.
+        pub(super) fn link(&mut self, gl: &Gl, program: WebGLProgramId) -> bool {
+            let p = program.glow();
+            let key = if enabled(gl) { self.key(program) } else { None };
+            let Some(key) = key else {
+                unsafe { gl.link_program(p) };
+                return unsafe { gl.get_program_link_status(p) };
+            };
+            let hit = BINARIES.with_borrow_mut(|b| {
+                let i = b.iter().position(|(k, _)| *k == key)?;
+                let e = b.remove(i);
+                let bin = glow::ProgramBinary { buffer: e.1.buffer.clone(), format: e.1.format };
+                b.push(e);
+                Some(bin)
+            });
+            if let Some(bin) = hit {
+                unsafe { gl.program_binary(p, &bin) };
+                if unsafe { gl.get_program_link_status(p) } {
+                    return true;
+                }
+                // Refused: forget it and link.
+                let _ = unsafe { gl.get_error() };
+                BINARIES.with_borrow_mut(|b| b.retain(|(k, _)| *k != key));
+            }
+            unsafe {
+                gl.program_binary_retrievable_hint(p, true);
+                gl.link_program(p);
+            }
+            let linked = unsafe { gl.get_program_link_status(p) };
+            if linked {
+                if let Some(bin) = unsafe { gl.get_program_binary(p) } {
+                    if !bin.buffer.is_empty() {
+                        BINARIES.with_borrow_mut(|b| {
+                            b.push((key, bin));
+                            while b.len() > MAX_BINARIES ||
+                                (b.len() > 1 &&
+                                    b.iter().map(|(k, v)| k.len() + v.buffer.len()).sum::<usize>() >
+                                        MAX_BYTES)
+                            {
+                                b.remove(0);
+                            }
+                        });
+                    }
+                }
+            }
+            let _ = unsafe { gl.get_error() };
+            linked
+        }
     }
 }
