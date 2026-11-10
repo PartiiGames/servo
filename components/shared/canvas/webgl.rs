@@ -319,6 +319,12 @@ pub enum WebGLObjectNameKind {
     Renderbuffer,
     Texture,
     VertexArray,
+    /// Partii (gaps-5): glCreateProgram names.
+    Program,
+    /// Partii (gaps-5): glCreateShader(VERTEX_SHADER) names.
+    VertexShader,
+    /// Partii (gaps-5): glCreateShader(FRAGMENT_SHADER) names.
+    FragmentShader,
 }
 
 /// WebGL Commands for a specific WebGLContext

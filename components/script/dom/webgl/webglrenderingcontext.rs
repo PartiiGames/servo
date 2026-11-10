@@ -719,7 +719,7 @@ impl WebGLRenderingContext {
     /// for when half the current one is used, so a create waits only when a whole batch went in between.
     /// None when the WebGL thread has none to give (as the Create* commands answer None).
     pub(crate) fn take_object_name(&self, kind: WebGLObjectNameKind) -> Option<NonZeroU32> {
-        let batch = object_name_batch();
+        let batch = object_name_batch(kind);
         let mut pools = self.object_names.borrow_mut();
         let pool = &mut pools.0[kind as usize];
         if pool.names.is_empty() {
@@ -6899,15 +6899,33 @@ impl StencilState {
 
 /// Partii (perf): names reserved per object kind (WebGLRenderingContext::take_object_name): 128, or
 /// PARTII_WEBGL_NAME_BATCH (1 = a round trip per create, as before; for A/B measurements).
-fn object_name_batch() -> u32 {
+/// Partii (gaps-5): programs and shaders come 16 at a time (a page links a few dozen at most; each
+/// unused one is an empty GL object until the context goes), or one at a time with
+/// PARTII_WEBGL_PROGRAM_NAMES=0.
+fn object_name_batch(kind: WebGLObjectNameKind) -> u32 {
     static BATCH: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *BATCH.get_or_init(|| {
+    static PROGRAMS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let batch = *BATCH.get_or_init(|| {
         std::env::var("PARTII_WEBGL_NAME_BATCH")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&n: &u32| n >= 1)
             .unwrap_or(128)
-    })
+    });
+    match kind {
+        WebGLObjectNameKind::Program |
+        WebGLObjectNameKind::VertexShader |
+        WebGLObjectNameKind::FragmentShader => {
+            if *PROGRAMS.get_or_init(|| {
+                std::env::var("PARTII_WEBGL_PROGRAM_NAMES").map_or(true, |v| v != "0")
+            }) {
+                batch.min(16)
+            } else {
+                1
+            }
+        },
+        _ => batch,
+    }
 }
 
 #[derive(Default)]
@@ -6918,7 +6936,7 @@ pub(crate) struct ObjectNamePool {
 
 /// One pool per WebGLObjectNameKind.
 #[derive(Default)]
-pub(crate) struct ObjectNamePools([ObjectNamePool; 5]);
+pub(crate) struct ObjectNamePools([ObjectNamePool; 8]);
 
 // Names and a channel: no GC things.
 #[expect(unsafe_code)]
