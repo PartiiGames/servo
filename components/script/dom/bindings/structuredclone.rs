@@ -1005,6 +1005,13 @@ pub(crate) fn read(
     let allow_shared_memory = in_process.as_ref().is_some_and(|buffer| {
         global.cross_origin_isolated_capability() && global.is_in_agent_cluster(&buffer.2)
     });
+    // An in-process clone that crossed a process or was copied for a broadcast arrives with no
+    // bytes at all: that is a failed deserialization (a messageerror), not a JS exception.
+    if in_process.is_none() && data.serialized.is_empty() {
+        return Err(Error::DataClone(Some(
+            "the message held shared memory that cannot reach this agent cluster".into(),
+        )));
+    }
     let in_process = in_process.map(|buffer| {
         let InProcessCloneBuffer(scbuf, wasm_modules, _) = *buffer;
         sc_reader.wasm_modules = wasm_modules;

@@ -223,6 +223,30 @@ impl MessageEvent {
         messageevent.upcast::<Event>().fire(cx, target);
     }
 
+    /// A `messageerror` event that names where the message came from (service worker
+    /// messages: <https://w3c.github.io/ServiceWorker/#dom-client-postmessage-message-options>).
+    pub(crate) fn dispatch_error_from(
+        cx: &mut JSContext,
+        target: &EventTarget,
+        scope: &GlobalScope,
+        origin: DOMString,
+        source: Option<&WindowProxyOrMessagePortOrServiceWorker>,
+    ) {
+        let messageevent = MessageEvent::new(
+            cx,
+            scope,
+            atom!("messageerror"),
+            false,
+            false,
+            HandleValue::null(),
+            origin,
+            source,
+            DOMString::new(),
+            Vec::new(),
+        );
+        messageevent.upcast::<Event>().fire(cx, target);
+    }
+
     pub(crate) fn dispatch_error(cx: &mut JSContext, target: &EventTarget, scope: &GlobalScope) {
         let init = MessageEventBinding::MessageEventInit::empty();
         let messageevent = MessageEvent::new(

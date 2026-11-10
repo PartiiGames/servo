@@ -557,6 +557,8 @@ impl ServiceWorkerGlobalScope {
                     FrameType::None,
                     self.worker_id,
                 );
+                let origin = DOMString::from(msg.origin.ascii_serialization());
+                let source = ClientOrServiceWorkerOrMessagePort::Client(client);
                 if let Ok(ports) =
                     structuredclone::read(cx, scope.upcast(), *msg.data, message.handle_mut())
                 {
@@ -565,11 +567,18 @@ impl ServiceWorkerGlobalScope {
                         target,
                         scope.upcast(),
                         message.handle(),
-                        Some(&ClientOrServiceWorkerOrMessagePort::Client(client)),
+                        origin,
+                        Some(&source),
                         ports,
                     );
                 } else {
-                    ExtendableMessageEvent::dispatch_error(cx, target, scope.upcast());
+                    ExtendableMessageEvent::dispatch_error(
+                        cx,
+                        target,
+                        scope.upcast(),
+                        origin,
+                        Some(&source),
+                    );
                 }
             },
             CommonWorker(WorkerScriptMsg::Common(msg)) => {

@@ -22,11 +22,12 @@ use servo_url::{ImmutableOrigin, ServoUrl};
 use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::{
     RegistrationOptions, ServiceWorkerContainerMethods,
 };
+use crate::dom::bindings::codegen::UnionTypes::WindowProxyOrMessagePortOrServiceWorker;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
-use crate::dom::bindings::str::USVString;
+use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::bindings::structuredclone;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
@@ -203,7 +204,7 @@ impl ServiceWorkerContainer {
                 // Note: spec uses a MesssageEvent, so it's unclear what to do with source.
                 // Perhaps an ExtendableMessageEvent should be used instead.
                 // See https://github.com/w3c/ServiceWorker/issues/1823
-                let _source = global.get_serviceworker(cx, &script_url, &scope_url, source);
+                let source = global.get_serviceworker(cx, &script_url, &scope_url, source);
 
                 // Step 4.5.4: Let messageClone be deserializeRecord.[[Deserialized]].
                 // Step 4.5.5: Let newPorts be a new frozen array consisting of all MessagePort objects
@@ -225,7 +226,17 @@ impl ServiceWorkerContainer {
                         ports,
                     );
                 } else {
-                    error!("Failed to deserialize message ports in message from service worker.");
+                    // StructuredDeserialize threw (a SharedArrayBuffer from the service worker's
+                    // own agent cluster): fire messageerror.
+                    MessageEvent::dispatch_error_from(
+                        cx,
+                        self.upcast(),
+                        &global,
+                        DOMString::from(origin.ascii_serialization()),
+                        Some(&WindowProxyOrMessagePortOrServiceWorker::ServiceWorker(
+                            source,
+                        )),
+                    );
                 }
             },
         }

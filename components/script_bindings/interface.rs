@@ -147,13 +147,18 @@ pub(crate) unsafe fn create_global_object<D: DomTypes>(
 
     let mut options = RealmOptions::default();
     options.creationOptions_.traceGlobal_ = Some(trace);
-    // Shared memory (SharedArrayBuffer, Atomics, shared WebAssembly.Memory) is only for globals
-    // with the cross-origin isolated capability, which the caller computed for this global
-    // (`GlobalScope::cross_origin_isolated_capability`). System globals never get it.
-    let shared_memory = !use_system_compartment && cross_origin_isolated;
-    options.creationOptions_.sharedMemoryAndAtomics_ = shared_memory;
+    // The SharedArrayBuffer constructor is only exposed to globals with the cross-origin isolated
+    // capability, which the caller computed for this global
+    // (`GlobalScope::cross_origin_isolated_capability`); Atomics and shared WebAssembly.Memory
+    // exist everywhere, as in Gecko and Chromium (only the constructor is conditionally exposed:
+    // <https://html.spec.whatwg.org/multipage/#conditional-exposure>). Without the capability,
+    // shared memory never leaves the realm: structured cloning refuses it
+    // (`structuredclone::write_impl`). System globals never get shared memory.
+    options.creationOptions_.sharedMemoryAndAtomics_ = !use_system_compartment;
+    options.creationOptions_.defineSharedArrayBufferConstructor_ =
+        !use_system_compartment && cross_origin_isolated;
     // Pick SpiderMonkey's COOP/COEP flavoured DataCloneError messages for isolated globals.
-    options.creationOptions_.coopAndCoep_ = shared_memory;
+    options.creationOptions_.coopAndCoep_ = !use_system_compartment && cross_origin_isolated;
     if use_system_compartment {
         options.creationOptions_.compSpec_ = CompartmentSpecifier::NewCompartmentAndZone;
         options.creationOptions_.__bindgen_anon_1.comp_ = std::ptr::null_mut();

@@ -169,11 +169,14 @@ impl ExtendableMessageEvent {
         ev
     }
 
+    /// <https://w3c.github.io/ServiceWorker/#service-worker-postmessage-options>: `origin` is
+    /// the serialized origin of the sender, `source` its Client.
     pub(crate) fn dispatch_jsval(
         cx: &mut JSContext,
         target: &EventTarget,
         scope: &GlobalScope,
         message: HandleValue,
+        origin: DOMString,
         source: Option<&ClientOrServiceWorkerOrMessagePort>,
         ports: Vec<DomRoot<MessagePort>>,
     ) {
@@ -184,7 +187,7 @@ impl ExtendableMessageEvent {
             false,
             false,
             message,
-            DOMString::new(),
+            origin,
             DOMString::new(),
             source,
             ports,
@@ -192,7 +195,14 @@ impl ExtendableMessageEvent {
         Extendablemessageevent.upcast::<Event>().fire(cx, target);
     }
 
-    pub(crate) fn dispatch_error(cx: &mut JSContext, target: &EventTarget, scope: &GlobalScope) {
+    /// The `messageerror` event of the same steps, when StructuredDeserialize threw.
+    pub(crate) fn dispatch_error(
+        cx: &mut JSContext,
+        target: &EventTarget,
+        scope: &GlobalScope,
+        origin: DOMString,
+        source: Option<&ClientOrServiceWorkerOrMessagePort>,
+    ) {
         let ExtendableMsgEvent = ExtendableMessageEvent::new(
             cx,
             scope,
@@ -200,9 +210,9 @@ impl ExtendableMessageEvent {
             false,
             false,
             HandleValue::null(),
+            origin,
             DOMString::new(),
-            DOMString::new(),
-            None,
+            source,
             Vec::new(),
         );
         ExtendableMsgEvent.upcast::<Event>().fire(cx, target);
