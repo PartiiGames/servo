@@ -15,8 +15,11 @@
 //!
 //! `malloc_trim(0)` walks every arena and returns the whole pages inside free chunks
 //! (MADV_DONTNEED), so a thread here calls it when RSS has grown by `PARTII_MALLOC_TRIM_MB` (48)
-//! since the last trim, at most every `PARTII_MALLOC_TRIM_SECS` (10) seconds, checking RSS every
-//! 2 s. Only the arena being walked is locked, one at a time.
+//! since the last trim, at most every `PARTII_MALLOC_TRIM_SECS` (30) seconds, checking RSS every
+//! 2 s. Only the arena being walked is locked, one at a time, but a thread allocating from it waits:
+//! every 10 s (the first default) doubled rocket's frame gaps over 50 ms (3 interleaved 15-min reps on b92:
+//! 49/87/88 vs 45/30/37 with trim off) and left 1-3 gaps over 100 ms in every rep; every 30 s is level
+//! with off on gaps (42/37/36, p99 33-34 ms) and still holds RSS ~200 MB under it.
 //!
 //! `PARTII_MALLOC_TRIM=0` turns it off; `PARTII_MALLOC_TRIM_LOG=1` prints each trim (RSS before
 //! and after, how long it took) to stderr.
@@ -51,7 +54,7 @@ mod imp {
             return;
         }
         let grow = env_u64("PARTII_MALLOC_TRIM_MB", 48) << 20;
-        let min_interval = Duration::from_secs(env_u64("PARTII_MALLOC_TRIM_SECS", 10));
+        let min_interval = Duration::from_secs(env_u64("PARTII_MALLOC_TRIM_SECS", 30));
         let log = std::env::var("PARTII_MALLOC_TRIM_LOG").is_ok_and(|v| v.trim() == "1");
         let _ = thread::Builder::new()
             .name("MallocTrim".to_owned())
