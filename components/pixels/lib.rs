@@ -599,10 +599,6 @@ pub fn detect_image_format(buffer: &[u8]) -> Result<ImageFormat, &str> {
     }
 }
 
-#[expect(
-    clippy::manual_checked_ops,
-    reason = "This code becomes less readable by applying the lint"
-)]
 pub fn unmultiply_inplace<const SWAP_RB: bool>(pixels: &mut [u8]) {
     for rgba in pixels.chunks_mut(4) {
         let a = rgba[3] as u32;
@@ -611,9 +607,9 @@ pub fn unmultiply_inplace<const SWAP_RB: bool>(pixels: &mut [u8]) {
         let mut r = rgba[0] as u32;
 
         if a > 0 {
-            r = r * 255 / a;
-            g = g * 255 / a;
-            b = b * 255 / a;
+            r = unmultiply_u32_color(r, a);
+            g = unmultiply_u32_color(g, a);
+            b = unmultiply_u32_color(b, a);
 
             if SWAP_RB {
                 rgba[2] = r as u8;
@@ -626,6 +622,13 @@ pub fn unmultiply_inplace<const SWAP_RB: bool>(pixels: &mut [u8]) {
             }
         }
     }
+}
+
+/// Partii: un-premultiply one channel by alpha `a` (> 0), rounding to nearest like Chromium
+/// (Skia's SkUnpremultiply) instead of truncating; clamped for channels above alpha.
+#[inline]
+fn unmultiply_u32_color(color: u32, a: u32) -> u32 {
+    ((color * 255 + a / 2) / a).min(255)
 }
 
 #[repr(u8)]
@@ -656,10 +659,6 @@ pub fn transform_inplace(pixels: &mut [u8], multiply: Multiply, swap_rb: bool, c
     }
 }
 
-#[expect(
-    clippy::manual_checked_ops,
-    reason = "This code becomes less readable by applying the lint"
-)]
 pub fn generic_transform_inplace<
     const MULTIPLY: u8, // 1 premultiply, 2 unmultiply
     const SWAP_RB: bool,
@@ -680,9 +679,9 @@ pub fn generic_transform_inplace<
                 let a = rgba[3] as u32;
 
                 if a > 0 {
-                    rgba[0] = (rgba[0] as u32 * 255 / a) as u8;
-                    rgba[1] = (rgba[1] as u32 * 255 / a) as u8;
-                    rgba[2] = (rgba[2] as u32 * 255 / a) as u8;
+                    rgba[0] = unmultiply_u32_color(rgba[0] as u32, a) as u8;
+                    rgba[1] = unmultiply_u32_color(rgba[1] as u32, a) as u8;
+                    rgba[2] = unmultiply_u32_color(rgba[2] as u32, a) as u8;
                 }
             },
             _ => {},
