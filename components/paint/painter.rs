@@ -275,6 +275,12 @@ impl Painter {
                     let (w, h) = v.split_once('x')?;
                     Some(webrender_api::units::DeviceIntSize::new(w.parse().ok()?, h.parse().ok()?))
                 }),
+                // Partii (measurement): PARTII_WR_SHARED_SURFACE=N sets the size of WebRender's
+                // shared render-target textures (default 2048).
+                max_shared_surface_size: std::env::var("PARTII_WR_SHARED_SURFACE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2048),
                 ..Default::default()
             },
             None,
