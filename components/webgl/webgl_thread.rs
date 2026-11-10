@@ -147,6 +147,11 @@ pub struct GLState {
     /// Phaser's boot makes ~80 full-canvas render targets (each ~3.6 MB zeroed: llvmpipe faults in and
     /// clears ~300 MB a boot) and draws to a few of them. Chromium clears these lazily too.
     pending_textures: FxHashMap<u32, Vec<PendingTextureLevel>>,
+    /// Partii (gaps-5): on a software GL, the pixels of the last texImage2D of an RGBA/RGB 8-bit 2D level 0
+    /// (as uploaded), while only texture parameter, binding and pixel store commands follow: generateMipmap
+    /// on that texture filters these instead of reading the level back (software_mipmaps). glGetTexImage
+    /// waits for everything llvmpipe has queued.
+    upload_shadow: Option<UploadShadow>,
     /// Partii (gaps-5): the TEXTURE_2D binding of each texture unit, as the content bound them (while
     /// lazy textures are on).
     unit_textures: Vec<u32>,
@@ -162,6 +167,15 @@ pub struct GLState {
     /// The stand-in for the default framebuffer after drawingBufferStorage with a format the
     /// surface can't have (SRGB8_ALPHA8, RGBA16F).
     storage: Option<StorageFramebuffer>,
+}
+
+/// Partii (gaps-5): see GLState::upload_shadow.
+#[derive(Debug)]
+struct UploadShadow {
+    texture: u32,
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
 }
 
 /// Partii (gaps-5): a texImage2D(null) level not allocated yet (GLState::pending_textures).
@@ -493,6 +507,7 @@ impl Default for GLState {
             pending_renderbuffers: FxHashMap::default(),
             framebuffer_renderbuffers: FxHashMap::default(),
             pending_textures: FxHashMap::default(),
+            upload_shadow: None,
             unit_textures: Vec::new(),
             active_unit: 0,
             framebuffer_textures: FxHashMap::default(),
@@ -1578,8 +1593,9 @@ impl WebGLImpl {
             return;
         }
 
-        // Partii (perf): any command but these may write the texture state.zero_level0 names.
-        if state.zero_level0.is_some() &&
+        // Partii (perf): any command but these may write the texture state.zero_level0 names (and
+        // state.upload_shadow's, gaps-5).
+        if (state.zero_level0.is_some() || state.upload_shadow.is_some()) &&
             !matches!(
                 command,
                 WebGLCommand::TexParameteri(..) |
@@ -1592,6 +1608,7 @@ impl WebGLImpl {
             )
         {
             state.zero_level0 = None;
+            state.upload_shadow = None;
         }
 
         if !state.pending_renderbuffers.is_empty() {
@@ -2560,6 +2577,28 @@ impl WebGLImpl {
                         PixelUnpackData::Slice(Some(&pixels)),
                     );
                 }
+                // Partii (gaps-5): keep what a following generateMipmap would read back.
+                let channels = match (internal_format, format) {
+                    (gl::RGBA | gl::RGBA8, gl::RGBA) => 4,
+                    (gl::RGB | gl::RGB8, gl::RGB) => 3,
+                    _ => 0,
+                };
+                if !zero_fill &&
+                    channels != 0 &&
+                    target == gl::TEXTURE_2D &&
+                    level == 0 &&
+                    effective_data_type == gl::UNSIGNED_BYTE &&
+                    pixels.len() == size.width as usize * size.height as usize * channels &&
+                    upload_shadow_enabled(gl)
+                {
+                    state.upload_shadow = Some(UploadShadow {
+                        texture: unsafe { gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) } as u32,
+                        width: size.width as usize,
+                        height: size.height as usize,
+                        pixels: pixels.into_owned(),
+                    });
+                    return;
+                }
                 if zero_fill {
                     Self::note_zero_level0(
                         gl,
@@ -2926,7 +2965,7 @@ impl WebGLImpl {
                     return;
                 }
                 let zero = Self::zero_mipmaps(gl, state, target);
-                if !zero && !Self::software_mipmaps(gl, target) {
+                if !zero && !Self::software_mipmaps(gl, state, target) {
                     unsafe { gl.generate_mipmap(target) }
                 }
                 // Partii (gaps-3, measurement): mipmap generations of 1 ms or more, with the level-0 size.
@@ -3868,7 +3907,8 @@ impl WebGLImpl {
     /// glGenerateMipmap is cheap, so only software GLs take this path. Returns false (the caller runs
     /// glGenerateMipmap) for anything else: other targets and formats, a base level other than 0, an immutable
     /// texture, a bound pixel pack or unpack buffer. `PARTII_SOFT_MIPMAP=0` turns it off.
-    fn software_mipmaps(gl: &Gl, target: u32) -> bool {
+    fn software_mipmaps(gl: &Gl, state: &mut GLState, target: u32) -> bool {
+        let shadow = state.upload_shadow.take();
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if target != gl::TEXTURE_2D ||
             !*ON.get_or_init(|| {
@@ -3915,14 +3955,29 @@ impl WebGLImpl {
                 gl.pixel_store_i32(name, value);
             }
             let (mut w, mut h) = (width as usize, height as usize);
-            let mut pixels = vec![0u8; w * h * channels];
-            gl.get_tex_image(
-                target,
-                0,
-                format,
-                gl::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut pixels)),
-            );
+            // Partii (gaps-5): level 0 as just uploaded (GLState::upload_shadow), else read back.
+            let bound = gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) as u32;
+            let mut pixels = match shadow {
+                Some(shadow)
+                    if shadow.texture == bound &&
+                        shadow.width == w &&
+                        shadow.height == h &&
+                        shadow.pixels.len() == w * h * channels =>
+                {
+                    shadow.pixels
+                },
+                _ => {
+                    let mut pixels = vec![0u8; w * h * channels];
+                    gl.get_tex_image(
+                        target,
+                        0,
+                        format,
+                        gl::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut pixels)),
+                    );
+                    pixels
+                },
+            };
             let mut level = 0;
             while (w > 1 || h > 1) && level < max_level {
                 let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
@@ -5710,6 +5765,18 @@ unsafe fn copy_tex_image_2d(
         gl.pixel_store_i32(gl::PACK_ALIGNMENT, pack_alignment);
         gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpack_alignment);
     }
+}
+
+/// Partii (gaps-5): on a software GL, generateMipmap right after a texImage2D filters the uploaded pixels
+/// instead of reading level 0 back (GLState::upload_shadow), unless `PARTII_MIP_SHADOW=0` (or
+/// `PARTII_SOFT_MIPMAP=0`).
+fn upload_shadow_enabled(gl: &Gl) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PARTII_MIP_SHADOW").map_or(true, |v| v != "0") &&
+            std::env::var("PARTII_SOFT_MIPMAP").map_or(true, |v| v != "0") &&
+            software_gl(gl)
+    })
 }
 
 /// Partii (gaps-5): texImage2D(null) levels made on first use (GLState::pending_textures), unless
