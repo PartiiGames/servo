@@ -1044,6 +1044,30 @@ impl Window {
     }
 }
 
+/// Partii: the fetch context for a `FontFace` loaded from a worker global (no document): the
+/// worker's policy container, request client and API base URL; CSP violations and resource
+/// timing go back to that worker.
+pub(crate) fn worker_web_font_context(global: &GlobalScope) -> WebFontDocumentContext {
+    let task_source = global
+        .task_manager()
+        .dom_manipulation_task_source()
+        .to_sendable();
+    let target_global = Trusted::new(global);
+    WebFontDocumentContext {
+        policy_container: global.policy_container(),
+        request_client: global.request_client(None),
+        document_url: global.api_base_url(),
+        csp_handler: Box::new(FontCspHandler {
+            global: target_global.clone(),
+            task_source: task_source.clone(),
+        }),
+        network_timing_handler: Box::new(FontNetworkTimingHandler {
+            global: target_global,
+            task_source,
+        }),
+    }
+}
+
 #[derive(Debug, MallocSizeOf)]
 struct FontCspHandler {
     global: Trusted<GlobalScope>,

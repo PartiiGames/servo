@@ -545,6 +545,14 @@ impl GlobalScope {
         }
     }
 
+    /// The context to fetch a web font in: the document's for a window, the worker's otherwise.
+    pub(crate) fn web_font_context(&self, no_gc: &NoGC) -> fonts::WebFontDocumentContext {
+        if let Some(window) = self.downcast::<Window>() {
+            return window.web_font_context(no_gc);
+        }
+        crate::dom::window::worker_web_font_context(self)
+    }
+
     /// <https://w3c.github.io/ServiceWorker/#get-the-service-worker-registration-object>
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn get_serviceworker_registration(

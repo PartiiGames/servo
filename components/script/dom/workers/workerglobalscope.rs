@@ -73,6 +73,7 @@ use crate::dom::bindings::utils::define_all_exposed_interfaces;
 #[cfg(feature = "webcrypto")]
 use crate::dom::crypto::Crypto;
 use crate::dom::csp::{GlobalCspReporting, Violation, parse_csp_list_from_metadata};
+use crate::dom::css::fontfaceset::FontFaceSet;
 use crate::dom::debugger::debuggerglobalscope::DebuggerGlobalScope;
 use crate::dom::dedicatedworkerglobalscope::DedicatedWorkerGlobalScope;
 use crate::dom::globalscope::GlobalScope;
@@ -375,6 +376,9 @@ pub(crate) struct WorkerGlobalScope {
     /// <https://w3c.github.io/ServiceWorker/#global-caches-attribute>
     caches: MutNullableDom<CacheStorage>,
 
+    /// <https://drafts.csswg.org/css-font-loading/#font-face-source>
+    fonts: MutNullableDom<FontFaceSet>,
+
     /// The [`TaskManager`] for this [`WorkerGlobalScope`].
     #[conditional_malloc_size_of]
     task_manager: Rc<TaskManager>,
@@ -439,6 +443,7 @@ impl WorkerGlobalScope {
                 init.unminify_js,
             ),
             caches: Default::default(),
+            fonts: Default::default(),
             worker_id: init.worker_id,
             worker_name,
             worker_type,
@@ -951,6 +956,12 @@ impl WorkerGlobalScopeMethods<crate::DomTypeHolder> for WorkerGlobalScope {
     /// <https://html.spec.whatwg.org/multipage/#dom-worker-navigator>
     fn Navigator(&self, cx: &mut JSContext) -> DomRoot<WorkerNavigator> {
         self.navigator.or_init(|| WorkerNavigator::new(cx, self))
+    }
+
+    /// <https://drafts.csswg.org/css-font-loading/#dom-fontfacesource-fonts>
+    fn Fonts(&self, cx: &mut JSContext) -> DomRoot<FontFaceSet> {
+        self.fonts
+            .or_init(|| FontFaceSet::new_for_worker(cx, self.upcast::<GlobalScope>()))
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dfn-Crypto>

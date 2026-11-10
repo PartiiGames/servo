@@ -19,7 +19,7 @@ enum FontFaceSetLoadStatus { "loading" , "loaded" };
 */
 
 // https://drafts.csswg.org/css-font-loading/#FontFaceSet-interface
-[Exposed=(Window /*, Worker */)]
+[Exposed=(Window,Worker)]
 interface FontFaceSet : EventTarget {
   // constructor(sequence<FontFace> initialFaces);
 

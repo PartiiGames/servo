@@ -14,13 +14,15 @@ use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use servo_arc::Arc as ServoArc;
+use style::context::QuirksMode;
 use style::error_reporting::ParseErrorReporter;
+use style::parser::ParserContext;
 use style::font_face::SourceList;
 use style::properties::font_face::Descriptors;
-use style::stylesheets::{CssRuleType, FontFaceRule, UrlExtraData};
+use style::stylesheets::{CssRuleType, FontFaceRule, Origin, UrlExtraData};
 use style_traits::{ParsingMode, ToCss};
 
-use crate::css::css::parser_context_for_document_with_reporter;
+use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::buffer_source::get_buffer_source_copy;
 use crate::dom::bindings::codegen::Bindings::FontFaceBinding::{
     FontFaceDescriptors as FontFaceInputDescriptors, FontFaceLoadStatus, FontFaceMethods,
@@ -35,7 +37,6 @@ use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::css::fontfaceset::FontFaceSet;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::node::NodeTraits;
 use crate::dom::promise::{Promise, RootedPromise, TracedPromise};
 use crate::dom::window::Window;
 
@@ -89,18 +90,25 @@ fn parse_font_face_descriptors(
     sources: Option<&DOMString>,
     input_descriptors: &FontFaceDescriptors,
 ) -> Fallible<FontFaceRule> {
-    let window = global.as_window(); // TODO: Support calling FontFace APIs from Worker
-    let document = window.Document();
-    let url_data = UrlExtraData(document.owner_global().api_base_url().get_arc());
+    // Partii: workers have no document; their URLs resolve against the worker's API base URL and
+    // they parse in no-quirks mode.
+    let url_data = UrlExtraData(global.api_base_url().get_arc());
+    let quirks_mode = global
+        .downcast::<Window>()
+        .map_or(QuirksMode::NoQuirks, |window| window.Document().quirks_mode());
     let error_reporter = FontFaceErrorReporter {
         not_encountered_error: Cell::new(true),
     };
-    let parser_context = parser_context_for_document_with_reporter(
-        &document,
-        CssRuleType::FontFace,
-        ParsingMode::DEFAULT,
+    let parser_context = ParserContext::new(
+        Origin::Author,
         &url_data,
-        &error_reporter,
+        Some(CssRuleType::FontFace),
+        ParsingMode::DEFAULT,
+        quirks_mode,
+        /* namespaces = */ Default::default(),
+        Some(&error_reporter),
+        None,
+        /* attr_taint = */ Default::default(),
     );
 
     let FontFaceDescriptors {
@@ -440,7 +448,6 @@ impl FontFace {
             .ok()
             .and_then(|parsed_font_face_rule| {
                 global
-                    .as_window()
                     .font_context()
                     .construct_web_font_from_data(&data, (&parsed_font_face_rule).into())
             });
@@ -726,14 +733,12 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
             .font_face_rule(&global)
             .expect("Parsing shouldn't fail as descriptors are valid by construction");
 
-        // Construct a WebFontDocumentContext object for the current document.
-        let document_context = global.as_window().web_font_context(cx.no_gc());
+        // Construct a WebFontDocumentContext object for the current document (or worker).
+        let document_context = global.web_font_context(cx.no_gc());
 
         // Step 4. Using the value of font face’s [[Urls]] slot, attempt to load a font as defined
         // in [CSS-FONTS-3], as if it was the value of a @font-face rule’s src descriptor.
-        // TODO: FontFaceSet is not supported on Workers yet. The `as_window` call below should be
-        // replaced when we do support it.
-        global.as_window().font_context().load_web_font_for_script(
+        global.font_context().load_web_font_for_script(
             global.webview_id(),
             sources,
             (&parsed_font_face_rule).into(),
@@ -763,7 +768,7 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
     /// <https://drafts.csswg.org/css-font-loading/#font-face-constructor>
     fn Constructor(
         cx: &mut JSContext,
-        window: &Window,
+        global: &GlobalScope,
         proto: Option<HandleObject>,
         family: DOMString,
         source: UnionTypes::StringOrArrayBufferViewOrArrayBuffer,
@@ -781,7 +786,6 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
         // according to the grammars of the corresponding descriptors of the CSS @font-face rule If
         // the source argument is a CSSOMString, parse it according to the grammar of the CSS src
         // descriptor of the @font-face rule.
-        let global = window.as_global_scope();
         let parse_result =
             parse_font_face_descriptors(global, &family, url_source, &descriptors.into());
 
