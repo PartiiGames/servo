@@ -507,6 +507,40 @@ pub fn create_webrender_instance(
 
     let is_software = device.get_capabilities().renderer_name.starts_with("Software");
 
+    // Partii (gaps-6): on a software GL, replay the draw states earlier runs recorded, so the GL
+    // builds those shader variants now rather than inside a frame (device/partii_warm.rs;
+    // PARTII_WR_WARMUP=0 off, PARTII_WR_WARMUP_MS caps it).
+    {
+        let entries = device.partii_warm_entries();
+        if !entries.is_empty() {
+            let t0 = std::time::Instant::now();
+            let budget_ms: u128 = std::env::var("PARTII_WR_WARMUP_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4000);
+            let mut scratch = crate::device::WarmScratch::default();
+            let mut drawn = 0;
+            {
+                let mut shaders = shaders.borrow_mut();
+                for entry in &entries {
+                    if t0.elapsed().as_millis() >= budget_ms {
+                        break;
+                    }
+                    if let Some(kind) = shaders.partii_bind(&entry.program, &mut device) {
+                        device.partii_warm_draw(entry, &vaos[kind], &mut scratch);
+                        drawn += 1;
+                    }
+                }
+            }
+            device.partii_warm_finish(scratch);
+            eprintln!(
+                "partii-wr-warmup: {drawn} of {} draw states in {:.0} ms",
+                entries.len(),
+                t0.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
     device.end_frame();
 
     let backend_notifier = notifier.clone();

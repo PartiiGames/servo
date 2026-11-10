@@ -39,6 +39,11 @@ use webrender_build::shader::{
 };
 use malloc_size_of::MallocSizeOfOps;
 
+// Partii (gaps-6): draw-state warm-up for software GL (PARTII_WR_WARMUP).
+#[path = "partii_warm.rs"]
+mod partii_warm;
+pub(crate) use self::partii_warm::WarmScratch;
+
 /// Sequence number for frames, as tracked by the device layer.
 #[derive(Debug, Copy, Clone, PartialEq, Ord, Eq, PartialOrd)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
@@ -1287,6 +1292,8 @@ pub struct Device {
     // count created/deleted textures to report in the profiler.
     pub textures_created: u32,
     pub textures_deleted: u32,
+    /// Partii (gaps-6): records draw states for the software-GL warm-up (partii_warm.rs).
+    partii_warm: Option<Box<partii_warm::Recorder>>,
 }
 
 /// Contains the parameters necessary to bind a draw target.
@@ -2014,6 +2021,11 @@ impl Device {
         // an attached buffer has been orphaned.
         let requires_vao_rebind_after_orphaning = is_adreno_3xx;
 
+        let partii_warm = if partii_warm::enabled_for(&renderer_name) {
+            Some(partii_warm::Recorder::new())
+        } else {
+            None
+        };
         Device {
             gl,
             base_gl: None,
@@ -2093,6 +2105,7 @@ impl Device {
 
             textures_created: 0,
             textures_deleted: 0,
+            partii_warm,
         }
     }
 
@@ -2355,6 +2368,7 @@ impl Device {
         image_rendering: Option<ImageRendering>,
     ) {
         debug_assert!(self.inside_frame);
+        self.partii_warm_note_unit(slot.0, target);
 
         if self.bound_textures[slot.0] != id || set_swizzle.is_some() || image_rendering.is_some() {
             self.gl.active_texture(gl::TEXTURE0 + slot.0 as gl::GLuint);
@@ -2807,6 +2821,7 @@ impl Device {
         }
 
         self.textures_created += 1;
+        self.partii_warm_note_texture(texture.id, texture.format, texture.size.width, texture.size.height);
 
         texture
     }
@@ -3138,6 +3153,7 @@ impl Device {
             self.release_depth_target(texture.get_dimensions());
         }
 
+        self.partii_warm_forget_texture(texture.id);
         self.gl.delete_textures(&[texture.id]);
 
         for bound_texture in &mut self.bound_textures {
@@ -3769,6 +3785,7 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+        self.partii_warm_note_draw();
 
         let _guard = if self.annotate_draw_call_crashes {
             Some(CrashAnnotatorGuard::new(
@@ -3794,6 +3811,7 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+        self.partii_warm_note_draw();
 
         let _guard = if self.annotate_draw_call_crashes {
             Some(CrashAnnotatorGuard::new(
@@ -3819,6 +3837,7 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+        self.partii_warm_note_draw();
 
         let _guard = if self.annotate_draw_call_crashes {
             Some(CrashAnnotatorGuard::new(
@@ -3839,6 +3858,7 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+        self.partii_warm_note_draw();
 
         let _guard = if self.annotate_draw_call_crashes {
             Some(CrashAnnotatorGuard::new(
@@ -3859,6 +3879,7 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+        self.partii_warm_note_draw();
 
         let _guard = if self.annotate_draw_call_crashes {
             Some(CrashAnnotatorGuard::new(
@@ -3884,6 +3905,7 @@ impl Device {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
+        self.partii_warm_note_draw();
 
         let _guard = if self.annotate_draw_call_crashes {
             Some(CrashAnnotatorGuard::new(
