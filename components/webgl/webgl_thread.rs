@@ -2844,8 +2844,22 @@ impl WebGLImpl {
             WebGLCommand::Finish(ref sender) => Self::finish(gl, sender),
             WebGLCommand::Flush => unsafe { gl.flush() },
             WebGLCommand::GenerateMipmap(target) => {
-                if !Self::zero_mipmaps(gl, state, target) && !Self::software_mipmaps(gl, target) {
+                let t0 = std::time::Instant::now();
+                let zero = Self::zero_mipmaps(gl, state, target);
+                if !zero && !Self::software_mipmaps(gl, target) {
                     unsafe { gl.generate_mipmap(target) }
+                }
+                // Partii (gaps-3, measurement): mipmap generations of 1 ms or more, with the level-0 size.
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                if ms >= 1.0 && std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace") {
+                    let (w, h, f) = unsafe {
+                        (
+                            gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_WIDTH),
+                            gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_HEIGHT),
+                            gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_INTERNAL_FORMAT),
+                        )
+                    };
+                    eprintln!("partii-trace mipmap {w}x{h} fmt={f:#x} zero={zero} ms={ms:.1}");
                 }
             },
             WebGLCommand::CreateVertexArray(ref chan) => {
@@ -3976,8 +3990,12 @@ impl WebGLImpl {
     }
 
     fn link_program(gl: &Gl, program: WebGLProgramId) -> ProgramLinkInfo {
+        let t0 = std::time::Instant::now();
         unsafe { gl.link_program(program.glow()) };
         let linked = unsafe { gl.get_program_link_status(program.glow()) };
+        if std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace") {
+            eprintln!("partii-trace link ms={:.2} linked={linked}", t0.elapsed().as_secs_f64() * 1000.0);
+        }
         if !linked {
             return ProgramLinkInfo {
                 linked: false,
