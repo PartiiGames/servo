@@ -637,14 +637,24 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
     fn image_descriptor_and_serializable_data(
         &mut self,
     ) -> (ImageDescriptor, SerializableImageData) {
+        let size = self.size().cast().cast_unit();
+        let pixels = self.pixmap();
+        // Partii (perf): a canvas whose every pixel is opaque is sent as an opaque image, so
+        // WebRender can treat it as an opaque compositor surface (no blending, and the page
+        // under it is occluded instead of composited first). See `all_opaque`.
+        let flags = if canvas_opaque_scan() && all_opaque(pixels) {
+            ImageDescriptorFlags::IS_OPAQUE
+        } else {
+            ImageDescriptorFlags::empty()
+        };
         let image_desc = ImageDescriptor {
             format: webrender_api::ImageFormat::RGBA8,
-            size: self.size().cast().cast_unit(),
+            size,
             stride: None,
             offset: 0,
-            flags: ImageDescriptorFlags::empty(),
+            flags,
         };
-        let data = SerializableImageData::Raw(GenericSharedMemory::from_bytes(self.pixmap()));
+        let data = SerializableImageData::Raw(GenericSharedMemory::from_bytes(pixels));
         (image_desc, data)
     }
 
@@ -671,6 +681,28 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
     fn create_source_surface_from_data(&self, data: Snapshot) -> Option<Self::SourceSurface> {
         Some(snapshot_as_pixmap(data))
     }
+}
+
+/// Partii (perf): whether every pixel of a premultiplied RGBA8 buffer has alpha 255. A
+/// full-window game canvas (glitterfall: putImageData of opaque pixels every frame) is then an
+/// opaque image: on software GL the composite skips the page under it and the blend (~0.9 Mpx a
+/// frame each at 1280x720). The scan is an AND over 32-bit words (alpha is the high byte of each
+/// little-endian RGBA word), about 30 us for 640x360. `PARTII_CANVAS_OPAQUE=0` turns it off.
+fn all_opaque(pixels: &[u8]) -> bool {
+    let words: &[u32] = match bytemuck::try_cast_slice(pixels) {
+        Ok(words) if !words.is_empty() => words,
+        _ => return !pixels.is_empty() && pixels.chunks_exact(4).all(|p| p[3] == 255),
+    };
+    let alpha = u32::from_ne_bytes([0, 0, 0, 0xff]);
+    // Chunks keep the loop branch-free (vectorized); stop at the first translucent chunk.
+    words
+        .chunks(1024)
+        .all(|chunk| chunk.iter().fold(alpha, |acc, w| acc & w) & alpha == alpha)
+}
+
+fn canvas_opaque_scan() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("PARTII_CANVAS_OPAQUE").as_deref(), Ok("0")))
 }
 
 fn snapshot_as_pixmap(mut snapshot: Snapshot) -> Arc<vello_cpu::Pixmap> {
