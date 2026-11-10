@@ -300,6 +300,28 @@ impl LazilyCompiledShader {
             device.delete_program(program);
         }
     }
+
+    /// Partii (gaps-6): the program's full name as the device names it (base name and sorted
+    /// features joined by "_").
+    fn partii_full_name(&self) -> String {
+        if self.features.is_empty() {
+            self.name.to_owned()
+        } else {
+            format!("{}_{}", self.name, self.features.join("_"))
+        }
+    }
+
+    /// Partii (gaps-6): the vertex layout this shader draws with (as the precache path picks it).
+    fn partii_vertex_kind(&self) -> VertexArrayKind {
+        match self.kind {
+            ShaderKind::Primitive | ShaderKind::Brush | ShaderKind::Text => VertexArrayKind::Primitive,
+            ShaderKind::Cache(format) => format,
+            ShaderKind::ClipCache(format) => format,
+            ShaderKind::Composite => VertexArrayKind::Composite,
+            ShaderKind::Clear => VertexArrayKind::Clear,
+            ShaderKind::Copy => VertexArrayKind::Copy,
+        }
+    }
 }
 
 // A brush shader supports two modes:
@@ -1060,6 +1082,18 @@ impl Shaders {
             ps_copy,
             composite,
         })
+    }
+
+    /// Partii (gaps-6, software-GL warm-up): compiles (if needed) and binds the program named
+    /// `full_name`, returning the vertex layout it draws with.
+    pub(crate) fn partii_bind(&mut self, full_name: &str, device: &mut Device) -> Option<VertexArrayKind> {
+        let shader = self.loader.shaders.iter_mut().find(|s| s.partii_full_name() == full_name)?;
+        let kind = shader.partii_vertex_kind();
+        let program = shader.get_internal(device, ShaderPrecacheFlags::FULL_COMPILE, None).ok()?;
+        if !device.bind_program(program) {
+            return None;
+        }
+        Some(kind)
     }
 
     #[must_use]
