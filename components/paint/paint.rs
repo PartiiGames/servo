@@ -821,6 +821,16 @@ impl Paint {
             PaintMessage::NewWebRenderFrameReady(painter_id, _document_id, need_repaint) => {
                 if let Some(painter) = self.maybe_painter(*painter_id) {
                     painter.decrement_pending_frames();
+                    // Partii (gaps-2): a frame that needs a repaint holds its place in the pipeline
+                    // from the moment its building one is let go, not at the end of this batch: the
+                    // messages below (a script's GenerateFrame, a display list, an animation tick)
+                    // would otherwise see an empty pipeline and ask for another frame while this one
+                    // still waits for the renderer. `Renderer::update` then takes both and draws the
+                    // first off-screen before drawing the second: two full frames in one paint (hexii's
+                    // 115-140 ms gaps on software GL, update ~58 ms + render ~58 ms).
+                    if *need_repaint {
+                        painter.note_ready_frame();
+                    }
                     *saw_webrender_frame_ready_for_painter
                         .entry(*painter_id)
                         .or_insert(*need_repaint) |= *need_repaint;
@@ -840,11 +850,9 @@ impl Paint {
 
         for (painter_id, repaint_needed) in saw_webrender_frame_ready_for_painter.iter() {
             if let Some(painter) = self.maybe_painter(*painter_id) {
-                // Partii (bd stream): a frame that needs a repaint now waits for `render()`; one that
-                // doesn't frees its place at once (the renderer takes it with the next frame).
-                if *repaint_needed {
-                    painter.note_ready_frame();
-                }
+                // Partii (bd stream): a frame that needs a repaint waits for `render()` (counted above,
+                // as its message was taken); one that doesn't frees its place at once (the renderer
+                // takes it with the next frame).
                 painter.handle_new_webrender_frame_ready(*repaint_needed);
             }
             if let Some(mut painter) = self.maybe_painter_mut(*painter_id) {
