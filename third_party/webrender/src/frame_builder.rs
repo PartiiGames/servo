@@ -760,6 +760,9 @@ impl FrameBuilder {
             scene.config.max_shared_surface_size,
             &frame_memory,
         );
+        if crate::invalidation::partii_log::enabled() {
+            partii_inval_flush(&render_tasks);
+        }
 
         let mut passes = frame_memory.new_vec();
         let mut has_texture_cache_tasks = false;
@@ -1470,5 +1473,65 @@ impl Frame {
         // test if a composite is needed due to picture cache surfaces moving
         // or external surfaces being updated).
         self.passes.is_empty()
+    }
+}
+
+/// Partii (gaps-4), measurement: see `invalidation::partii_log`. Every 2 s a summary of the frames since (dirty
+/// tile draws by slice/tile/reason); for frames with `PARTII_WR_INVAL_LOG` passes or more (one every 2 s, 40 in
+/// all), the tiles drawn, why, and the render tasks by kind with the picture targets' sizes.
+fn partii_inval_flush(graph: &RenderTaskGraph) {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+    struct Acc {
+        since: Option<Instant>,
+        last_dump: Option<Instant>,
+        dumps: usize,
+        frames: usize,
+        passes: usize,
+        tiles: BTreeMap<String, usize>,
+    }
+    static ACC: Mutex<Acc> = Mutex::new(Acc { since: None, last_dump: None, dumps: 0, frames: 0, passes: 0, tiles: BTreeMap::new() });
+    let text = crate::invalidation::partii_log::take();
+    let min = crate::invalidation::partii_log::threshold().unwrap_or(usize::MAX);
+    let mut acc = ACC.lock().unwrap();
+    let now = Instant::now();
+    let since = *acc.since.get_or_insert(now);
+    acc.frames += 1;
+    acc.passes += graph.passes.len();
+    for l in text.lines().filter(|l| l.starts_with("  s")) {
+        // "  s<slice> ss<n> t<x>,<y> <reason> dirty ..." -> key "s<slice> ss<n> t<x>,<y> <reason>"
+        let key: Vec<&str> = l.split_whitespace().take(4).collect();
+        *acc.tiles.entry(key.join(" ")).or_insert(0) += 1;
+    }
+    if graph.passes.len() >= min && acc.dumps < 40 && acc.last_dump.map_or(true, |t| (now - t).as_secs() >= 2) {
+        acc.dumps += 1;
+        acc.last_dump = Some(now);
+        let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut pics = Vec::new();
+        for t in &graph.tasks {
+            *kinds.entry(t.kind.as_str()).or_insert(0) += 1;
+            if t.kind.as_str() == "Picture" {
+                let s = t.get_target_size();
+                pics.push(format!("{}x{}", s.width, s.height));
+            }
+        }
+        eprintln!(
+            "partii-inval frame: passes {} tasks {} kinds {:?} pictures [{}]\n{}",
+            graph.passes.len(), graph.tasks.len(), kinds, pics.join(" "), text.trim_end(),
+        );
+    }
+    if now - since >= std::time::Duration::from_secs(2) {
+        let frames = acc.frames;
+        let mut v: Vec<_> = acc.tiles.iter().map(|(k, n)| format!("{k}={n}")).collect();
+        v.sort();
+        eprintln!(
+            "partii-inval-sum: frames {} passes/frame {:.1} tile draws: {}",
+            frames, acc.passes as f64 / frames.max(1) as f64, v.join("; "),
+        );
+        acc.since = Some(now);
+        acc.frames = 0;
+        acc.passes = 0;
+        acc.tiles.clear();
     }
 }

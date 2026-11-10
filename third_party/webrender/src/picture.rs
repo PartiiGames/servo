@@ -1629,6 +1629,23 @@ fn prepare_tiled_picture_surface(
         .round();
     let device_clip_rect = (world_clip_rect * frame_context.global_device_pixel_scale).round();
 
+    if crate::invalidation::partii_log::enabled() {
+        let mut line = format!(
+            " slice {} flags {:?} tile {}x{} underlays {} sub-slices",
+            tile_cache.slice, tile_cache.slice_flags, tile_cache.current_tile_size.width,
+            tile_cache.current_tile_size.height, tile_cache.underlays.len(),
+        );
+        for ss in &tile_cache.sub_slices {
+            line.push_str(&format!(
+                " [tiles {} surfaces {}]",
+                ss.tiles.len(),
+                ss.compositor_surfaces.iter().map(|c| format!("{:?}", c.descriptor.local_rect)).collect::<Vec<_>>().join(" "),
+            ));
+        }
+        line.push('\n');
+        crate::invalidation::partii_log::push(&line);
+    }
+
     for (sub_slice_index, sub_slice) in tile_cache.sub_slices.iter_mut().enumerate() {
         for tile in sub_slice.tiles.values_mut() {
             // Ensure that the dirty rect doesn't extend outside the local valid rect.
@@ -1794,6 +1811,17 @@ fn prepare_tiled_picture_surface(
             } else {
                 // Track that actual tile rasterization is occurring
                 frame_state.composite_state.did_rasterize_any_tile = true;
+
+                if crate::invalidation::partii_log::enabled() {
+                    let d = tile.cached_surface.local_dirty_rect;
+                    crate::invalidation::partii_log::push(&format!(
+                        "  s{} ss{} t{},{} {:?} dirty {:.0},{:.0}..{:.0},{:.0} subgraphs {} {}\n",
+                        tile_cache.slice, sub_slice_index, tile.tile_offset.x, tile.tile_offset.y,
+                        tile.cached_surface.invalidation_reason, d.min.x, d.min.y, d.max.x, d.max.y,
+                        tile.cached_surface.sub_graphs.len(),
+                        tile.cached_surface.partii_diff.as_deref().unwrap_or(""),
+                    ));
+                }
 
                 // Add this dirty rect to the dirty region tracker. This must be done outside the if statement below,
                 // so that we include in the dirty region tiles that are handled by a background color only (no

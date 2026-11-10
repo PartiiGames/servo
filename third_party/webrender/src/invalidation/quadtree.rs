@@ -421,6 +421,16 @@ impl TileNode {
                         if prim_compare_result != PrimitiveCompareResult::Equal {
                             if invalidation_reason.is_none() {
                                 *invalidation_reason = Some(InvalidationReason::Content);
+                                if super::partii_log::enabled() {
+                                    let (p, c) = (&prev_prims[i0], &curr_prims[i1]);
+                                    let b = c.prim_clip_box;
+                                    let msg = format!(
+                                        "{:?} uid {}->{} at {:.0},{:.0}..{:.0},{:.0}",
+                                        prim_compare_result, p.prim_uid.get_uid(), c.prim_uid.get_uid(),
+                                        b.min.x, b.min.y, b.max.x, b.max.y,
+                                    );
+                                    super::partii_log::LAST_DIFF.with(|d| *d.borrow_mut() = Some(msg));
+                                }
                             }
                             *dirty_rect = self.rect.union(dirty_rect);
                             *dirty_tracker = *dirty_tracker | 1;
@@ -430,6 +440,14 @@ impl TileNode {
                 } else {
                     if invalidation_reason.is_none() {
                         *invalidation_reason = Some(InvalidationReason::PrimCount);
+                        if super::partii_log::enabled() {
+                            let msg = format!(
+                                "PrimCount {}->{} in {:.0},{:.0}..{:.0},{:.0}",
+                                prev_indices.len(), curr_indices.len(),
+                                self.rect.min.x, self.rect.min.y, self.rect.max.x, self.rect.max.y,
+                            );
+                            super::partii_log::LAST_DIFF.with(|d| *d.borrow_mut() = Some(msg));
+                        }
                     }
                     *dirty_rect = self.rect.union(dirty_rect);
                     *dirty_tracker = *dirty_tracker | 1;

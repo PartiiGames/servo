@@ -36,6 +36,8 @@ pub struct CachedSurface {
     pub sub_graphs: Vec<(PictureRect, Vec<(PictureCompositeMode, SurfaceIndex)>)>,
     /// Partii: the pictures of `sub_graphs` (the backdrop-filter sub-graphs drawn on this tile).
     pub sub_graph_pics: Vec<PictureIndex>,
+    /// Partii (measurement, `PARTII_WR_INVAL_LOG`): the first primitive that differed this frame.
+    pub partii_diff: Option<String>,
 }
 
 impl CachedSurface {
@@ -52,6 +54,7 @@ impl CachedSurface {
             invalidation_reason: None,
             sub_graphs: Vec::new(),
             sub_graph_pics: Vec::new(),
+            partii_diff: None,
         }
     }
 
@@ -79,6 +82,7 @@ impl CachedSurface {
         self.invalidation_reason  = None;
         self.sub_graphs.clear();
         self.sub_graph_pics.clear();
+        self.partii_diff = None;
 
         // If the tile isn't visible, early exit, skipping the normal set up to
         // validate dependencies. Instead, we will only compare the current tile
@@ -267,6 +271,9 @@ impl CachedSurface {
             frame_context,
         );
 
+        if crate::invalidation::partii_log::enabled() {
+            self.partii_diff = crate::invalidation::partii_log::LAST_DIFF.with(|d| d.borrow_mut().take());
+        }
         if !dirty_rect.is_empty() {
             self.invalidate(
                 Some(dirty_rect),

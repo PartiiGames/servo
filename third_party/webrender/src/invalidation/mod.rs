@@ -12,6 +12,34 @@ pub mod quadtree;
 pub mod cached_surface;
 pub mod vert_buffer;
 
+/// Partii (gaps-4), measurement: `PARTII_WR_INVAL_LOG=<passes>` prints, for frames whose render task graph has
+/// at least that many passes (at most one every 2 s, 40 in all), every picture-cache tile drawn and why it was
+/// invalidated (with the first primitive that differed), the slices' compositor surfaces, and the filter
+/// pictures rendered. Off (one OnceLock read) unless the variable is set.
+pub mod partii_log {
+    use std::cell::RefCell;
+    use std::sync::{Mutex, OnceLock};
+
+    pub fn threshold() -> Option<usize> {
+        static T: OnceLock<Option<usize>> = OnceLock::new();
+        *T.get_or_init(|| std::env::var("PARTII_WR_INVAL_LOG").ok().and_then(|v| v.trim().parse().ok()))
+    }
+    pub fn enabled() -> bool {
+        threshold().is_some()
+    }
+    thread_local! {
+        /// The first primitive that differed in the tile being compared.
+        pub static LAST_DIFF: RefCell<Option<String>> = RefCell::new(None);
+    }
+    static FRAME: Mutex<String> = Mutex::new(String::new());
+    pub fn push(s: &str) {
+        FRAME.lock().unwrap().push_str(s);
+    }
+    pub fn take() -> String {
+        std::mem::take(&mut *FRAME.lock().unwrap())
+    }
+}
+
 use api::units::*;
 use crate::spatial_tree::{SpatialTree, SpatialNodeIndex};
 use crate::space::SpaceMapper;
