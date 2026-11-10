@@ -5,3 +5,4 @@
 pub(crate) mod import_map;
 mod module_loading;
 pub(crate) mod script_module;
+mod stencil_cache;
