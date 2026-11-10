@@ -14,7 +14,7 @@ use script_bindings::weakref::WeakRef;
 use servo_base::generic_channel::{GenericReceiver, TryReceiveError};
 use servo_canvas_traits::webgl::{
     GLLimits, ShaderCompileInfo, ShaderTranslation, WebGLCommand, WebGLError, WebGLResult,
-    WebGLShaderId, WebGLVersion, webgl_channel,
+    WebGLObjectNameKind, WebGLShaderId, WebGLVersion, webgl_channel,
 };
 #[cfg(feature = "webgl")]
 use {
@@ -424,12 +424,21 @@ impl WebGLShader {
         context: &WebGLRenderingContext,
         shader_type: u32,
     ) -> Option<DomRoot<Self>> {
-        let (sender, receiver) = webgl_channel().unwrap();
-        context.send_command(WebGLCommand::CreateShader(shader_type, sender));
-        receiver
-            .recv()
-            .unwrap()
-            .map(|id| WebGLShader::new(cx, context, id, shader_type))
+        // Partii (gaps-5): a pooled name (take_object_name), not a round trip behind all the queued work.
+        let kind = match shader_type {
+            constants::VERTEX_SHADER => WebGLObjectNameKind::VertexShader,
+            constants::FRAGMENT_SHADER => WebGLObjectNameKind::FragmentShader,
+            _ => {
+                let (sender, receiver) = webgl_channel().unwrap();
+                context.send_command(WebGLCommand::CreateShader(shader_type, sender));
+                return receiver
+                    .recv()
+                    .unwrap()
+                    .map(|id| WebGLShader::new(cx, context, id, shader_type));
+            },
+        };
+        let id = WebGLShaderId::new(context.take_object_name(kind)?);
+        Some(WebGLShader::new(cx, context, id, shader_type))
     }
 
     pub(crate) fn new(
