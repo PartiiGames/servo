@@ -4243,6 +4243,9 @@ impl WebGLImpl {
         if levels.is_empty() {
             return;
         }
+        let t0 = std::time::Instant::now();
+        let count: usize = levels.iter().map(|(_, pending)| pending.len()).sum();
+        let _trace = scopeguard_trace(t0, count);
         unsafe {
             let bound = gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) as u32;
             let unpack_buffer = gl.get_parameter_i32(gl::PIXEL_UNPACK_BUFFER_BINDING) as u32;
@@ -6397,4 +6400,21 @@ fn command_kind(command: &WebGLCommand) -> &'static str {
         WebGLCommand::SetViewport(..) => "SetViewport",
         _ => "other",
     }
+}
+
+/// Measurement only (gaps-5): pending texture levels made, with the time it took (PARTII_FRAME_PROF=trace).
+struct LazyTexTrace(std::time::Instant, usize);
+impl Drop for LazyTexTrace {
+    fn drop(&mut self) {
+        if std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace") {
+            eprintln!(
+                "partii-trace lazytex levels={} ms={:.2}",
+                self.1,
+                self.0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+}
+fn scopeguard_trace(t0: std::time::Instant, count: usize) -> LazyTexTrace {
+    LazyTexTrace(t0, count)
 }
