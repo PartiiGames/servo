@@ -4887,7 +4887,15 @@ fn cross_origin_isolation_for_load(
         let value = metadata.headers.as_deref()?.get(name)?.to_str().ok()?;
         Some(value.split(';').next()?.trim().to_owned())
     };
-    if policy("cross-origin-embedder-policy").as_deref() != Some("require-corp") {
+    // A nested about:blank, about:srcdoc, blob: or data: document has no headers of its own: it
+    // inherits its policy container, COEP included, from its creator
+    // (<https://html.spec.whatwg.org/multipage/#determining-navigation-params-policy-container>),
+    // here the parent (a blob: URL's creator is same origin with it when the check below passes).
+    let inherits_policy_container =
+        is_nested && matches!(final_url.scheme(), "about" | "blob" | "data");
+    if !inherits_policy_container &&
+        policy("cross-origin-embedder-policy").as_deref() != Some("require-corp")
+    {
         return false;
     }
     if !is_nested {
