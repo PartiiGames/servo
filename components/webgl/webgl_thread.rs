@@ -596,6 +596,10 @@ impl WebGLThread {
             let class = frame_prof::class_of(&msg);
             let kind = match &msg {
                 WebGLMsg::WebGLCommand(_, command, _) => command_kind(command),
+                WebGLMsg::CreateContext(..) => "CreateContext",
+                WebGLMsg::ResizeContext(..) => "ResizeContext",
+                WebGLMsg::RemoveContext(..) => "RemoveContext",
+                WebGLMsg::SetImageKey(..) => "SetImageKey",
                 _ => "msg",
             };
             let start = std::time::Instant::now();
@@ -5575,12 +5579,58 @@ mod frame_prof {
         *ON.get_or_init(|| std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace"))
     }
 
+    // Per 50-ms wall bucket: busy time and count per message kind; a bucket busy 15 ms or more is logged as
+    // `partii-trace webglsum at=<bucket start> busy=<ms> n=<count> top=<kind>:<ms>/<n>,...` (gaps-3).
+    #[derive(Default)]
+    struct Sum {
+        bucket: u64,
+        busy: f64,
+        n: u32,
+        kinds: Vec<(&'static str, f64, u32)>,
+    }
+    thread_local!(static SUM: std::cell::RefCell<Sum> = std::cell::RefCell::default());
+
+    fn sum_msg(kind: &'static str, wall_start: f64, ms: f64) {
+        let b = (wall_start / 50.0) as u64;
+        SUM.with_borrow_mut(|s| {
+            if b != s.bucket {
+                if s.busy >= 15.0 {
+                    s.kinds.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    let top: Vec<String> = s.kinds.iter().take(8).map(|(k, ms, n)| format!("{k}:{ms:.1}/{n}")).collect();
+                    eprintln!(
+                        "partii-trace webglsum at={:.1} busy={:.1} n={} top={}",
+                        s.bucket as f64 * 50.0,
+                        s.busy,
+                        s.n,
+                        top.join(",")
+                    );
+                }
+                *s = Sum { bucket: b, ..Sum::default() };
+            }
+            s.busy += ms;
+            s.n += 1;
+            match s.kinds.iter_mut().find(|e| e.0 == kind) {
+                Some(e) => {
+                    e.1 += ms;
+                    e.2 += 1;
+                },
+                None => s.kinds.push((kind, ms, 1)),
+            }
+        });
+    }
+
     /// `PARTII_FRAME_PROF=trace`: each WebGL message of 4 ms or more, on the wall clock the script trace uses.
-    pub(super) fn trace_msg(class: usize, kind: &str, start: Instant) {
+    pub(super) fn trace_msg(class: usize, kind: &'static str, start: Instant) {
         if !trace() {
             return;
         }
         let ms = start.elapsed().as_secs_f64() * 1000.0;
+        {
+            let d = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            sum_msg(kind, (d.as_micros() % 10_000_000_000) as f64 / 1000.0 - ms, ms);
+        }
         if ms >= 4.0 {
             let d = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5732,6 +5782,19 @@ fn command_kind(command: &WebGLCommand) -> &'static str {
         WebGLCommand::Finish(..) => "Finish",
         WebGLCommand::GetShaderInfoLog(..) => "GetShaderInfoLog",
         WebGLCommand::GetProgramInfoLog(..) => "GetProgramInfoLog",
+        WebGLCommand::AttachShader(..) => "AttachShader",
+        WebGLCommand::BindAttribLocation(..) => "BindAttribLocation",
+        WebGLCommand::FramebufferRenderbuffer(..) => "FramebufferRenderbuffer",
+        WebGLCommand::GetUniformLocation(..) => "GetUniformLocation",
+        WebGLCommand::BindFramebuffer(..) => "BindFramebuffer",
+        WebGLCommand::BindTexture(..) => "BindTexture",
+        WebGLCommand::DeleteProgram(..) => "DeleteProgram",
+        WebGLCommand::DeleteShader(..) => "DeleteShader",
+        WebGLCommand::DeleteTexture(..) => "DeleteTexture",
+        WebGLCommand::DeleteFramebuffer(..) => "DeleteFramebuffer",
+        WebGLCommand::TexParameteri(..) => "TexParameteri",
+        WebGLCommand::PixelStorei(..) => "PixelStorei",
+        WebGLCommand::SetViewport(..) => "SetViewport",
         _ => "other",
     }
 }
