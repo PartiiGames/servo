@@ -126,6 +126,14 @@ pub enum WebGLMsg {
         Size2D<u32>,
         GenericSender<Result<(), String>>,
     ),
+    /// drawingBufferStorage: gives a WebGLContext a new drawing buffer of this sized colour
+    /// format (RGBA8, SRGB8_ALPHA8 or RGBA16F) and size. Later resizes keep the format.
+    DrawingBufferStorage(
+        WebGLContextId,
+        u32,
+        Size2D<u32>,
+        GenericSender<Result<(), String>>,
+    ),
     /// Drops a WebGLContext.
     RemoveContext(WebGLContextId),
     /// Runs a WebGLCommand in a specific WebGLContext.
@@ -231,6 +239,22 @@ impl WebGLMsgSender {
     ) -> WebGLSendResult {
         self.sender
             .send(WebGLMsg::ResizeContext(self.ctx_id, size, sender))
+    }
+
+    /// Send a drawingBufferStorage message
+    #[inline]
+    pub fn send_drawing_buffer_storage(
+        &self,
+        format: u32,
+        size: Size2D<u32>,
+        sender: GenericSender<Result<(), String>>,
+    ) -> WebGLSendResult {
+        self.sender.send(WebGLMsg::DrawingBufferStorage(
+            self.ctx_id,
+            format,
+            size,
+            sender,
+        ))
     }
 
     #[inline]

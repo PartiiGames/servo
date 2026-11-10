@@ -47,6 +47,13 @@ dictionary WebGLContextAttributes {
     GLboolean failIfMajorPerformanceCaveat = false;
 };
 
+// https://github.com/w3c-cg/ColorWeb-CG/blob/main/canvas-tone-map.md
+enum CanvasToneMappingMode { "standard", "extended" };
+
+dictionary CanvasToneMapping {
+    CanvasToneMappingMode mode = "standard";
+};
+
 [Exposed=(Window,Worker)]
 interface mixin WebGLRenderingContextBase
 {
@@ -473,12 +480,25 @@ interface mixin WebGLRenderingContextBase
     readonly attribute (HTMLCanvasElement or OffscreenCanvas) canvas;
     readonly attribute GLsizei drawingBufferWidth;
     readonly attribute GLsizei drawingBufferHeight;
+    readonly attribute GLenum drawingBufferFormat;
+
+    /* Upon context creation, drawingBufferColorSpace and unpackColorSpace both
+       default to the value "srgb". */
+    attribute PredefinedColorSpace drawingBufferColorSpace;
+    attribute PredefinedColorSpace unpackColorSpace;
 
     [WebGLHandlesContextLoss] WebGLContextAttributes? getContextAttributes();
     [WebGLHandlesContextLoss] boolean isContextLost();
 
     sequence<DOMString>? getSupportedExtensions();
     object? getExtension(DOMString name);
+
+    undefined drawingBufferStorage(GLenum sizedFormat, unsigned long width, unsigned long height);
+
+    // https://github.com/w3c-cg/ColorWeb-CG/blob/main/webgl-drawing-buffer-tone-map.md: a
+    // getter without an argument (or undefined), a setter with a CanvasToneMapping. `any`
+    // because an optional dictionary argument can't tell undefined from {}.
+    [Throws] CanvasToneMapping drawingBufferToneMapping(optional any toneMapping);
 
     undefined activeTexture(GLenum texture);
     undefined attachShader(WebGLProgram program, WebGLShader shader);

@@ -13,10 +13,10 @@ use bitflags::bitflags;
 use dom_struct::dom_struct;
 use euclid::default::{Point2D, Rect, Size2D};
 use js::context::{JSContext, NoGC};
-use js::conversions::ToJSValConvertible;
+use js::conversions::{ConversionResult, ToJSValConvertible};
 use js::jsapi::{JSObject, JSTracer, Type};
 use js::jsval::{BooleanValue, DoubleValue, Int32Value, NullValue, ObjectValue, UInt32Value};
-use js::rust::{CustomAutoRooterGuard, MutableHandleObject, MutableHandleValue};
+use js::rust::{CustomAutoRooterGuard, HandleValue, MutableHandleObject, MutableHandleValue};
 use js::typedarray::{ArrayBufferView, Float32, Int32, TypedArrayElementCreator, Uint32};
 use pixels::{self, Alpha, PixelFormat, Snapshot, SnapshotPixelFormat};
 use script_bindings::cell::{DomRefCell, Ref, RefMut};
@@ -46,14 +46,17 @@ use crate::dom::bindings::buffer_source::{
     get_buffer_source_slice, typed_array_to_vec,
 };
 use crate::dom::bindings::codegen::Bindings::ANGLEInstancedArraysBinding::ANGLEInstancedArraysConstants;
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
+    ImageDataMethods, PredefinedColorSpace,
+};
 use crate::dom::bindings::codegen::Bindings::EXTBlendMinmaxBinding::EXTBlendMinmaxConstants;
 use crate::dom::bindings::codegen::Bindings::KHRParallelShaderCompileBinding::KHRParallelShaderCompileConstants;
 use crate::dom::bindings::codegen::Bindings::OESVertexArrayObjectBinding::OESVertexArrayObjectConstants;
 use crate::dom::bindings::codegen::Bindings::WEBGLStencilTexturingBinding::WEBGLStencilTexturingConstants;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::{
-    TexImageSource, WebGLContextAttributes, WebGLRenderingContextConstants as constants,
-    WebGLRenderingContextMethods,
+    CanvasToneMapping, CanvasToneMappingMode, TexImageSource, WebGLContextAttributes,
+    WebGLRenderingContextConstants as constants, WebGLRenderingContextMethods,
 };
 use crate::dom::bindings::codegen::UnionTypes::{
     Float32ArrayOrUnrestrictedFloatSequence,
@@ -73,6 +76,8 @@ use crate::dom::node::NodeTraits;
 #[cfg(feature = "webxr")]
 use crate::dom::promise::Promise;
 use crate::dom::webgl::extensions::WebGLExtensions;
+use crate::dom::webgl::extensions::extcolorbufferfloat::EXTColorBufferFloat;
+use crate::dom::webgl::extensions::extcolorbufferhalffloat::EXTColorBufferHalfFloat;
 use crate::dom::webgl::validations::WebGLValidator;
 use crate::dom::webgl::validations::tex_image_2d::{
     CommonCompressedTexImage2DValidatorResult, CommonTexImage2DValidator,
@@ -250,6 +255,19 @@ pub(crate) struct WebGLRenderingContext {
     current_clear_color: Cell<(f32, f32, f32, f32)>,
     #[no_trace]
     size: Cell<Size2D<u32>>,
+    /// Whether the drawing buffer has alpha (WebGLContextAttributes.alpha).
+    drawing_buffer_alpha: bool,
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferFormat>:
+    /// RGBA8 or RGB8 (alpha: false) until drawingBufferStorage picks another.
+    drawing_buffer_format: Cell<u32>,
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferColorSpace>
+    drawing_buffer_color_space: Cell<PredefinedColorSpace>,
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-unpackColorSpace>:
+    /// the space TexImageSource uploads (but ArrayBufferViews) are converted into.
+    unpack_color_space: Cell<PredefinedColorSpace>,
+    /// drawingBufferToneMapping() (ColorWeb-CG). Kept for the getter; the drawing buffer is
+    /// standard dynamic range either way, which "extended" leaves unchanged on SDR output.
+    tone_mapping: Cell<CanvasToneMappingMode>,
     /// Partii (perf): object names reserved on the WebGL thread, handed out by create{Buffer, Framebuffer,
     /// Renderbuffer, Texture} without a round trip each (take_object_name).
     #[ignore_malloc_size_of = "Channels and a few names"]
@@ -305,6 +323,7 @@ impl WebGLRenderingContext {
         };
 
         let default_framebuffer_stencil = attrs.stencil;
+        let drawing_buffer_alpha = attrs.alpha;
         let (sender, receiver) = webgl_channel().unwrap();
         webgl_chan
             .send(WebGLMsg::CreateContext(
@@ -342,6 +361,15 @@ impl WebGLRenderingContext {
                 // FIXME(#21718) The backend is allowed to choose a size smaller than
                 // what was requested
                 size: Cell::new(size),
+                drawing_buffer_alpha,
+                drawing_buffer_format: Cell::new(if drawing_buffer_alpha {
+                    constants::RGBA8
+                } else {
+                    WebGL2RenderingContextConstants::RGB8
+                }),
+                drawing_buffer_color_space: Cell::new(PredefinedColorSpace::Srgb),
+                unpack_color_space: Cell::new(PredefinedColorSpace::Srgb),
+                tone_mapping: Cell::new(CanvasToneMappingMode::Standard),
                 current_clear_color: Cell::new((0.0, 0.0, 0.0, 0.0)),
                 extension_manager: WebGLExtensions::new(
                     webgl_version,
@@ -413,6 +441,80 @@ impl WebGLRenderingContext {
                 None
             },
         }
+    }
+
+    /// Gives the context a new, cleared drawing buffer of `size` (the canvas's, or
+    /// drawingBufferStorage's), with `format` as its new colour format if given (else the
+    /// current one), and puts back the state the reallocation loses. Returns false (with
+    /// `OUT_OF_MEMORY` for a drawingBufferStorage) when the WebGL thread could not do it.
+    fn reallocate_drawing_buffer(&self, size: Size2D<u32>, format: Option<u32>) -> bool {
+        let (sender, receiver) = webgl_channel().unwrap();
+        match format {
+            None => self.droppable.webgl_sender.send_resize(size, sender),
+            Some(format) => self
+                .droppable
+                .webgl_sender
+                .send_drawing_buffer_storage(format, size, sender),
+        }
+        .unwrap();
+        // FIXME(#21718) The backend is allowed to choose a size smaller than
+        // what was requested
+        self.size.set(size);
+        let bytes_per_pixel =
+            if self.drawing_buffer_format.get() == WebGL2RenderingContextConstants::RGBA16F {
+                8
+            } else {
+                4
+            };
+        self.reflector_
+            .update_memory_size(self, size.cast::<usize>().area() * bytes_per_pixel);
+
+        if let Err(msg) = receiver.recv().unwrap() {
+            error!("Error resizing WebGLContext: {}", msg);
+            return false;
+        };
+
+        // ClearColor needs to be restored because after a resize the GLContext is recreated
+        // and the framebuffer is cleared using the default black transparent color.
+        let color = self.current_clear_color.get();
+        self.send_command(WebGLCommand::ClearColor(color.0, color.1, color.2, color.3));
+
+        // WebGL Spec: Scissor rect must not change if the canvas is resized.
+        // See: webgl/conformance-1.0.3/conformance/rendering/gl-scissor-canvas-dimensions.html
+        // NativeContext handling library changes the scissor after a resize, so we need to reset the
+        // default scissor when the canvas was created or the last scissor that the user set.
+        let rect = self.current_scissor.get();
+        self.send_command(WebGLCommand::Scissor(rect.0, rect.1, rect.2, rect.3));
+
+        // Bound texture must not change when the canvas is resized.
+        // Right now surfman generates a new FBO and the bound texture is changed
+        // in order to create a new render to texture attachment.
+        // Send a command to re-bind the TEXTURE_2D, if any.
+        if let Some(texture) = self
+            .textures
+            .active_texture_slot(constants::TEXTURE_2D, self.webgl_version())
+            .unwrap()
+            .get()
+        {
+            self.send_command(WebGLCommand::BindTexture(
+                constants::TEXTURE_2D,
+                Some(texture.id()),
+            ));
+        }
+
+        // Bound framebuffer must not change when the canvas is resized.
+        // Right now surfman generates a new FBO on resize.
+        // Send a command to re-bind the framebuffer, if any.
+        if let Some(fbo) = self.bound_draw_framebuffer.get() {
+            let id = WebGLFramebufferBindingRequest::Explicit(fbo.id());
+            self.send_command(WebGLCommand::BindFramebuffer(constants::FRAMEBUFFER, id));
+        }
+        true
+    }
+
+    /// The drawing buffer's colour format (drawingBufferFormat).
+    pub(crate) fn drawing_buffer_format(&self) -> u32 {
+        self.drawing_buffer_format.get()
     }
 
     pub(crate) fn set_image_key(&self, image_key: ImageKey) {
@@ -1077,7 +1179,38 @@ impl WebGLRenderingContext {
         )
     }
 
+    /// The pixels of a TexImageSource for an upload, converted into `unpackColorSpace`
+    /// (<https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-unpackColorSpace>)
+    /// from the source's colour space (an ImageData's own, else sRGB), unless
+    /// UNPACK_COLORSPACE_CONVERSION_WEBGL is NONE (which an ImageBitmap ignores).
     pub(crate) fn get_image_pixels(
+        &self,
+        no_gc: &NoGC,
+        source: TexImageSource,
+    ) -> Fallible<Option<TexPixels>> {
+        let convert = matches!(source, TexImageSource::ImageBitmap(_)) ||
+            self.texture_unpacking_settings
+                .get()
+                .contains(TextureUnpacking::CONVERT_COLORSPACE);
+        let source_space = match &source {
+            TexImageSource::ImageData(image_data) => image_data.ColorSpace(),
+            _ => PredefinedColorSpace::Srgb,
+        };
+        let destination_space = self.unpack_color_space.get();
+        let pixels = self.get_image_pixels_unconverted(no_gc, source)?;
+        if !convert || source_space == destination_space {
+            return Ok(pixels);
+        }
+        let dest_premultiplied = self
+            .texture_unpacking_settings
+            .get()
+            .contains(TextureUnpacking::PREMULTIPLY_ALPHA);
+        Ok(pixels.map(|pixels| {
+            pixels.convert_color_space(source_space, destination_space, dest_premultiplied)
+        }))
+    }
+
+    fn get_image_pixels_unconverted(
         &self,
         no_gc: &NoGC,
         source: TexImageSource,
@@ -2792,57 +2925,7 @@ impl CanvasContext for WebGLRenderingContext {
         if self.size.get() == size {
             return;
         }
-        let (sender, receiver) = webgl_channel().unwrap();
-        self.droppable
-            .webgl_sender
-            .send_resize(size, sender)
-            .unwrap();
-        // FIXME(#21718) The backend is allowed to choose a size smaller than
-        // what was requested
-        self.size.set(size);
-        self.reflector_
-            .update_memory_size(self, size.cast::<usize>().area() * 4);
-
-        if let Err(msg) = receiver.recv().unwrap() {
-            error!("Error resizing WebGLContext: {}", msg);
-            return;
-        };
-
-        // ClearColor needs to be restored because after a resize the GLContext is recreated
-        // and the framebuffer is cleared using the default black transparent color.
-        let color = self.current_clear_color.get();
-        self.send_command(WebGLCommand::ClearColor(color.0, color.1, color.2, color.3));
-
-        // WebGL Spec: Scissor rect must not change if the canvas is resized.
-        // See: webgl/conformance-1.0.3/conformance/rendering/gl-scissor-canvas-dimensions.html
-        // NativeContext handling library changes the scissor after a resize, so we need to reset the
-        // default scissor when the canvas was created or the last scissor that the user set.
-        let rect = self.current_scissor.get();
-        self.send_command(WebGLCommand::Scissor(rect.0, rect.1, rect.2, rect.3));
-
-        // Bound texture must not change when the canvas is resized.
-        // Right now surfman generates a new FBO and the bound texture is changed
-        // in order to create a new render to texture attachment.
-        // Send a command to re-bind the TEXTURE_2D, if any.
-        if let Some(texture) = self
-            .textures
-            .active_texture_slot(constants::TEXTURE_2D, self.webgl_version())
-            .unwrap()
-            .get()
-        {
-            self.send_command(WebGLCommand::BindTexture(
-                constants::TEXTURE_2D,
-                Some(texture.id()),
-            ));
-        }
-
-        // Bound framebuffer must not change when the canvas is resized.
-        // Right now surfman generates a new FBO on resize.
-        // Send a command to re-bind the framebuffer, if any.
-        if let Some(fbo) = self.bound_draw_framebuffer.get() {
-            let id = WebGLFramebufferBindingRequest::Explicit(fbo.id());
-            self.send_command(WebGLCommand::BindFramebuffer(constants::FRAMEBUFFER, id));
-        }
+        self.reallocate_drawing_buffer(size, None);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-offscreencanvas-transfertoimagebitmap>
@@ -2963,6 +3046,95 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
         let (sender, receiver) = webgl_channel().unwrap();
         self.send_command(WebGLCommand::DrawingBufferHeight(sender));
         receiver.recv().unwrap()
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferFormat>
+    fn DrawingBufferFormat(&self) -> u32 {
+        self.drawing_buffer_format.get()
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferColorSpace>
+    fn DrawingBufferColorSpace(&self) -> PredefinedColorSpace {
+        self.drawing_buffer_color_space.get()
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferColorSpace>:
+    /// a new value reallocates the drawing buffer (its contents are lost). The pixels are not
+    /// converted for display: they are shown as sRGB.
+    fn SetDrawingBufferColorSpace(&self, value: PredefinedColorSpace) {
+        if self.drawing_buffer_color_space.get() == value {
+            return;
+        }
+        self.drawing_buffer_color_space.set(value);
+        self.reallocate_drawing_buffer(self.size.get(), None);
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-unpackColorSpace>
+    fn UnpackColorSpace(&self) -> PredefinedColorSpace {
+        self.unpack_color_space.get()
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-unpackColorSpace>
+    fn SetUnpackColorSpace(&self, value: PredefinedColorSpace) {
+        self.unpack_color_space.set(value);
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferStorage>
+    fn DrawingBufferStorage(&self, sized_format: u32, width: u32, height: u32) {
+        if !self.drawing_buffer_alpha {
+            return self.webgl_error(InvalidOperation);
+        }
+        let webgl2 = self.webgl_version() == WebGLVersion::WebGL2;
+        let supported = match sized_format {
+            constants::RGBA8 => true,
+            // WebGL 1 has no EXT_sRGB here.
+            WebGL2RenderingContextConstants::SRGB8_ALPHA8 => webgl2,
+            WebGL2RenderingContextConstants::RGBA16F => {
+                if webgl2 {
+                    self.extension_manager.is_enabled::<EXTColorBufferFloat>()
+                } else {
+                    self.extension_manager
+                        .is_enabled::<EXTColorBufferHalfFloat>()
+                }
+            },
+            _ => false,
+        };
+        if !supported {
+            return self.webgl_error(InvalidEnum);
+        }
+        let max = self.limits.max_renderbuffer_size;
+        if width > max || height > max {
+            return self.webgl_error(InvalidValue);
+        }
+        let previous = self.drawing_buffer_format.get();
+        self.drawing_buffer_format.set(sized_format);
+        if !self.reallocate_drawing_buffer(Size2D::new(width, height), Some(sized_format)) {
+            self.drawing_buffer_format.set(previous);
+            self.webgl_error(OutOfMemory);
+        }
+    }
+
+    /// drawingBufferToneMapping(), <https://github.com/w3c-cg/ColorWeb-CG/blob/main/webgl-drawing-buffer-tone-map.md>:
+    /// with a CanvasToneMapping, sets the tone mapping; then (or with no argument or
+    /// undefined) returns it, as a new dictionary.
+    fn DrawingBufferToneMapping(
+        &self,
+        cx: &mut JSContext,
+        tone_mapping: HandleValue,
+    ) -> Fallible<CanvasToneMapping> {
+        if !tone_mapping.is_undefined() {
+            let mode = match CanvasToneMapping::new(cx, tone_mapping) {
+                Ok(ConversionResult::Success(tone_mapping)) => tone_mapping.mode,
+                Ok(ConversionResult::Failure(error)) => {
+                    return Err(Error::Type(error.into_owned()));
+                },
+                Err(()) => return Err(Error::JSFailed),
+            };
+            self.tone_mapping.set(mode);
+        }
+        Ok(CanvasToneMapping {
+            mode: self.tone_mapping.get(),
+        })
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>
@@ -4861,9 +5033,10 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
             pixel_type == constants::FLOAT &&
             (self.extension_manager.is_float_buffer_renderable() ||
                 self.extension_manager.is_half_float_buffer_renderable()) &&
-            self.bound_draw_framebuffer
-                .get()
-                .is_some_and(|fb| fb.color_attachment_is_float());
+            self.bound_draw_framebuffer.get().map_or(
+                self.drawing_buffer_format.get() == WebGL2RenderingContextConstants::RGBA16F,
+                |fb| fb.color_attachment_is_float(),
+            );
         if !float_read && (format != constants::RGBA || pixel_type != constants::UNSIGNED_BYTE) {
             return self.webgl_error(InvalidOperation);
         }
@@ -6210,6 +6383,32 @@ impl TexPixels {
         self.size
     }
 
+    /// Converts RGBA8/BGRA8 image pixels from colour space `from` into `to` (alpha unchanged,
+    /// premultiplied colour unpremultiplied around the conversion). `dest_premultiplied` is
+    /// UNPACK_PREMULTIPLY_ALPHA_WEBGL, which with the pending alpha treatment tells whether
+    /// the pixels are premultiplied now.
+    fn convert_color_space(
+        self,
+        from: PredefinedColorSpace,
+        to: PredefinedColorSpace,
+        dest_premultiplied: bool,
+    ) -> Self {
+        let (red, blue) = match self.pixel_format {
+            Some(PixelFormat::RGBA8) => (0, 2),
+            Some(PixelFormat::BGRA8) => (2, 0),
+            _ => return self,
+        };
+        let premultiplied = match self.alpha_treatment {
+            Some(AlphaTreatment::Unmultiply) => true,
+            Some(AlphaTreatment::Premultiply) => false,
+            None => dest_premultiplied,
+        };
+        let data = GenericSharedMemory::from_bytes_with_mutator(&self.data, |bytes| {
+            convert_rgba8_color_space(bytes, red, blue, premultiplied, from, to)
+        });
+        Self { data, ..self }
+    }
+
     pub(crate) fn pixel_format(&self) -> Option<PixelFormat> {
         self.pixel_format
     }
@@ -6710,4 +6909,111 @@ pub(crate) struct ObjectNamePools([ObjectNamePool; 5]);
 #[expect(unsafe_code)]
 unsafe impl JSTraceable for ObjectNamePools {
     unsafe fn trace(&self, _trc: *mut JSTracer) {}
+}
+
+/// Whether a colour space stores its values with the sRGB transfer function (else linear).
+fn color_space_is_encoded(space: PredefinedColorSpace) -> bool {
+    matches!(
+        space,
+        PredefinedColorSpace::Srgb | PredefinedColorSpace::Display_p3
+    )
+}
+
+/// Whether a colour space has the Display P3 primaries (else sRGB's).
+fn color_space_is_p3(space: PredefinedColorSpace) -> bool {
+    matches!(
+        space,
+        PredefinedColorSpace::Display_p3 | PredefinedColorSpace::Display_p3_linear
+    )
+}
+
+fn srgb_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(value: f32) -> f32 {
+    if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Converts 8-bit RGBA pixels (red at `red`, blue at `blue`, alpha at 3) between colour spaces:
+/// decode, change primaries (linear sRGB <-> linear Display P3, D65 both), clamp, encode.
+fn convert_rgba8_color_space(
+    bytes: &mut [u8],
+    red: usize,
+    blue: usize,
+    premultiplied: bool,
+    from: PredefinedColorSpace,
+    to: PredefinedColorSpace,
+) {
+    // Linear sRGB -> linear Display P3 and back (CSS Color 4's matrices, rounded).
+    const SRGB_TO_P3: [[f32; 3]; 3] = [
+        [0.822_462_1, 0.177_538, 0.0],
+        [0.033_194_2, 0.966_805_8, 0.0],
+        [0.017_082_7, 0.072_397_4, 0.910_519_9],
+    ];
+    const P3_TO_SRGB: [[f32; 3]; 3] = [
+        [1.224_940_2, -0.224_940_2, 0.0],
+        [-0.042_056_9, 1.042_057_1, 0.0],
+        [-0.019_637_6, -0.078_636_1, 1.098_273_5],
+    ];
+    let matrix = match (color_space_is_p3(from), color_space_is_p3(to)) {
+        (false, true) => Some(&SRGB_TO_P3),
+        (true, false) => Some(&P3_TO_SRGB),
+        _ => None,
+    };
+    let decode: Vec<f32> = (0..256)
+        .map(|value| {
+            let value = value as f32 / 255.0;
+            if color_space_is_encoded(from) {
+                srgb_to_linear(value)
+            } else {
+                value
+            }
+        })
+        .collect();
+    let encode_to = color_space_is_encoded(to);
+    for pixel in bytes.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        if alpha == 0 {
+            continue;
+        }
+        let mut rgb = [pixel[red], pixel[1], pixel[blue]];
+        if premultiplied && alpha != 255 {
+            for channel in &mut rgb {
+                *channel =
+                    ((*channel as u32 * 255 + alpha as u32 / 2) / alpha as u32).min(255) as u8;
+            }
+        }
+        let linear = rgb.map(|channel| decode[channel as usize]);
+        let converted = match matrix {
+            Some(m) => [0, 1, 2]
+                .map(|row| m[row][0] * linear[0] + m[row][1] * linear[1] + m[row][2] * linear[2]),
+            None => linear,
+        };
+        let mut out = converted.map(|value| {
+            let value = value.clamp(0.0, 1.0);
+            let value = if encode_to {
+                linear_to_srgb(value)
+            } else {
+                value
+            };
+            (value * 255.0 + 0.5) as u8
+        });
+        if premultiplied && alpha != 255 {
+            for channel in &mut out {
+                *channel = ((*channel as u32 * alpha as u32 + 127) / 255) as u8;
+            }
+        }
+        pixel[red] = out[0];
+        pixel[1] = out[1];
+        pixel[blue] = out[2];
+    }
 }

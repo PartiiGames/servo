@@ -12,7 +12,9 @@ use js::context::{JSContext, NoGC};
 use js::conversions::ToJSValConvertible;
 use js::jsapi::{JSObject, Type};
 use js::jsval::{BooleanValue, DoubleValue, Int32Value, NullValue, ObjectValue, UInt32Value};
-use js::rust::{CustomAutoRooterGuard, HandleObject, MutableHandleObject, MutableHandleValue};
+use js::rust::{
+    CustomAutoRooterGuard, HandleObject, HandleValue, MutableHandleObject, MutableHandleValue,
+};
 use js::typedarray::{ArrayBufferView, Float32, Int32, Uint32};
 use pixels::{Alpha, Snapshot};
 use script_bindings::interfaces::WebGL2RenderingContextHelpers;
@@ -36,11 +38,12 @@ use crate::dom::bindings::buffer_source::{
     array_buffer_view_byte_len, array_buffer_view_bytes, array_buffer_view_bytes_mut,
     create_buffer_source, typed_array_to_vec,
 };
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::PredefinedColorSpace;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::{
     WebGL2RenderingContextConstants as constants, WebGL2RenderingContextMethods,
 };
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::{
-    TexImageSource, WebGLContextAttributes, WebGLRenderingContextMethods,
+    CanvasToneMapping, TexImageSource, WebGLContextAttributes, WebGLRenderingContextMethods,
 };
 use crate::dom::bindings::codegen::UnionTypes::{
     Float32ArrayOrUnrestrictedFloatSequence,
@@ -1855,11 +1858,11 @@ impl WebGL2RenderingContext {
     /// type of its component class, and the implementation's IMPLEMENTATION_COLOR_READ_* pair,
     /// which is RGBA/HALF_FLOAT for 16-bit float buffers (as in Chromium) and otherwise the same.
     fn read_pixels_formats(&self) -> ((u32, u32), (u32, u32)) {
-        let internal_format = self
-            .base
-            .get_read_framebuffer_slot()
-            .get()
-            .and_then(|fb| fb.attachment_internal_format(fb.read_buffer()));
+        // The default framebuffer reads as its drawingBufferStorage format.
+        let internal_format = match self.base.get_read_framebuffer_slot().get() {
+            Some(fb) => fb.attachment_internal_format(fb.read_buffer()),
+            None => Some(self.base.drawing_buffer_format()),
+        };
         let primary = match internal_format {
             Some(
                 constants::R16F |
@@ -2919,6 +2922,45 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.1>
     fn DrawingBufferHeight(&self) -> i32 {
         self.base.DrawingBufferHeight()
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferFormat>
+    fn DrawingBufferFormat(&self) -> u32 {
+        self.base.DrawingBufferFormat()
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferColorSpace>
+    fn DrawingBufferColorSpace(&self) -> PredefinedColorSpace {
+        self.base.DrawingBufferColorSpace()
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferColorSpace>
+    fn SetDrawingBufferColorSpace(&self, value: PredefinedColorSpace) {
+        self.base.SetDrawingBufferColorSpace(value)
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-unpackColorSpace>
+    fn UnpackColorSpace(&self) -> PredefinedColorSpace {
+        self.base.UnpackColorSpace()
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-unpackColorSpace>
+    fn SetUnpackColorSpace(&self, value: PredefinedColorSpace) {
+        self.base.SetUnpackColorSpace(value)
+    }
+
+    /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferStorage>
+    fn DrawingBufferStorage(&self, sized_format: u32, width: u32, height: u32) {
+        self.base.DrawingBufferStorage(sized_format, width, height)
+    }
+
+    /// <https://github.com/w3c-cg/ColorWeb-CG/blob/main/webgl-drawing-buffer-tone-map.md>
+    fn DrawingBufferToneMapping(
+        &self,
+        cx: &mut JSContext,
+        tone_mapping: HandleValue,
+    ) -> Fallible<CanvasToneMapping> {
+        self.base.DrawingBufferToneMapping(cx, tone_mapping)
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.5>

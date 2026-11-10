@@ -145,6 +145,9 @@ pub struct GLState {
     bound_framebuffers: (u32, u32),
     /// Partii: the multisampled stand-in for the default framebuffer's drawing (antialias: true).
     msaa: Option<MsaaFramebuffer>,
+    /// The stand-in for the default framebuffer after drawingBufferStorage with a format the
+    /// surface can't have (SRGB8_ALPHA8, RGBA16F).
+    storage: Option<StorageFramebuffer>,
 }
 
 /// Partii (perf): see GLState::zero_level0.
@@ -190,25 +193,132 @@ impl GLState {
     /// Clears the multisampled default framebuffer the way the swap chain clears the surface
     /// (colour 0,0,0 with alpha 1 when alpha: false, depth 1, stencil 0), then puts the
     /// content's state back.
+    /// The drawingBufferStorage stand-in is cleared the same way.
     fn clear_msaa(&self, gl: &Gl) {
-        let Some(msaa) = &self.msaa else {
+        let framebuffers: Vec<gl::NativeFramebuffer> = self
+            .msaa
+            .iter()
+            .map(|msaa| msaa.framebuffer)
+            .chain(self.storage.iter().map(|storage| storage.framebuffer))
+            .collect();
+        if framebuffers.is_empty() {
             return;
-        };
+        }
         let alpha = self.requested_flags.contains(ContextAttributeFlags::ALPHA);
         unsafe {
             let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
-            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(msaa.framebuffer));
-            gl.disable(gl::SCISSOR_TEST);
-            gl.color_mask(true, true, true, true);
-            gl.depth_mask(true);
-            gl.stencil_mask(u32::MAX);
-            gl.clear_color(0., 0., 0., !alpha as u32 as f32);
-            gl.clear_depth(1.);
-            gl.clear_stencil(0);
-            gl.clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
+            for framebuffer in framebuffers {
+                gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(framebuffer));
+                gl.disable(gl::SCISSOR_TEST);
+                gl.color_mask(true, true, true, true);
+                gl.depth_mask(true);
+                gl.stencil_mask(u32::MAX);
+                gl.clear_color(0., 0., 0., !alpha as u32 as f32);
+                gl.clear_depth(1.);
+                gl.clear_stencil(0);
+                gl.clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
+            }
             gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
         }
         self.restore_invariant(gl);
+    }
+
+    /// Copies the drawingBufferStorage stand-in into the surface, which is what the compositor
+    /// shows. RGBA16F is blitted (clamped to [0, 1]). SRGB8_ALPHA8's bytes are already what the
+    /// screen shows, but a blit would decode them to linear (as GLES, and desktop GL with
+    /// FRAMEBUFFER_SRGB, do), so they go through readPixels (never converted) into an RGBA8
+    /// texture that is blitted instead.
+    fn resolve_storage(&mut self, gl: &Gl, surface: Option<gl::NativeFramebuffer>) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let (width, height) = (storage.size.width, storage.size.height);
+        unsafe {
+            let read = gl.get_parameter_framebuffer(gl::READ_FRAMEBUFFER_BINDING);
+            let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
+            gl.disable(gl::SCISSOR_TEST);
+            // Content may have set the stand-in's read buffer (readBuffer(NONE)).
+            gl.bind_framebuffer(gl::READ_FRAMEBUFFER, Some(storage.framebuffer));
+            let read_buffer = gl.get_parameter_i32(gl::READ_BUFFER) as u32;
+            gl.read_buffer(gl::COLOR_ATTACHMENT0);
+            if let Some((staging_framebuffer, staging_texture)) = storage.staging {
+                let pack_buffer = gl.get_parameter_buffer(gl::PIXEL_PACK_BUFFER_BINDING);
+                let unpack_buffer = gl.get_parameter_buffer(gl::PIXEL_UNPACK_BUFFER_BINDING);
+                let texture = gl.get_parameter_texture(gl::TEXTURE_BINDING_2D);
+                const PIXEL_STORE: [u32; 10] = [
+                    gl::PACK_ALIGNMENT,
+                    gl::PACK_ROW_LENGTH,
+                    gl::PACK_SKIP_PIXELS,
+                    gl::PACK_SKIP_ROWS,
+                    gl::UNPACK_ALIGNMENT,
+                    gl::UNPACK_ROW_LENGTH,
+                    gl::UNPACK_IMAGE_HEIGHT,
+                    gl::UNPACK_SKIP_PIXELS,
+                    gl::UNPACK_SKIP_ROWS,
+                    gl::UNPACK_SKIP_IMAGES,
+                ];
+                let pixel_store = PIXEL_STORE.map(|name| gl.get_parameter_i32(name));
+                for name in PIXEL_STORE {
+                    let value = if name == gl::PACK_ALIGNMENT || name == gl::UNPACK_ALIGNMENT {
+                        4
+                    } else {
+                        0
+                    };
+                    gl.pixel_store_i32(name, value);
+                }
+                gl.bind_buffer(gl::PIXEL_PACK_BUFFER, None);
+                gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, None);
+                let mut pixels = vec![0u8; width as usize * height as usize * 4];
+                gl.read_pixels(
+                    0,
+                    0,
+                    width,
+                    height,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut pixels)),
+                );
+                gl.bind_texture(gl::TEXTURE_2D, Some(staging_texture));
+                gl.tex_sub_image_2d(
+                    gl::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    width,
+                    height,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                );
+                gl.bind_texture(gl::TEXTURE_2D, texture);
+                for (name, value) in PIXEL_STORE.into_iter().zip(pixel_store) {
+                    gl.pixel_store_i32(name, value);
+                }
+                gl.bind_buffer(gl::PIXEL_PACK_BUFFER, pack_buffer);
+                gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, unpack_buffer);
+                gl.read_buffer(read_buffer);
+                gl.bind_framebuffer(gl::READ_FRAMEBUFFER, Some(staging_framebuffer));
+            }
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, surface);
+            gl.blit_framebuffer(
+                0,
+                0,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+                gl::COLOR_BUFFER_BIT,
+                gl::NEAREST,
+            );
+            if storage.staging.is_none() {
+                gl.read_buffer(read_buffer);
+            }
+            gl.bind_framebuffer(gl::READ_FRAMEBUFFER, read);
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
+        }
+        self.restore_scissor_invariant(gl);
     }
 
     /// Resolves what was drawn into the multisampled default framebuffer since the last
@@ -375,6 +485,7 @@ impl Default for GLState {
             default_vao: None,
             drawing_to_default_framebuffer: true,
             msaa: None,
+            storage: None,
         }
     }
 }
@@ -545,6 +656,9 @@ impl WebGLThread {
             },
             WebGLMsg::ResizeContext(ctx_id, size, sender) => {
                 let _ = sender.send(self.resize_webgl_context(ctx_id, size));
+            },
+            WebGLMsg::DrawingBufferStorage(ctx_id, format, size, sender) => {
+                let _ = sender.send(self.drawing_buffer_storage(ctx_id, format, size));
             },
             WebGLMsg::RemoveContext(ctx_id) => {
                 self.remove_webgl_context(ctx_id);
@@ -975,6 +1089,12 @@ impl WebGLThread {
             unsafe { msaa.allocate(&data.gl, size.to_i32()) };
             msaa.dirty = false;
         }
+        let mut storage_result = Ok(());
+        if let Some(storage) = data.state.storage.as_mut() {
+            if !unsafe { storage.allocate(&data.gl, size.to_i32()) } {
+                storage_result = Err(format!("drawing buffer storage {size:?} failed"));
+            }
+        }
         data.state.clear_msaa(&data.gl);
 
         // Reset framebuffer bindings as appropriate.
@@ -987,7 +1107,67 @@ impl WebGLThread {
             .contains(ContextAttributeFlags::ALPHA);
         self.update_webrender_image_for_context(context_id, size.to_i32(), has_alpha, None);
 
-        Ok(())
+        storage_result
+    }
+
+    /// drawingBufferStorage: the surface (always RGBA8) takes the new size; a format other than
+    /// RGBA8 gets a stand-in framebuffer of that format, which drawing and reading the default
+    /// framebuffer use and swaps copy into the surface (see GLState::resolve_storage). The
+    /// multisampled stand-in (antialias) is dropped for such a format.
+    fn drawing_buffer_storage(
+        &mut self,
+        context_id: WebGLContextId,
+        format: u32,
+        requested_size: Size2D<u32>,
+    ) -> Result<(), String> {
+        self.make_current_if_needed(context_id);
+        let Some(data) = self.contexts.get_mut(&context_id) else {
+            return Err("Missing WebGL context!".into());
+        };
+        let gl = data.gl.clone();
+        if let Some(storage) = data.state.storage.take() {
+            unsafe { storage.delete(&gl) };
+        }
+        if format != gl::RGBA8 {
+            if let Some(msaa) = data.state.msaa.take() {
+                unsafe { msaa.delete(&gl) };
+            }
+            let storage = unsafe { StorageFramebuffer::new(&gl, format) }
+                .ok_or_else(|| format!("no drawing buffer storage for {format:#x}"))?;
+            data.state.storage = Some(storage);
+        }
+        let result = self.resize_webgl_context(context_id, requested_size);
+        let Some(data) = self.contexts.get_mut(&context_id) else {
+            return Err("Missing WebGL context!".into());
+        };
+        if result.is_err() {
+            if let Some(storage) = data.state.storage.take() {
+                unsafe { storage.delete(&gl) };
+            }
+        }
+        // Point what the content has bound as the default framebuffer at the new one.
+        let surface = surface_framebuffer(&data.device, &data.ctx);
+        let state = &data.state;
+        let draw = state
+            .storage
+            .as_ref()
+            .map(|storage| storage.framebuffer)
+            .or(state.msaa.as_ref().map(|msaa| msaa.framebuffer))
+            .or(surface);
+        let read = state
+            .storage
+            .as_ref()
+            .map(|storage| storage.framebuffer)
+            .or(surface);
+        unsafe {
+            if state.bound_framebuffers.0 == 0 {
+                gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
+            }
+            if state.bound_framebuffers.1 == 0 {
+                gl.bind_framebuffer(gl::READ_FRAMEBUFFER, read);
+            }
+        }
+        result
     }
 
     /// Note that rendering has finished in WebRender for this context. If the context
@@ -1090,6 +1270,7 @@ impl WebGLThread {
             // The compositor shows the surface: resolve the multisampled drawing into it.
             let surface = surface_framebuffer(&data.device, &data.ctx);
             data.state.resolve_msaa(&data.gl, surface);
+            data.state.resolve_storage(&data.gl, surface);
 
             // Check to see if any of the current framebuffer bindings are the surface we're about
             // to swap out. If so, we'll have to reset them after destroying the surface.
@@ -3317,7 +3498,8 @@ impl WebGLImpl {
                         .and_then(|info| info.framebuffer_object);
                     let bound =
                         unsafe { gl.get_parameter_framebuffer(gl::READ_FRAMEBUFFER_BINDING) };
-                    if surface_fbo.is_some() && bound == surface_fbo {
+                    let storage_fbo = state.storage.as_ref().map(|storage| storage.framebuffer);
+                    if bound.is_some() && (bound == surface_fbo || bound == storage_fbo) {
                         gl::COLOR_ATTACHMENT0
                     } else {
                         buffer
@@ -3934,12 +4116,15 @@ impl WebGLImpl {
     ) {
         let id = match request {
             WebGLFramebufferBindingRequest::Explicit(id) => Some(id.glow()),
-            WebGLFramebufferBindingRequest::Default => {
-                device
-                    .context_surface_info(ctx)
-                    .unwrap()
-                    .expect("No surface attached!")
-                    .framebuffer_object
+            WebGLFramebufferBindingRequest::Default => match &state.storage {
+                Some(storage) => Some(storage.framebuffer),
+                None => {
+                    device
+                        .context_surface_info(ctx)
+                        .unwrap()
+                        .expect("No surface attached!")
+                        .framebuffer_object
+                },
             },
         };
 
@@ -5110,6 +5295,158 @@ impl MsaaFramebuffer {
                 warn!("antialias: multisampled storage {size:?} failed");
             }
             ok
+        }
+    }
+}
+
+impl MsaaFramebuffer {
+    unsafe fn delete(self, gl: &Gl) {
+        unsafe {
+            gl.delete_framebuffer(self.framebuffer);
+            gl.delete_renderbuffer(self.color);
+            gl.delete_renderbuffer(self.depth_stencil);
+        }
+    }
+}
+
+/// Partii: the default framebuffer after drawingBufferStorage with SRGB8_ALPHA8 or RGBA16F
+/// (surfman surfaces are RGBA8): colour of that format plus DEPTH24_STENCIL8 (WebGL's missing
+/// depth/stencil are faked by masks, as for the surface). Content binds it as the default
+/// framebuffer for drawing and reading; swaps copy it into the surface (resolve_storage).
+#[derive(Debug)]
+struct StorageFramebuffer {
+    framebuffer: gl::NativeFramebuffer,
+    color: gl::NativeRenderbuffer,
+    depth_stencil: gl::NativeRenderbuffer,
+    format: u32,
+    size: Size2D<i32>,
+    /// SRGB8_ALPHA8: an RGBA8 texture and a framebuffer around it, which the encoded bytes are
+    /// copied into on their way to the surface.
+    staging: Option<(gl::NativeFramebuffer, gl::NativeTexture)>,
+}
+
+impl StorageFramebuffer {
+    unsafe fn new(gl: &Gl, format: u32) -> Option<StorageFramebuffer> {
+        unsafe {
+            while gl.get_error() != gl::NO_ERROR {}
+            let framebuffer = gl.create_framebuffer().ok()?;
+            let color = gl.create_renderbuffer().ok()?;
+            let depth_stencil = gl.create_renderbuffer().ok()?;
+            let staging = if format == gl::SRGB8_ALPHA8 {
+                Some((gl.create_framebuffer().ok()?, gl.create_texture().ok()?))
+            } else {
+                None
+            };
+            let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(framebuffer));
+            gl.framebuffer_renderbuffer(
+                gl::DRAW_FRAMEBUFFER,
+                gl::COLOR_ATTACHMENT0,
+                gl::RENDERBUFFER,
+                Some(color),
+            );
+            gl.framebuffer_renderbuffer(
+                gl::DRAW_FRAMEBUFFER,
+                gl::DEPTH_ATTACHMENT,
+                gl::RENDERBUFFER,
+                Some(depth_stencil),
+            );
+            gl.framebuffer_renderbuffer(
+                gl::DRAW_FRAMEBUFFER,
+                gl::STENCIL_ATTACHMENT,
+                gl::RENDERBUFFER,
+                Some(depth_stencil),
+            );
+            if let Some((staging_framebuffer, staging_texture)) = staging {
+                gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(staging_framebuffer));
+                gl.framebuffer_texture_2d(
+                    gl::DRAW_FRAMEBUFFER,
+                    gl::COLOR_ATTACHMENT0,
+                    gl::TEXTURE_2D,
+                    Some(staging_texture),
+                    0,
+                );
+            }
+            gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
+            let storage = StorageFramebuffer {
+                framebuffer,
+                color,
+                depth_stencil,
+                format,
+                size: Size2D::new(0, 0),
+                staging,
+            };
+            if gl.get_error() != gl::NO_ERROR {
+                storage.delete(gl);
+                return None;
+            }
+            Some(storage)
+        }
+    }
+
+    /// (Re)allocates the storage at `size`. Returns false on a GL error or an incomplete
+    /// framebuffer.
+    unsafe fn allocate(&mut self, gl: &Gl, size: Size2D<i32>) -> bool {
+        unsafe {
+            while gl.get_error() != gl::NO_ERROR {}
+            let renderbuffer = gl.get_parameter_renderbuffer(gl::RENDERBUFFER_BINDING);
+            for (renderbuffer, format) in [
+                (self.color, self.format),
+                (self.depth_stencil, gl::DEPTH24_STENCIL8),
+            ] {
+                gl.bind_renderbuffer(gl::RENDERBUFFER, Some(renderbuffer));
+                gl.renderbuffer_storage(gl::RENDERBUFFER, format, size.width, size.height);
+            }
+            gl.bind_renderbuffer(gl::RENDERBUFFER, renderbuffer);
+            if let Some((_, staging_texture)) = self.staging {
+                let texture = gl.get_parameter_texture(gl::TEXTURE_BINDING_2D);
+                let unpack_buffer = gl.get_parameter_buffer(gl::PIXEL_UNPACK_BUFFER_BINDING);
+                gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, None);
+                gl.bind_texture(gl::TEXTURE_2D, Some(staging_texture));
+                gl.tex_image_2d(
+                    gl::TEXTURE_2D,
+                    0,
+                    gl::RGBA8 as i32,
+                    size.width,
+                    size.height,
+                    0,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(None),
+                );
+                gl.tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+                gl.tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+                gl.tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_MAX_LEVEL, 0);
+                gl.bind_texture(gl::TEXTURE_2D, texture);
+                gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, unpack_buffer);
+            }
+            self.size = size;
+            let mut ok = gl.get_error() == gl::NO_ERROR;
+            if ok {
+                let draw = gl.get_parameter_framebuffer(gl::DRAW_FRAMEBUFFER_BINDING);
+                gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(self.framebuffer));
+                ok = gl.check_framebuffer_status(gl::DRAW_FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
+                gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, draw);
+            }
+            if !ok {
+                warn!(
+                    "drawingBufferStorage: {:#x} storage {size:?} failed",
+                    self.format
+                );
+            }
+            ok
+        }
+    }
+
+    unsafe fn delete(self, gl: &Gl) {
+        unsafe {
+            gl.delete_framebuffer(self.framebuffer);
+            gl.delete_renderbuffer(self.color);
+            gl.delete_renderbuffer(self.depth_stencil);
+            if let Some((framebuffer, texture)) = self.staging {
+                gl.delete_framebuffer(framebuffer);
+                gl.delete_texture(texture);
+            }
         }
     }
 }
