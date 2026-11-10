@@ -37,6 +37,9 @@ impl Profiler {
             servo_allocator::disable_unmeasured_tracking();
         }
 
+        // Partii (mem-1): hand freed malloc memory back to the OS as RSS grows (PARTII_MALLOC_TRIM=0: off).
+        crate::malloc_trim::start();
+
         // Always spawn the memory profiler. If there is no timer thread it won't receive regular
         // `Print` events, but it will still receive the other events.
         thread::Builder::new()

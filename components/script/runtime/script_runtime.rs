@@ -1301,6 +1301,10 @@ pub(crate) fn compute_size(
                 return 0;
             }
             let size = unsafe { (v.malloc_size_of)(&mut *ops, dom_object) };
+            // Partii (mem-1): a size past isize::MAX is a wrapped negative (AbortSignal reported
+            // -8 bytes in the lx soak's memory reports, which made the whole url(...) tree read as
+            // 16 EiB); count it as 0 rather than poison the sums.
+            let size = if size > isize::MAX as usize { 0 } else { size };
 
             let Some(per_global_interface_sizes) = per_global_interface_sizes else {
                 return size;

@@ -4,6 +4,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod malloc_trim;
 pub mod mem;
 #[cfg_attr(not(target_os = "windows"), expect(unsafe_code))]
 pub mod system_reporter;
