@@ -785,7 +785,7 @@ impl WebGLProgram {
             return Ok(None);
         }
 
-        let (size, type_) = {
+        let (size, type_, known) = {
             let (base_name, array_index) = match parse_uniform_name(&name) {
                 Some((name, index)) if index.is_none_or(|i| i >= 0) => (name, index),
                 _ => return Ok(None),
@@ -801,18 +801,28 @@ impl WebGLProgram {
                         .size
                         .map(|size| size - array_index.unwrap_or_default()),
                     uniform.type_,
+                    // Partii (gaps-5): the link already asked GL for the location of the uniform (of
+                    // element 0 of an array, which is also the array's name's): no round trip.
+                    uniform
+                        .location
+                        .filter(|_| array_index.unwrap_or(0) == 0 && link_locations_enabled()),
                 ),
                 _ => return Ok(None),
             }
         };
 
-        let (sender, receiver) = webgl_channel().unwrap();
-        self.upcast().send_command(WebGLCommand::GetUniformLocation(
-            self.id(),
-            name.into(),
-            sender,
-        ));
-        let location = receiver.recv().unwrap();
+        let location = match known {
+            Some(location) => location,
+            None => {
+                let (sender, receiver) = webgl_channel().unwrap();
+                self.upcast().send_command(WebGLCommand::GetUniformLocation(
+                    self.id(),
+                    name.into(),
+                    sender,
+                ));
+                receiver.recv().unwrap()
+            },
+        };
         let context_id = self.upcast().context_id();
 
         Ok(Some(WebGLUniformLocation::new(
@@ -1161,6 +1171,14 @@ fn validate_glsl_char(c: char) -> WebGLResult<()> {
         '?' => Ok(()),
         _ => Err(WebGLError::InvalidValue),
     }
+}
+
+/// Partii (gaps-5): getUniformLocation of a uniform (or array element 0) answers with the location the link
+/// recorded instead of asking the WebGL thread (Phaser's boot asks ~180 times, each a round trip behind the
+/// queued work), unless `PARTII_WEBGL_LINK_LOCATIONS=0`.
+fn link_locations_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_LINK_LOCATIONS").map_or(true, |v| v != "0"))
 }
 
 fn parse_uniform_name(name: &DOMString) -> Option<(String, Option<i32>)> {
