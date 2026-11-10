@@ -675,7 +675,62 @@ impl Font {
 
     /// Get the [`FontBaseline`] for this font.
     pub fn baseline(&self) -> Option<FontBaseline> {
-        self.shaper.get_or_init(|| Shaper::new(self)).baseline()
+        self.baseline_from_base_table()
+            .or_else(|| self.shaper.get_or_init(|| Shaper::new(self)).baseline())
+    }
+
+    /// Partii: read the default script's horizontal baselines straight from the BASE table
+    /// (`hang`, `ideo` and `romn`), scaled to the font size. Returns `None` when the font has
+    /// neither a hanging nor an ideographic baseline there.
+    fn baseline_from_base_table(&self) -> Option<FontBaseline> {
+        let base_table = self.table_for_tag(BASE)?;
+        let head_table = self.table_for_tag(Tag::new(b"head"))?;
+        let base =
+            read_fonts::tables::base::Base::read(read_fonts::FontData::new(base_table.buffer()))
+                .ok()?;
+        let head =
+            read_fonts::tables::head::Head::read(read_fonts::FontData::new(head_table.buffer()))
+                .ok()?;
+        let units_per_em = head.units_per_em();
+        if units_per_em == 0 {
+            return None;
+        }
+        let scale = self.descriptor.pt_size.to_f64_px() / units_per_em as f64;
+
+        let axis = base.horiz_axis()?.ok()?;
+        let tags = axis.base_tag_list()?.ok()?;
+        let scripts = axis.base_script_list().ok()?;
+        let records = scripts.base_script_records();
+        let record = records
+            .iter()
+            .find(|record| record.base_script_tag() == Tag::new(b"DFLT"))
+            .or_else(|| records.first())?;
+        let values = record
+            .base_script(scripts.offset_data())
+            .ok()?
+            .base_values()?
+            .ok()?;
+        let coordinate = |tag: &[u8; 4]| -> Option<f32> {
+            let index = tags
+                .baseline_tags()
+                .iter()
+                .position(|baseline_tag| baseline_tag.get() == Tag::new(tag))?;
+            let coordinate = values.base_coords().get(index).ok()?.coordinate();
+            Some((coordinate as f64 * scale) as f32)
+        };
+
+        let hanging = coordinate(b"hang");
+        let ideographic = coordinate(b"ideo");
+        if hanging.is_none() && ideographic.is_none() {
+            return None;
+        }
+        let ascent = self.metrics().ascent.to_f32_px();
+        let descent = self.metrics().descent.to_f32_px();
+        Some(FontBaseline {
+            hanging_baseline: hanging.unwrap_or(ascent * 0.8),
+            ideographic_baseline: ideographic.unwrap_or(-descent * 0.5),
+            alphabetic_baseline: coordinate(b"romn").unwrap_or(0.),
+        })
     }
 
     #[cfg(not(target_os = "macos"))]

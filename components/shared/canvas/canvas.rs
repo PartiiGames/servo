@@ -566,6 +566,62 @@ impl Path {
             .any(|seg| seg.nearest(p, 0.00001).distance_sq < 0.00001)
     }
 
+    /// Partii: <https://html.spec.whatwg.org/multipage/#dom-context-2d-ispointinstroke>
+    /// The path is in user space; the stroke is built there with `line_options` and then
+    /// mapped to the canvas coordinate space by `transform`, where (x, y) is tested.
+    pub fn is_point_in_stroke(
+        &self,
+        x: f64,
+        y: f64,
+        line_options: &LineOptions,
+        transform: Transform2D<f64>,
+    ) -> bool {
+        let p = Point::new(x, y);
+        // Step 1. If x or y are infinite or NaN, then return false.
+        if !p.is_finite() {
+            return false;
+        }
+        let cap = match line_options.cap_style {
+            LineCapStyle::Butt => kurbo::Cap::Butt,
+            LineCapStyle::Round => kurbo::Cap::Round,
+            LineCapStyle::Square => kurbo::Cap::Square,
+        };
+        let join = match line_options.join_style {
+            LineJoinStyle::Round => kurbo::Join::Round,
+            LineJoinStyle::Bevel => kurbo::Join::Bevel,
+            LineJoinStyle::Miter => kurbo::Join::Miter,
+        };
+        let style = kurbo::Stroke {
+            width: line_options.width,
+            join,
+            miter_limit: line_options.miter_limit,
+            start_cap: cap,
+            end_cap: cap,
+            dash_pattern: line_options.dash.iter().map(|dash| *dash as f64).collect(),
+            dash_offset: line_options.dash_offset,
+        };
+        let outline = kurbo::stroke(
+            self.0.iter(),
+            &style,
+            &kurbo::StrokeOpts::default(),
+            0.001,
+        );
+        let affine = kurbo::Affine::new([
+            transform.m11,
+            transform.m12,
+            transform.m21,
+            transform.m22,
+            transform.m31,
+            transform.m32,
+        ]);
+        let outline = affine * outline;
+        // Step 2. Points on the outline itself count as inside.
+        outline.winding(p) != 0 ||
+            outline
+                .segments()
+                .any(|seg| seg.nearest(p, 0.00001).distance_sq < 0.00001)
+    }
+
     pub fn bounding_box(&self) -> Rect<f64> {
         self.0.control_box().into()
     }

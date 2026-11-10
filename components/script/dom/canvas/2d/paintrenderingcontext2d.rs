@@ -254,6 +254,17 @@ impl PaintRenderingContext2DMethods<crate::DomTypeHolder> for PaintRenderingCont
             .is_point_in_path_(&self.global(), path.segments(), x, y, fill_rule)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-ispointinstroke>
+    fn IsPointInStroke(&self, x: f64, y: f64) -> bool {
+        self.canvas_state.is_point_in_stroke(None, x, y)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-ispointinstroke>
+    fn IsPointInStroke_(&self, path: &Path2D, x: f64, y: f64) -> bool {
+        self.canvas_state
+            .is_point_in_stroke(Some(path.segments()), x, y)
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage>
     fn DrawImage(&self, image: CanvasImageSource, dx: f64, dy: f64) -> ErrorResult {
         self.canvas_state.draw_image(None, image, dx, dy)

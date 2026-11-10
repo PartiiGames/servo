@@ -712,13 +712,16 @@ impl Convert<vello_cpu::PaintType> for FillOrStrokeStyle {
                 vello_cpu::PaintType::Gradient(canvas_gradient(gradient, style.stops))
             },
             ConicGradient(style) => {
-                // Partii: one turn clockwise from the start angle.
-                let start = style.angle as f32;
+                // Partii: one turn clockwise from the start angle. The sweep position is
+                // measured from the start angle with pixel angles in [0, 2π), so repeat to wrap
+                // the pixels that lie "before" a start angle past 0 (conic.positive.rotation).
+                let start = style.angle.rem_euclid(std::f64::consts::TAU) as f32;
                 let gradient = peniko::Gradient::new_sweep(
                     kurbo::Point::new(style.x, style.y),
                     start,
                     start + std::f32::consts::TAU,
-                );
+                )
+                .with_extend(peniko::Extend::Repeat);
                 vello_cpu::PaintType::Gradient(canvas_gradient(gradient, style.stops))
             },
             Surface(surface_style) => {

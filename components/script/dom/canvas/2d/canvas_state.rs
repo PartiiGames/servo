@@ -1782,18 +1782,28 @@ impl CanvasState {
         } as f64;
         let anchor_y = text_baseline_offset(&font, state.text_baseline);
 
+        // Partii: the em square is the font size, split between ascent and descent in the
+        // font's own ascent:descent proportion (2d.text.measure.emHeights*).
+        let em_size = font.descriptor.pt_size.to_f64_px();
+        let (em_ascent, em_descent) = if ascent + descent > 0. {
+            let em_ascent = em_size * ascent / (ascent + descent);
+            (em_ascent, em_size - em_ascent)
+        } else {
+            (em_size, 0.)
+        };
+
         TextMetrics::new(
             global,
             cx,
             total_advance as f64,
             anchor_x - bounding_box.min_x(),
             bounding_box.max_x() - anchor_x,
+            ascent - anchor_y,
+            descent + anchor_y,
             bounding_box.max_y() - anchor_y,
             anchor_y - bounding_box.min_y(),
-            ascent - anchor_y,
-            descent + anchor_y,
-            ascent - anchor_y,
-            descent + anchor_y,
+            em_ascent - anchor_y,
+            em_descent + anchor_y,
             hanging_baseline - anchor_y,
             alphabetic_baseline - anchor_y,
             ideographic_baseline - anchor_y,
@@ -2457,6 +2467,14 @@ impl CanvasState {
             CanvasFillRule::Evenodd => FillRule::Evenodd,
         };
         path.is_point_in_path(x, y, fill_rule)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-ispointinstroke>
+    /// Partii: `path` is a Path2D's segments, or `None` for the current default path.
+    pub(super) fn is_point_in_stroke(&self, path: Option<Path>, x: f64, y: f64) -> bool {
+        let path = path.unwrap_or_else(|| self.current_default_path.borrow().clone());
+        let state = self.state.borrow();
+        path.is_point_in_stroke(x, y, &state.line_options(), state.transform.cast())
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-scale>

@@ -385,6 +385,17 @@ impl CanvasRenderingContext2DMethods<crate::DomTypeHolder> for CanvasRenderingCo
             .is_point_in_path_(&self.global(), path.segments(), x, y, fill_rule)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-ispointinstroke>
+    fn IsPointInStroke(&self, x: f64, y: f64) -> bool {
+        self.canvas_state.is_point_in_stroke(None, x, y)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-ispointinstroke>
+    fn IsPointInStroke_(&self, path: &Path2D, x: f64, y: f64) -> bool {
+        self.canvas_state
+            .is_point_in_stroke(Some(path.segments()), x, y)
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-filltext>
     fn FillText(&self, text: DOMString, x: f64, y: f64, max_width: Option<f64>) {
         self.canvas_state.fill_text(

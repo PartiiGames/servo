@@ -149,8 +149,8 @@ interface mixin CanvasDrawPath {
                         optional CanvasFillRule fillRule = "nonzero");
   boolean isPointInPath(Path2D path, unrestricted double x, unrestricted double y,
                         optional CanvasFillRule fillRule = "nonzero");
-  //boolean isPointInStroke(unrestricted double x, unrestricted double y);
-  //boolean isPointInStroke(Path2D path, unrestricted double x, unrestricted double y);
+  boolean isPointInStroke(unrestricted double x, unrestricted double y);
+  boolean isPointInStroke(Path2D path, unrestricted double x, unrestricted double y);
 };
 
 interface mixin CanvasUserInterface {

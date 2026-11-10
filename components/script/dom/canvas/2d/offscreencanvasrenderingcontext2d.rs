@@ -665,6 +665,16 @@ impl OffscreenCanvasRenderingContext2DMethods<crate::DomTypeHolder>
         self.context.IsPointInPath_(path, x, y, fill_rule)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-ispointinstroke>
+    fn IsPointInStroke(&self, x: f64, y: f64) -> bool {
+        self.context.IsPointInStroke(x, y)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-ispointinstroke>
+    fn IsPointInStroke_(&self, path: &Path2D, x: f64, y: f64) -> bool {
+        self.context.IsPointInStroke_(path, x, y)
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-scale>
     fn Scale(&self, x: f64, y: f64) {
         self.context.Scale(x, y)
