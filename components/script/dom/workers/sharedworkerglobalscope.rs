@@ -29,7 +29,9 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::interfaces::HasOrigin;
 use servo_base::generic_channel::{GenericReceiver, RoutedReceiver};
 use servo_base::id::{BrowsingContextId, ScriptEventLoopId, WebViewId};
-use servo_constellation_traits::{MessagePortImpl, WorkerGlobalScopeInit, WorkerScriptLoadOrigin};
+use servo_constellation_traits::{
+    AgentClusterKey, MessagePortImpl, WorkerGlobalScopeInit, WorkerScriptLoadOrigin,
+};
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use style::thread_state::{self, ThreadState};
 use stylo_atoms::Atom;
@@ -353,6 +355,11 @@ impl SharedWorkerGlobalScope {
             extended_lifetime,
             registration_id,
         ));
+        // A shared or service worker is an agent cluster of its own
+        // (<https://html.spec.whatwg.org/multipage/#integration-with-the-javascript-agent-cluster-formalism>).
+        scope
+            .upcast::<GlobalScope>()
+            .set_agent_cluster(AgentClusterKey::new_worker());
         SharedWorkerGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
             cx,
             &scope.origin(),

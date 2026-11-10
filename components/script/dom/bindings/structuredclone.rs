@@ -36,11 +36,11 @@ use servo_base::id::{
     OffscreenCanvasId, PipelineNamespaceId, QuotaExceededErrorId,
 };
 use servo_constellation_traits::{
-    BlobImpl, DomException, DomMatrix, DomPoint, DomQuad, DomRect, InProcessCloneData,
-    MessagePortImpl, Serializable as SerializableInterface, SerializableCryptoKey,
-    SerializableFile, SerializableFileList, SerializableImageBitmap, SerializableImageData,
-    SerializableQuotaExceededError, StructuredSerializedData, TransferableOffscreenCanvas,
-    Transferrable as TransferrableInterface, TransformStreamData,
+    AgentClusterKey, BlobImpl, DomException, DomMatrix, DomPoint, DomQuad, DomRect,
+    InProcessCloneData, MessagePortImpl, Serializable as SerializableInterface,
+    SerializableCryptoKey, SerializableFile, SerializableFileList, SerializableImageBitmap,
+    SerializableImageData, SerializableQuotaExceededError, StructuredSerializedData,
+    TransferableOffscreenCanvas, Transferrable as TransferrableInterface, TransformStreamData,
 };
 use strum::IntoEnumIterator;
 
@@ -650,8 +650,9 @@ unsafe extern "C" fn report_error_callback(
 
 /// SpiderMonkey calls this after it has written or read a `SharedArrayBuffer` (or shared
 /// `WebAssembly.Memory`). It only gets that far when the clone's `CloneDataPolicy` allowed shared
-/// memory, which `write_impl` and `read` grant only to cross-origin isolated globals cloning
-/// within this process; the policy is the gate, this just records that shared memory went in.
+/// memory, which `write_impl` grants only to cross-origin isolated globals and `read` only to a
+/// reader in the writer's agent cluster; the policy is the gate, this just records that shared
+/// memory went in.
 unsafe extern "C" fn sab_cloned_callback(
     _cx: *mut RawJSContext,
     receiving: bool,
@@ -664,9 +665,15 @@ unsafe extern "C" fn sab_cloned_callback(
     true
 }
 
-/// A SpiderMonkey clone buffer written with the `SameProcess` scope, carried whole (never as
-/// bytes) inside `StructuredSerializedData::in_process` to its one reader.
-struct InProcessCloneBuffer(JSAutoStructuredCloneBufferWrapper, Vec<WasmModuleRef>);
+/// A SpiderMonkey clone buffer that may hold pointers (written with the `SameProcess` scope, or
+/// with `UnknownDestination` when it took shared memory), carried whole (never as bytes) inside
+/// `StructuredSerializedData::in_process` to its one reader, with the agent cluster it was
+/// written in: shared memory in it deserializes only there.
+struct InProcessCloneBuffer(
+    JSAutoStructuredCloneBufferWrapper,
+    Vec<WasmModuleRef>,
+    AgentClusterKey,
+);
 
 // SAFETY: the buffer is filled on the writing thread and then owned by exactly one message, which
 // one thread at a time reads or drops. Dropping it unread only releases `SharedArrayRawBuffer`
@@ -789,6 +796,19 @@ pub(crate) struct StructuredDataWriter {
     pub(crate) wasm_modules: Vec<WasmModuleRef>,
 }
 
+/// Where a structured clone may be read, which decides how it is written.
+enum CloneTarget {
+    /// Anywhere, now or later (storage, another process): bytes, never shared memory.
+    Bytes,
+    /// A reader in this process (SpiderMonkey's `SameProcess` scope): shared memory and
+    /// transferred buffers by pointer, carried whole. Shared memory deserializes only in the
+    /// writer's agent cluster.
+    InProcess(AgentClusterKey),
+    /// A reader that may be in another process: bytes, unless shared memory was written
+    /// (SpiderMonkey's `UnknownDestination` scope), which then travels like `InProcess`.
+    Unknown(AgentClusterKey),
+}
+
 /// Writes a structured clone. Returns a `DataClone` error if that fails.
 ///
 /// The result may be stored or sent to another process, so it never contains shared memory: a
@@ -798,40 +818,62 @@ pub(crate) fn write(
     message: HandleValue,
     transfer: Option<CustomAutoRooterGuard<Vec<*mut JSObject>>>,
 ) -> Fallible<StructuredSerializedData> {
-    write_impl(cx, message, transfer, false)
+    write_impl(cx, message, transfer, CloneTarget::Bytes)
 }
 
-/// Writes a structured clone for a reader in the same agent cluster and the same process: a
-/// dedicated worker and its owner, or `structuredClone()`. If `global` is cross-origin isolated
-/// the clone may share `SharedArrayBuffer`s
+/// Writes a structured clone for a reader in this process: a dedicated worker and its owner, a
+/// window of this event loop, a message port, or `structuredClone()`. If `global` is cross-origin
+/// isolated the clone may hold `SharedArrayBuffer`s
 /// (<https://html.spec.whatwg.org/multipage/#structuredserializeinternal> step 13: shared memory
-/// needs the cross-origin isolated capability and a reader in the same agent cluster).
+/// needs the cross-origin isolated capability), which deserialize only for a reader in `global`'s
+/// agent cluster (<https://html.spec.whatwg.org/multipage/#structureddeserialize>); any other
+/// reader fails with a `DataCloneError` (a `messageerror` event).
 pub(crate) fn write_for_same_agent_cluster(
     cx: &mut JSContext,
     global: &GlobalScope,
     message: HandleValue,
     transfer: Option<CustomAutoRooterGuard<Vec<*mut JSObject>>>,
 ) -> Fallible<StructuredSerializedData> {
-    write_impl(
-        cx,
-        message,
-        transfer,
-        global.cross_origin_isolated_capability(),
-    )
+    let target = if global.cross_origin_isolated_capability() {
+        CloneTarget::InProcess(global.agent_cluster())
+    } else {
+        CloneTarget::Bytes
+    };
+    write_impl(cx, message, transfer, target)
+}
+
+/// Writes a structured clone for a message whose reader may be in another event loop or process
+/// (a cross-origin window, a service worker or client, a `BroadcastChannel`). Like
+/// `write_for_same_agent_cluster`, a cross-origin isolated `global` may serialize a
+/// `SharedArrayBuffer`; the receiver then gets a `messageerror` unless it is in `global`'s agent
+/// cluster in this process. Without shared memory the clone is plain bytes.
+pub(crate) fn write_for_messaging(
+    cx: &mut JSContext,
+    global: &GlobalScope,
+    message: HandleValue,
+    transfer: Option<CustomAutoRooterGuard<Vec<*mut JSObject>>>,
+) -> Fallible<StructuredSerializedData> {
+    let target = if global.cross_origin_isolated_capability() {
+        CloneTarget::Unknown(global.agent_cluster())
+    } else {
+        CloneTarget::Bytes
+    };
+    write_impl(cx, message, transfer, target)
 }
 
 fn write_impl(
     cx: &mut JSContext,
     message: HandleValue,
     transfer: Option<CustomAutoRooterGuard<Vec<*mut JSObject>>>,
-    allow_shared_memory: bool,
+    target: CloneTarget,
 ) -> Fallible<StructuredSerializedData> {
-    // Shared memory can only be passed by pointer, so such a clone uses the SameProcess scope and
-    // travels as the whole SpiderMonkey buffer, never as bytes.
-    let scope = if allow_shared_memory {
-        StructuredCloneScope::SameProcess
-    } else {
-        StructuredCloneScope::DifferentProcess
+    // Shared memory can only be passed by pointer, so such a clone uses the SameProcess scope (or
+    // UnknownDestination, which becomes SameProcess once shared memory is written) and travels as
+    // the whole SpiderMonkey buffer, never as bytes.
+    let (scope, allow_shared_memory, in_process_only) = match target {
+        CloneTarget::Bytes => (StructuredCloneScope::DifferentProcess, false, false),
+        CloneTarget::InProcess(_) => (StructuredCloneScope::SameProcess, true, true),
+        CloneTarget::Unknown(_) => (StructuredCloneScope::UnknownDestination, true, false),
     };
     unsafe {
         rooted!(&in(cx) let mut val = UndefinedValue());
@@ -839,7 +881,7 @@ fn write_impl(
             transfer.to_jsval(cx, val.handle_mut());
         }
         let mut sc_writer = StructuredDataWriter {
-            in_process: allow_shared_memory,
+            in_process: in_process_only,
             ..Default::default()
         };
         let sc_writer_ptr = &mut sc_writer as *mut _;
@@ -870,12 +912,18 @@ fn write_impl(
             return Err(error);
         }
 
-        let (data, in_process) = if allow_shared_memory {
+        let agent_cluster = match target {
+            CloneTarget::InProcess(key) => Some(key),
+            CloneTarget::Unknown(key) if sc_writer.wrote_shared_memory => Some(key),
+            _ => None,
+        };
+        let (data, in_process) = if let Some(agent_cluster) = agent_cluster {
             (
                 Vec::new(),
                 Some(InProcessCloneData(Box::new(InProcessCloneBuffer(
                     scbuf,
                     std::mem::take(&mut sc_writer.wasm_modules),
+                    agent_cluster,
                 )))),
             )
         } else {
@@ -944,16 +992,21 @@ pub(crate) fn read(
         crypto_keys: data.crypto_keys.take(),
         wasm_modules: Vec::new(),
     };
-    // A SameProcess clone (see `write_for_same_agent_cluster`) is read straight from its buffer;
-    // everything else from bytes. Shared memory is accepted only by a cross-origin isolated
-    // reader (SpiderMonkey also refuses it unless the reader's realm has shared memory enabled).
+    // An in-process clone (see `write_for_same_agent_cluster`) is read straight from its buffer;
+    // everything else from bytes. Shared memory is accepted only by a cross-origin isolated reader
+    // in the agent cluster it was written in
+    // (<https://html.spec.whatwg.org/multipage/#structureddeserialize>: "If targetRealm's
+    // corresponding agent cluster is not serialized.[[AgentCluster]], then throw a
+    // DataCloneError"); SpiderMonkey also refuses it unless the reader's realm has shared memory.
     let in_process = data
         .in_process
         .take()
         .and_then(|payload| payload.0.downcast::<InProcessCloneBuffer>().ok());
-    let allow_shared_memory = in_process.is_some() && global.cross_origin_isolated_capability();
+    let allow_shared_memory = in_process.as_ref().is_some_and(|buffer| {
+        global.cross_origin_isolated_capability() && global.is_in_agent_cluster(&buffer.2)
+    });
     let in_process = in_process.map(|buffer| {
-        let InProcessCloneBuffer(scbuf, wasm_modules) = *buffer;
+        let InProcessCloneBuffer(scbuf, wasm_modules, _) = *buffer;
         sc_reader.wasm_modules = wasm_modules;
         scbuf
     });

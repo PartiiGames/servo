@@ -248,8 +248,12 @@ impl DissimilarOriginWindow {
         message: HandleValue,
         transfer: CustomAutoRooterGuard<Vec<*mut JSObject>>,
     ) -> ErrorResult {
-        // Step 6-7.
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        // Step 6-7. The target is in another event loop (maybe another process); a
+        // cross-origin isolated source may still serialize shared memory, which the target, in
+        // another agent cluster, then fails to deserialize (a messageerror).
+        let incumbent =
+            GlobalScope::incumbent().expect("postMessage called with no incumbent global");
+        let data = structuredclone::write_for_messaging(cx, &incumbent, message, Some(transfer))?;
 
         self.post_message(target_origin, data)
     }

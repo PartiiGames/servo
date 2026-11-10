@@ -2507,23 +2507,16 @@ impl Window {
         transfer: CustomAutoRooterGuard<Vec<*mut JSObject>>,
     ) -> ErrorResult {
         // Step 1-2, 6-8.
-        // `self` is a Window of this event loop, so the message never leaves the process. If both
-        // windows are cross-origin isolated and same origin (isolation keys agent clusters by
-        // origin), they share an agent cluster and the message may share memory
-        // (<https://html.spec.whatwg.org/multipage/#structuredserializeinternal>).
-        let same_agent_cluster = source.as_global_scope().cross_origin_isolated_capability() &&
-            self.as_global_scope().cross_origin_isolated_capability() &&
-            source_origin.same_origin(&*self.Document().origin());
-        let data = if same_agent_cluster {
-            structuredclone::write_for_same_agent_cluster(
-                cx,
-                source.as_global_scope(),
-                message,
-                Some(transfer),
-            )?
-        } else {
-            structuredclone::write(cx, message, Some(transfer))?
-        };
+        // `self` is a Window of this event loop, so the message never leaves the process. A
+        // cross-origin isolated source may serialize shared memory; it deserializes only if the
+        // target is in the source's agent cluster (same origin, also isolated), else the target
+        // gets a messageerror (<https://html.spec.whatwg.org/multipage/#structureddeserialize>).
+        let data = structuredclone::write_for_same_agent_cluster(
+            cx,
+            source.as_global_scope(),
+            message,
+            Some(transfer),
+        )?;
 
         // Step 3-5.
         let target_origin = match target_origin.0[..].as_ref() {

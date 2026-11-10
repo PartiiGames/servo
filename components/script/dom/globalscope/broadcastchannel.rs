@@ -87,10 +87,12 @@ impl BroadcastChannelMethods<crate::DomTypeHolder> for BroadcastChannel {
             )));
         }
 
-        // Step 6, StructuredSerialize(message).
-        let data = structuredclone::write(cx, message, None)?;
-
         let global = self.global();
+
+        // Step 6, StructuredSerialize(message). Shared memory serializes in a cross-origin
+        // isolated global; a broadcast is delivered as bytes, so every receiver then gets a
+        // messageerror.
+        let data = structuredclone::write_for_messaging(cx, &global, message, None)?;
 
         let msg = BroadcastChannelMsg {
             origin: global.origin().immutable().clone(),

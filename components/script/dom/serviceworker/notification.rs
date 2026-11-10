@@ -13,8 +13,8 @@ use embedder_traits::{
 };
 use js::context::JSContext;
 use js::jsapi::Heap;
-use js::jsval::JSVal;
-use js::rust::{HandleObject, MutableHandleValue};
+use js::jsval::{JSVal, UndefinedValue};
+use js::rust::{HandleObject, HandleValue, MutableHandleValue};
 use net_traits::http_status::HttpStatus;
 use net_traits::image_cache::{
     ImageCache, ImageCacheResponseMessage, ImageCacheResult, ImageLoadListener,
@@ -45,6 +45,7 @@ use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::{DOMString, USVString};
+use crate::dom::bindings::structuredclone;
 use crate::dom::bindings::utils::to_frozen_array;
 use crate::dom::csp::{GlobalCspReporting, Violation};
 use crate::dom::eventtarget::EventTarget;
@@ -127,6 +128,7 @@ impl Notification {
         origin: ImmutableOrigin,
         base_url: ServoUrl,
         fallback_timestamp: u64,
+        data: HandleValue,
         proto: Option<HandleObject>,
     ) -> DomRoot<Self> {
         let notification = reflect_dom_object_with_proto(
@@ -143,7 +145,7 @@ impl Notification {
             proto,
         );
 
-        notification.data.set(options.data.get());
+        notification.data.set(data.get());
 
         notification
     }
@@ -643,6 +645,14 @@ fn create_notification(
         ));
     }
 
+    // Set notification's data to StructuredSerializeForStorage(options["data"]): a stored
+    // notification never holds shared memory, so a SharedArrayBuffer is a DataCloneError
+    // (thrown after the getters before it ran). The getter's StructuredDeserialize is done once
+    // here, so `data` returns the same object every time.
+    let serialized = structuredclone::write(cx, options.data.handle(), None)?;
+    rooted!(&in(cx) let mut data = UndefinedValue());
+    structuredclone::read(cx, global, serialized, data.handle_mut())?;
+
     Ok(Notification::new(
         cx,
         global,
@@ -651,6 +661,7 @@ fn create_notification(
         origin,
         base_url,
         fallback_timestamp,
+        data.handle(),
         proto,
     ))
 }

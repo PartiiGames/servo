@@ -97,9 +97,10 @@ impl ServiceWorker {
         if let ServiceWorkerState::Redundant = self.state.get() {
             return Err(Error::InvalidState(None));
         }
-        // Step 7
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        // Step 7. A service worker is an agent cluster of its own: shared memory serializes but
+        // fails to deserialize there (a messageerror).
         let incumbent = GlobalScope::incumbent().expect("no incumbent global?");
+        let data = structuredclone::write_for_messaging(cx, &incumbent, message, Some(transfer))?;
         let pipeline_id = incumbent.pipeline_id();
         let msg_vec = DOMMessage {
             origin: incumbent.origin().immutable().clone(),

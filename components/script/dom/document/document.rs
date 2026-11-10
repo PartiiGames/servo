@@ -5684,6 +5684,23 @@ impl Document {
     }
 }
 
+impl Document {
+    /// Whether this document's browsing context group is cross-origin isolated, as far as this
+    /// event loop can tell: its own window is, or the top-level document is (when it lives in
+    /// this event loop).
+    fn in_cross_origin_isolated_group(&self) -> bool {
+        let window = self.window();
+        if window.as_global_scope().cross_origin_isolated_capability() {
+            return true;
+        }
+        window.top_level_document_if_local().is_some_and(|top| {
+            top.window()
+                .as_global_scope()
+                .cross_origin_isolated_capability()
+        })
+    }
+}
+
 impl DocumentMethods<crate::DomTypeHolder> for Document {
     /// <https://dom.spec.whatwg.org/#dom-document-document>
     fn Constructor(
@@ -5953,7 +5970,14 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             };
 
         // Step 6. If the surrounding agent's agent cluster's is origin-keyed is true, then return.
-        // TODO
+        // A cross-origin isolated browsing context group keys its agent clusters by origin
+        // (<https://html.spec.whatwg.org/multipage/#obtain-similar-origin-window-agent> step 2),
+        // even for a document that is not itself isolated, such as a cross-origin iframe. Only
+        // where isolation comes from COOP + COEP: `dom_cross_origin_isolated_always` grants
+        // shared memory to every page without changing how origins relax.
+        if !pref!(dom_cross_origin_isolated_always) && self.in_cross_origin_isolated_group() {
+            return Ok(());
+        }
 
         // Step 7. Set this's origin's domain to the result of parsing the given value.
         self.origin().set_domain(host);

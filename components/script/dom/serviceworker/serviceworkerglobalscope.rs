@@ -28,7 +28,7 @@ use servo_base::generic_channel::{GenericReceiver, GenericSend, GenericSender, R
 use servo_base::id::{PipelineId, ServiceWorkerId};
 use servo_config::pref;
 use servo_constellation_traits::{
-    ScopeThings, ServiceWorkerMsg, WorkerGlobalScopeInit, WorkerScriptLoadOrigin,
+    AgentClusterKey, ScopeThings, ServiceWorkerMsg, WorkerGlobalScopeInit, WorkerScriptLoadOrigin,
 };
 use servo_url::{MutableOrigin, ServoUrl};
 use style::thread_state::{self, ThreadState};
@@ -311,6 +311,11 @@ impl ServiceWorkerGlobalScope {
             font_context,
             worker_id,
         ));
+        // A shared or service worker is an agent cluster of its own
+        // (<https://html.spec.whatwg.org/multipage/#integration-with-the-javascript-agent-cluster-formalism>).
+        scope
+            .upcast::<GlobalScope>()
+            .set_agent_cluster(AgentClusterKey::new_worker());
         let scope = ServiceWorkerGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
             cx,
             &scope.origin(),

@@ -510,6 +510,28 @@ pub struct IFrameLoadInfoWithData {
     pub viewport_details: ViewportDetails,
 }
 
+/// Which agent cluster a global's agent belongs to, as far as sharing memory goes
+/// (<https://html.spec.whatwg.org/multipage/#integration-with-the-javascript-agent-cluster-formalism>).
+/// A `SharedArrayBuffer` deserializes only in the agent cluster it was serialized in
+/// (<https://html.spec.whatwg.org/multipage/#structureddeserialize>, the SharedArrayBuffer step).
+#[derive(Clone, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub enum AgentClusterKey {
+    /// The windows of a cross-origin isolated browsing context group, whose agent clusters are
+    /// keyed by origin, with their dedicated workers and worklets.
+    Origin(ImmutableOrigin),
+    /// A shared or service worker, each its own agent cluster, with its dedicated workers.
+    /// Numbered per process (shared memory never leaves the process).
+    Worker(u64),
+}
+
+impl AgentClusterKey {
+    /// A fresh agent cluster for a shared or service worker.
+    pub fn new_worker() -> AgentClusterKey {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        AgentClusterKey::Worker(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// Resources required by workerglobalscopes
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct WorkerGlobalScopeInit {
@@ -542,6 +564,8 @@ pub struct WorkerGlobalScopeInit {
     /// Whether the global that creates the worker has the cross-origin isolated capability.
     /// A dedicated worker inherits it.
     pub owner_cross_origin_isolated: bool,
+    /// The agent cluster of the global that creates the worker. A dedicated worker joins it.
+    pub owner_agent_cluster: AgentClusterKey,
     /// Unminify Javascript.
     pub unminify_js: bool,
     /// Handle for communicating messages to the WebGL thread, if available.

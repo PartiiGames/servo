@@ -144,6 +144,7 @@ pub(crate) fn prepare_workerscope_init(
         origin: global.origin().immutable().clone(),
         inherited_secure_context: Some(global.is_secure_context()),
         owner_cross_origin_isolated: global.cross_origin_isolated_capability(),
+        owner_agent_cluster: global.agent_cluster(),
         unminify_js: global.unminify_js(),
         #[cfg(feature = "webgl")]
         webgl_chan,
@@ -1123,7 +1124,8 @@ impl WorkerGlobalScopeMethods<crate::DomTypeHolder> for WorkerGlobalScope {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-crossoriginisolated>
     fn CrossOriginIsolated(&self) -> bool {
-        self.upcast::<GlobalScope>().cross_origin_isolated_capability()
+        self.upcast::<GlobalScope>()
+            .cross_origin_isolated_capability()
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-structuredclone>

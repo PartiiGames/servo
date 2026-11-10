@@ -389,9 +389,13 @@ impl DedicatedWorkerGlobalScope {
         cx: &mut js::context::JSContext,
     ) -> DomRoot<DedicatedWorkerGlobalScope> {
         // <https://html.spec.whatwg.org/multipage/#run-a-worker>: a dedicated worker is cross-origin
-        // isolated if its owner is, unless its script came from a data: URL.
-        let cross_origin_isolated = servo_config::pref!(dom_cross_origin_isolated_always) ||
-            (init.owner_cross_origin_isolated && worker_url.scheme() != "data");
+        // isolated if its owner is, unless its script came from a data: URL (an opaque origin:
+        // the capability's "same origin with the top-level origin" fails), also when every global
+        // is treated as isolated (`dom_cross_origin_isolated_always` isolates the owner).
+        let cross_origin_isolated =
+            init.owner_cross_origin_isolated && worker_url.scheme() != "data";
+        // It is in its owner's agent cluster.
+        let agent_cluster = init.owner_agent_cluster.clone();
         let scope = Box::new(DedicatedWorkerGlobalScope::new_inherited(
             init,
             webview_id,
@@ -418,6 +422,9 @@ impl DedicatedWorkerGlobalScope {
         scope
             .upcast::<GlobalScope>()
             .set_cross_origin_isolated_capability(cross_origin_isolated);
+        scope
+            .upcast::<GlobalScope>()
+            .set_agent_cluster(agent_cluster);
         let scope = DedicatedWorkerGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
             cx,
             &scope.origin(),

@@ -95,7 +95,8 @@ impl Client {
         // Note: done here and passing origin along in the message.
         let origin = global.origin();
 
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        // The client is in another agent cluster: shared memory fails to deserialize there.
+        let data = structuredclone::write_for_messaging(cx, &global, message, Some(transfer))?;
         self.swmanager_sender
             .send(ServiceWorkerMsg::ForwardWorkerMessage {
                 data,

@@ -64,8 +64,8 @@ use servo_base::id::{
 };
 use servo_config::pref;
 use servo_constellation_traits::{
-    BlobData, BlobImpl, BroadcastChannelMsg, ConstellationInterest, FileBlob, MessagePortImpl,
-    PortMessageTask, ScriptToConstellationChan, ScriptToConstellationMessage,
+    AgentClusterKey, BlobData, BlobImpl, BroadcastChannelMsg, ConstellationInterest, FileBlob,
+    MessagePortImpl, PortMessageTask, ScriptToConstellationChan, ScriptToConstellationMessage,
     ScriptToConstellationSender,
 };
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
@@ -320,6 +320,11 @@ pub(crate) struct GlobalScope {
     /// memory), by `set_cross_origin_isolated_capability`.
     cross_origin_isolated_capability: Cell<bool>,
 
+    /// The agent cluster this global's agent belongs to, when it is not the one its origin keys
+    /// (`agent_cluster`): set for workers by `set_agent_cluster`.
+    #[no_trace]
+    agent_cluster: DomRefCell<Option<AgentClusterKey>>,
+
     /// Directory to store unminified scripts for this window if unminify-js
     /// opt is enabled.
     unminified_js_dir: Option<String>,
@@ -487,6 +492,7 @@ impl GlobalScope {
             frozen_supported_performance_entry_types: CachedFrozenArray::new(),
             console_group_stack: DomRefCell::new(Vec::new()),
             console_count_map: Default::default(),
+            agent_cluster: DomRefCell::new(None),
             inherited_secure_context,
             cross_origin_isolated_capability: Cell::new(pref!(dom_cross_origin_isolated_always)),
             unminified_js_dir: unminify_js.then(|| unminified_path("unminified-js")),
@@ -2906,6 +2912,34 @@ impl GlobalScope {
     /// Only before the global's reflector (and realm) is created.
     pub(crate) fn set_cross_origin_isolated_capability(&self, value: bool) {
         self.cross_origin_isolated_capability.set(value);
+    /// The agent cluster this global's agent is in, which decides where a `SharedArrayBuffer`
+    /// it serializes may be deserialized
+    /// (<https://html.spec.whatwg.org/multipage/#structureddeserialize>). Shared memory only
+    /// exists in cross-origin isolated globals, whose browsing context group keys agent clusters
+    /// by origin
+    /// (<https://html.spec.whatwg.org/multipage/#obtain-similar-origin-window-agent>), so a
+    /// window's is its origin. A dedicated worker or worklet is in its owner's cluster; a shared
+    /// or service worker is a cluster of its own (`set_agent_cluster`).
+    pub(crate) fn agent_cluster(&self) -> AgentClusterKey {
+        self.agent_cluster
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| AgentClusterKey::Origin(self.origin().immutable().clone()))
+    }
+
+    /// Whether this global's agent is in the agent cluster `key` (without cloning its origin).
+    pub(crate) fn is_in_agent_cluster(&self, key: &AgentClusterKey) -> bool {
+        match (&*self.agent_cluster.borrow(), key) {
+            (Some(own), key) => own == key,
+            (None, AgentClusterKey::Origin(origin)) => self.origin().immutable() == origin,
+            (None, AgentClusterKey::Worker(_)) => false,
+        }
+    }
+
+    pub(crate) fn set_agent_cluster(&self, key: AgentClusterKey) {
+        *self.agent_cluster.borrow_mut() = Some(key);
+    }
+
     }
 
     pub(crate) fn is_secure_context(&self) -> bool {

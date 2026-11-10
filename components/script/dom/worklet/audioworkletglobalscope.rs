@@ -36,6 +36,7 @@ use script_bindings::callback::{HasCallbackHolder, RootedCallback};
 use script_bindings::cell::DomRefCell;
 use script_bindings::interfaces::HasOrigin;
 use servo_base::id::PipelineId;
+use servo_constellation_traits::{AgentClusterKey, StructuredSerializedData};
 use servo_media::audio::audio_node::BlockInfo;
 use servo_media::audio::audio_worklet_node::AudioWorkletProcessorHandle;
 use servo_media::audio::block::{Block, FRAMES_PER_BLOCK_USIZE};
@@ -66,7 +67,6 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::structuredclone;
-use servo_constellation_traits::StructuredSerializedData;
 use crate::dom::bindings::trace::{HashMapTracedValues, RootedTraceableBox};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::messageport::MessagePort;
@@ -150,6 +150,7 @@ impl AudioWorkletGlobalScope {
         sample_rate: f32,
         context: Trusted<BaseAudioContext>,
         cross_origin_isolated: bool,
+        agent_cluster: AgentClusterKey,
     ) -> DomRoot<AudioWorkletGlobalScope> {
         debug!("Creating audio worklet global scope for pipeline {}.", pipeline_id);
         let global = Box::new(AudioWorkletGlobalScope {
@@ -178,6 +179,9 @@ impl AudioWorkletGlobalScope {
         let scope = AudioWorkletGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
             cx,
             &global.origin(),
+        global
+            .upcast::<GlobalScope>()
+            .set_agent_cluster(agent_cluster);
             cross_origin_isolated,
             global,
         );
@@ -896,6 +900,7 @@ fn ensure_host(init: HostInit) {
             if let Some(port) = ports.into_iter().next() {
                 global.port.set(Some(&port));
             }
+    agent_cluster: AgentClusterKey,
         }
     }
     let roots = RootedTraceableBox::new(HostRoots {
@@ -923,6 +928,7 @@ fn ensure_host(init: HostInit) {
     // after the render quantum (only if a processor ran, so idle contexts pay nothing).
     // Between quanta, currentFrame/currentTime are the context's (the next quantum's start).
     on_render_quantum_end(Box::new(|info| {
+        init.agent_cluster,
         let processed = PROCESSED_THIS_QUANTUM.with(|p| p.replace(false));
         with_host(|cx, global| {
             global.set_time(info);
@@ -1072,6 +1078,7 @@ impl AudioWorkletThreadPool {
         AudioWorkletThreadPool {
             global_port: RefCell::new(global_port),
             cross_origin_isolated: context.global().cross_origin_isolated_capability(),
+            agent_cluster: context.global().agent_cluster(),
             sender: context.audio_context_impl().lock().unwrap().render_task_sender(),
             init,
             sample_rate: *context.SampleRate(),
@@ -1100,6 +1107,9 @@ impl WorkletThreadPool for AudioWorkletThreadPool {
         inherited_secure_context: Option<bool>,
     ) {
         let host_init = HostInit {
+    /// The window's agent cluster, which the worklet's agent joins.
+    #[no_trace]
+    agent_cluster: AgentClusterKey,
             pipeline_id,
             base_url,
             inherited_secure_context,
@@ -1149,6 +1159,7 @@ impl WorkletThreadPool for AudioWorkletThreadPool {
     ) {
         let _ = self.sender.send(Box::new(move || {
             run_task_in_host(|cx, global| worklet_task(cx, global.upcast()));
+            agent_cluster: self.agent_cluster.clone(),
         }));
     }
 }
