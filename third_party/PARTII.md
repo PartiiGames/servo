@@ -43,3 +43,10 @@ Patches on top of webrender 0.70.0:
 - `PARTII_WR_INVAL_LOG=<passes>` (off by default; measurement only): logs why picture-cache tiles are
   redrawn (a summary every 2 s, and a dump of frames with at least <passes> render passes)
   (src/invalidation/, src/picture.rs, src/frame_builder.rs).
+- `PARTII_WR_WARMUP` (on by default on a software GL only: llvmpipe, softpipe, swrast; `=0` off, `=1` on any
+  GL): the device records each new (program, draw state: target format, raw blend/depth/colour-mask
+  state, bound texture targets/formats/filters/swizzles) to `$MESA_SHADER_CACHE_DIR/partii-wr-warmup.txt`
+  (else `~/.cache/partii/wr-warmup.txt`, or `PARTII_WR_WARMUP_FILE`), and the renderer replays those
+  entries at start, one degenerate instance each into 4x4 scratch targets, so the software GL builds
+  its draw-time shader variants before the first frame (`PARTII_WR_WARMUP_MS` caps it, default 4000)
+  (src/device/partii_warm.rs, src/device/gl.rs, src/renderer/shade.rs, src/renderer/init.rs).
