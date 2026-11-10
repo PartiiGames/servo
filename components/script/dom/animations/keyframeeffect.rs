@@ -414,7 +414,7 @@ fn process_a_keyframes_argument(
     // Step 4. Check the completion record of method.
     // Step 5. Perform the steps corresponding to the first matching condition below:
     rooted!(&in(cx) let iterable = ObjectValue(keyframes));
-    let mut keyframes = Vec::new();
+    let mut processed_keyframes = Vec::new();
     let result = for_of(cx, iterable.handle(), |cx, iterator_element| {
         // Step 5.3.4 Let nextItem be IteratorValue(next).
         // Step 5.3.5 Check the completion record of nextItem.
@@ -430,7 +430,7 @@ fn process_a_keyframes_argument(
 
         // Step 5.3.7 Append to processed keyframes the result of running the procedure to process a
         // keyframe-like object passing nextItem as the keyframe input with the allow lists flag set to false.
-        keyframes.push(process_a_keyframe_like_object(
+        processed_keyframes.push(process_a_keyframe_like_object(
             cx,
             document,
             iterator_element,
@@ -438,15 +438,267 @@ fn process_a_keyframes_argument(
 
         Ok(ControlFlow::Continue(()))
     });
-    match result {
-        Ok(()) => Ok(keyframes),
+    let mut processed_keyframes = match result {
+        Ok(()) => processed_keyframes,
+        // Step 5, Otherwise: a property-indexed keyframe.
         Err(ForOfIterationFailure::ValueIsNotIterable) => {
-            // TODO: Step 5, Otherwise:
-            Err(Error::Operation(None))
+            process_property_indexed_keyframes(cx, document, iterable.handle())?
         },
+        Err(ForOfIterationFailure::JSFailed) => return Err(Error::JSFailed),
+        Err(ForOfIterationFailure::Other(error)) => return Err(error),
+    };
+
+    // Step 6. If processed keyframes is not loosely sorted by offset, throw a TypeError and abort
+    // these steps.
+    let mut previous_offset = f64::NEG_INFINITY;
+    for keyframe in processed_keyframes.iter() {
+        if let Some(offset) = keyframe.offset {
+            if *offset < previous_offset {
+                return Err(Error::Type(
+                    c"Keyframe offsets must be loosely sorted".to_owned(),
+                ));
+            }
+            previous_offset = *offset;
+        }
+    }
+
+    // Step 7. If there exist any keyframe in processed keyframes whose keyframe offset is non-null
+    // and less than zero or greater than one, throw a TypeError and abort these steps.
+    if processed_keyframes
+        .iter()
+        .any(|keyframe| keyframe.offset.is_some_and(|offset| *offset < 0. || *offset > 1.))
+    {
+        return Err(Error::Type(
+            c"Keyframe offsets must be in the range [0, 1]".to_owned(),
+        ));
+    }
+
+    // Step 8. For each frame in processed keyframes, perform the following steps:
+    // Step 8.2 Let the timing function of frame be the result of parsing the "easing" property on
+    // frame using the CSS syntax defined for the easing member of the EffectTiming dictionary.
+    // If parsing the "easing" property fails, throw a TypeError and abort this procedure.
+    let urlextradata = document.url().into_url().into();
+    let parser_context = parser_context_for_document(
+        document,
+        CssRuleType::Style,
+        ParsingMode::DEFAULT,
+        &urlextradata,
+    );
+    for keyframe in processed_keyframes.iter_mut() {
+        let Some(easing) = parse_easing(&keyframe.easing_function.str(), &parser_context) else {
+            return Err(Error::Type(c"Invalid keyframe easing".to_owned()));
+        };
+        keyframe.easing_function = easing.to_css_string().into();
+    }
+
+    // Step 9. Return processed keyframes.
+    Ok(processed_keyframes)
+}
+
+/// Converts `value` to a list: an iterable object gives its items, anything else is a list of
+/// one item. `undefined` is the empty list.
+fn convert_to_list<T>(
+    cx: &mut JSContext,
+    value: HandleValue,
+    mut convert: impl FnMut(&mut JSContext, HandleValue) -> Fallible<T>,
+) -> Fallible<Vec<T>> {
+    if value.is_undefined() {
+        return Ok(Vec::new());
+    }
+    if !value.is_object() {
+        return Ok(vec![convert(cx, value)?]);
+    }
+    let mut items = Vec::new();
+    let result = for_of(cx, value, |cx, item| {
+        items.push(convert(cx, item).map_err(ForOfIterationFailure::Other)?);
+        Ok(ControlFlow::Continue(()))
+    });
+    match result {
+        Ok(()) => Ok(items),
+        Err(ForOfIterationFailure::ValueIsNotIterable) => Ok(vec![convert(cx, value)?]),
         Err(ForOfIterationFailure::JSFailed) => Err(Error::JSFailed),
         Err(ForOfIterationFailure::Other(error)) => Err(error),
     }
+}
+
+fn convert_to_dom_string(cx: &mut JSContext, value: HandleValue) -> Fallible<DOMString> {
+    match DOMString::from_jsval(cx, value, StringificationBehavior::Default) {
+        Ok(ConversionResult::Success(string)) => Ok(string),
+        Ok(ConversionResult::Failure(_)) => Err(Error::Type(c"Expected a string".to_owned())),
+        Err(_) => Err(Error::JSFailed),
+    }
+}
+
+fn convert_to_offset(cx: &mut JSContext, value: HandleValue) -> Fallible<Option<Finite<f64>>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let number = match f64::from_jsval(cx, value, ()) {
+        Ok(ConversionResult::Success(number)) => number,
+        Ok(ConversionResult::Failure(_)) => {
+            return Err(Error::Type(c"Expected a number".to_owned()));
+        },
+        Err(_) => return Err(Error::JSFailed),
+    };
+    Finite::new(number)
+        .map(Some)
+        .ok_or_else(|| Error::Type(c"Keyframe offsets must be finite".to_owned()))
+}
+
+fn convert_to_composite(
+    cx: &mut JSContext,
+    value: HandleValue,
+) -> Fallible<CompositeOperationOrAuto> {
+    let string = convert_to_dom_string(cx, value)?;
+    match &*string.str() {
+        "replace" => Ok(CompositeOperationOrAuto::Replace),
+        "add" => Ok(CompositeOperationOrAuto::Add),
+        "accumulate" => Ok(CompositeOperationOrAuto::Accumulate),
+        "auto" => Ok(CompositeOperationOrAuto::Auto),
+        _ => Err(Error::Type(c"Invalid composite operation".to_owned())),
+    }
+}
+
+#[expect(unsafe_code)]
+fn get_member(cx: &mut JSContext, object: HandleObject, name: &std::ffi::CStr) -> Fallible<js::jsval::JSVal> {
+    rooted!(&in(cx) let mut value = UndefinedValue());
+    if !unsafe {
+        js::jsapi::JS_GetProperty(
+            cx.raw_cx(),
+            object.into_handle(),
+            name.as_ptr(),
+            value.handle_mut().into_handle_mut(),
+        )
+    } {
+        return Err(Error::JSFailed);
+    }
+    Ok(value.get())
+}
+
+/// Step 5 "Otherwise" of <https://drafts.csswg.org/web-animations-1/#process-a-keyframes-argument>:
+/// a property-indexed keyframe such as `{ opacity: [0, 1], easing: "ease-in" }`.
+#[expect(unsafe_code)]
+fn process_property_indexed_keyframes(
+    cx: &mut JSContext,
+    document: &Document,
+    input: HandleValue,
+) -> Fallible<Vec<Keyframe>> {
+    rooted!(&in(cx) let object = input.to_object());
+
+    // Step 5.1. Let property-indexed keyframe be the result of running the procedure to process a
+    // keyframe-like object passing object as the keyframe input and with the allow lists flag set
+    // to true. (Members in dictionary order: composite, easing, offset.)
+    rooted!(&in(cx) let mut member = get_member(cx, object.handle(), c"composite")?);
+    let composites = convert_to_list(cx, member.handle(), convert_to_composite)?;
+    member.set(get_member(cx, object.handle(), c"easing")?);
+    let easings = convert_to_list(cx, member.handle(), convert_to_dom_string)?;
+    member.set(get_member(cx, object.handle(), c"offset")?);
+    let offsets = if member.is_null() {
+        vec![None]
+    } else {
+        convert_to_list(cx, member.handle(), convert_to_offset)?
+    };
+
+    // Every easing must parse, even ones no keyframe ends up using.
+    let urlextradata = document.url().into_url().into();
+    let parser_context = parser_context_for_document(
+        document,
+        CssRuleType::Style,
+        ParsingMode::DEFAULT,
+        &urlextradata,
+    );
+    for easing in easings.iter() {
+        if parse_easing(&easing.str(), &parser_context).is_none() {
+            return Err(Error::Type(c"Invalid keyframe easing".to_owned()));
+        }
+    }
+
+    // Step 5.2. For each member, m, in property-indexed keyframe, perform the following steps:
+    let mut ids = IdVector::new(cx);
+    if !unsafe { GetPropertyKeys(cx, object.handle(), JSITER_OWNONLY, ids.handle_mut()) } {
+        return Err(Error::JSFailed);
+    }
+    let mut properties: Vec<(String, NonCustomPropertyId, Vec<DOMString>)> = Vec::new();
+    for id in ids.iter() {
+        rooted!(&in(cx) let id = *id);
+        if !id.is_string() {
+            continue;
+        }
+        rooted!(&in(cx) let mut key_value = UndefinedValue());
+        let raw_id: HandleId = id.handle().into();
+        if !unsafe { JS_IdToValue(cx, *raw_id.ptr, key_value.handle_mut()) } {
+            continue;
+        }
+        rooted!(&in(cx) let js_string = key_value.to_string());
+        let Some(js_string) = NonNull::new(js_string.get()) else {
+            continue;
+        };
+        let property_name = unsafe { jsstr_to_string(cx, js_string) };
+        let Some(property_id) = lookup_css_property_by_idl_attribute_name(&property_name) else {
+            continue;
+        };
+        rooted!(&in(cx) let mut raw_value = UndefinedValue());
+        if !unsafe {
+            JS_GetPropertyById(
+                cx.raw_cx(),
+                object.handle().into_handle(),
+                id.handle().into_handle(),
+                raw_value.handle_mut().into_handle_mut(),
+            )
+        } {
+            return Err(Error::JSFailed);
+        }
+        // Convert raw value to a DOMString or sequence of DOMStrings.
+        let values = convert_to_list(cx, raw_value.handle(), convert_to_dom_string)?;
+        properties.push((property_name, property_id, values));
+    }
+    // Properties are processed in ascending property name order.
+    properties.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Step 5.2.3-5.2.4: one keyframe per value with null offsets spaced evenly, then sorted and
+    // merged by computed offset.
+    let mut merged: Vec<(f64, Vec<KeyframePropertyDeclaration>)> = Vec::new();
+    for (_, property_id, values) in properties {
+        let offsets = compute_missing_keyframe_offsets(&vec![None; values.len()]);
+        for (value, offset) in values.iter().zip(offsets) {
+            let declaration =
+                parse_single_property_declaration(property_id, &value.str(), &parser_context);
+            let index = match merged.iter().position(|(existing, _)| *existing == offset) {
+                Some(index) => index,
+                None => {
+                    merged.push((offset, Vec::new()));
+                    merged.len() - 1
+                },
+            };
+            if let Some(declaration) = declaration {
+                merged[index].1.push(declaration);
+            }
+        }
+    }
+    merged.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    // Steps 5.4-5.8: offsets, easings and composite operations are assigned in order; easings and
+    // composites repeat when there are fewer of them than keyframes.
+    let easings = if easings.is_empty() {
+        vec![DOMString::from_static("linear")]
+    } else {
+        easings
+    };
+    let keyframes = merged
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, declarations))| Keyframe {
+            offset: offsets.get(index).copied().flatten(),
+            easing_function: easings[index % easings.len()].clone(),
+            composite: if composites.is_empty() {
+                CompositeOperationOrAuto::Auto
+            } else {
+                composites[index % composites.len()]
+            },
+            declarations,
+        })
+        .collect();
+    Ok(keyframes)
 }
 
 /// <https://drafts.csswg.org/web-animations-1/#keyframe>
@@ -502,7 +754,7 @@ fn process_a_keyframe_like_object(
         return Err(Error::JSFailed);
     };
     let ConversionResult::Success(keyframe_output) = keyframe_output else {
-        return Err(Error::Operation(None));
+        return Err(Error::Type(c"Invalid keyframe".to_owned()));
     };
     let mut keyframe_output = Keyframe {
         offset: keyframe_output.offset,
