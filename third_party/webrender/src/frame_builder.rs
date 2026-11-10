@@ -1485,8 +1485,20 @@ fn partii_maybe_dump_graph(graph: &RenderTaskGraph) {
     }) else {
         return;
     };
-    if graph.passes.len() < min || DUMPED.fetch_add(1, Ordering::Relaxed) >= 3 {
+    // gaps-2: sample across the run (at most one dump every 5 s, 24 in all), not only the first 3.
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if graph.passes.len() < min {
         return;
+    }
+    {
+        let mut last = LAST.lock().unwrap();
+        if last.map_or(false, |t| t.elapsed().as_secs() < 5) {
+            return;
+        }
+        if DUMPED.fetch_add(1, Ordering::Relaxed) >= 24 {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
     }
     eprintln!("partii-wr-graph: {} tasks, {} passes", graph.tasks.len(), graph.passes.len());
     graph.print();

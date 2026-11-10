@@ -1018,6 +1018,18 @@ impl Renderer {
 
                         if prev_doc.frame.must_be_drawn() {
                             self.partii_update_offscreen += 1;
+                            // gaps-2 (measurement): which frames pile up behind one paint.
+                            if std::env::var_os("PARTII_PAINT_STATS").is_some() {
+                                eprintln!(
+                                    "partii-offscreen: nth={} prev_reasons={:?} new_reasons={:?} prev_passes={} new_passes={} new_tex_tasks={}",
+                                    self.partii_update_frames,
+                                    prev_doc.render_reasons,
+                                    doc.render_reasons,
+                                    prev_doc.frame.passes.len(),
+                                    doc.frame.passes.len(),
+                                    doc.frame.has_texture_cache_tasks,
+                                );
+                            }
                             prev_doc.render_reasons |= RenderReasons::TEXTURE_CACHE_FLUSH;
                             self.render_impl(
                                 document_id,
