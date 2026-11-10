@@ -498,7 +498,10 @@ interface mixin WebGLRenderingContextBase
     // https://github.com/w3c-cg/ColorWeb-CG/blob/main/webgl-drawing-buffer-tone-map.md: a
     // getter without an argument (or undefined), a setter with a CanvasToneMapping. `any`
     // because an optional dictionary argument can't tell undefined from {}.
-    [Throws] CanvasToneMapping drawingBufferToneMapping(optional any toneMapping);
+    // Off by default (dom_webgl_drawing_buffer_tone_mapping_enabled): Khronos conformance
+    // (offscreencanvas/methods*) fails a context with methods outside the WebGL spec.
+    [Throws, Pref="dom_webgl_drawing_buffer_tone_mapping_enabled"]
+    CanvasToneMapping drawingBufferToneMapping(optional any toneMapping);
 
     undefined activeTexture(GLenum texture);
     undefined attachShader(WebGLProgram program, WebGLShader shader);

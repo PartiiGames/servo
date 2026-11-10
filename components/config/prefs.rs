@@ -257,6 +257,9 @@ pub struct Preferences {
     /// feature-detect `'animate' in Element.prototype` would take a path that then throws,
     /// instead of falling back to CSS animations or requestAnimationFrame.
     pub dom_web_animations_animate_enabled: bool,
+    /// Expose WebGL's `drawingBufferToneMapping()` (a ColorWeb-CG proposal, not in the WebGL
+    /// spec: the Khronos conformance suite counts any extra context method as a failure).
+    pub dom_webgl_drawing_buffer_tone_mapping_enabled: bool,
     /// Enable WebGL2 APIs.
     // feature: WebGL2 | #41394 | Web/API/WebGL2RenderingContext
     pub dom_webgl2_enabled: bool,
@@ -554,6 +557,7 @@ impl Preferences {
             dom_transient_activation_duration_ms: 5000,
             dom_web_animations_enabled: false,
             dom_web_animations_animate_enabled: false,
+            dom_webgl_drawing_buffer_tone_mapping_enabled: false,
             dom_webgl2_enabled: false,
             dom_webgpu_enabled: false,
             dom_webgpu_wgpu_backend: String::new(),
