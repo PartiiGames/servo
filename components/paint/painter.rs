@@ -215,7 +215,22 @@ impl Painter {
 
         // Use same texture upload method as Gecko with ANGLE:
         // https://searchfox.org/mozilla-central/source/gfx/webrender_bindings/src/bindings.rs#1215-1219
-        let upload_method = if webrender_gl.get_string(RENDERER).starts_with("ANGLE") {
+        let gl_renderer = webrender_gl.get_string(RENDERER);
+        // Partii (perf stream): WebRender packs render tasks (blur passes, clip masks, picture
+        // surfaces) into shared render targets of max_shared_surface_size squared, 2048 by default.
+        // On a software GL every pass on such a target costs more the bigger the texture is
+        // (glitterfall's 8-pass backdrop blur: render 9.2 -> 7.8 ms per frame at 512 on llvmpipe),
+        // so software GLs use 512; larger tasks still get their own targets. PARTII_WR_SHARED_SURFACE=N
+        // overrides it.
+        let software_gl = ["llvmpipe", "softpipe", "swrast"]
+            .iter()
+            .any(|name| gl_renderer.contains(name));
+        let max_shared_surface_size = std::env::var("PARTII_WR_SHARED_SURFACE")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .filter(|&n| n >= 256)
+            .unwrap_or(if software_gl { 512 } else { 2048 });
+        let upload_method = if gl_renderer.starts_with("ANGLE") {
             UploadMethod::Immediate
         } else {
             UploadMethod::PixelBuffer(ONE_TIME_USAGE_HINT)
@@ -275,6 +290,7 @@ impl Painter {
                     let (w, h) = v.split_once('x')?;
                     Some(webrender_api::units::DeviceIntSize::new(w.parse().ok()?, h.parse().ok()?))
                 }),
+                max_shared_surface_size,
                 ..Default::default()
             },
             None,
