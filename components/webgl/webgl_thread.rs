@@ -2861,7 +2861,7 @@ impl WebGLImpl {
             WebGLCommand::GenerateMipmap(target) => {
                 let t0 = std::time::Instant::now();
                 let zero = Self::zero_mipmaps(gl, state, target);
-                if !zero {
+                if !zero && !Self::software_mipmaps(gl, target) {
                     unsafe { gl.generate_mipmap(target) }
                 }
                 // Partii (gaps-3, measurement): mipmap generations of 1 ms or more, with the level-0 size.
@@ -3795,6 +3795,94 @@ impl WebGLImpl {
     /// running the GL's downsampling. Same levels as generateMipmap: base level 0 up to
     /// min(TEXTURE_MAX_LEVEL, log2 of the larger side). Returns false when this doesn't apply (the
     /// caller generates the mipmaps as usual).
+    /// Partii (gaps-3): on a software GL (llvmpipe, softpipe, swrast), generateMipmap of an RGBA8/RGB8 2D
+    /// texture filters the levels on this thread (a 2x2 box filter, as GL implementations do) and uploads them,
+    /// instead of glGenerateMipmap: llvmpipe draws each level with a blit shader it compiles per GL context
+    /// (23-26 ms for the first 32x32 texture of every new context) and waits on its rasterizer threads per level
+    /// (1-9 ms per texture), 45-65 ms of every Phaser boot in Rocket to Heaven on the farm. A GPU's
+    /// glGenerateMipmap is cheap, so only software GLs take this path. Returns false (the caller runs
+    /// glGenerateMipmap) for anything else: other targets and formats, a base level other than 0, an immutable
+    /// texture, a bound pixel pack or unpack buffer. `PARTII_SOFT_MIPMAP=0` turns it off.
+    fn software_mipmaps(gl: &Gl, target: u32) -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if target != gl::TEXTURE_2D ||
+            !*ON.get_or_init(|| {
+                std::env::var("PARTII_SOFT_MIPMAP").map_or(true, |v| v != "0") && software_gl(gl)
+            })
+        {
+            return false;
+        }
+        unsafe {
+            if gl.get_tex_parameter_i32(target, gl::TEXTURE_BASE_LEVEL) != 0 ||
+                gl.get_tex_parameter_i32(target, gl::TEXTURE_IMMUTABLE_FORMAT) != 0 ||
+                gl.get_parameter_i32(gl::PIXEL_PACK_BUFFER_BINDING) != 0 ||
+                gl.get_parameter_i32(gl::PIXEL_UNPACK_BUFFER_BINDING) != 0
+            {
+                return false;
+            }
+            let internal_format = gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_INTERNAL_FORMAT) as u32;
+            let (format, channels) = match internal_format {
+                gl::RGBA | gl::RGBA8 => (gl::RGBA, 4),
+                gl::RGB | gl::RGB8 => (gl::RGB, 3),
+                _ => return false,
+            };
+            let width = gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_WIDTH);
+            let height = gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_HEIGHT);
+            if width <= 0 || height <= 0 || (width == 1 && height == 1) {
+                return width > 0 && height > 0;
+            }
+            let max_level = gl.get_tex_parameter_i32(target, gl::TEXTURE_MAX_LEVEL).max(0);
+            const PIXEL_STORE: [u32; 10] = [
+                gl::PACK_ALIGNMENT,
+                gl::PACK_ROW_LENGTH,
+                gl::PACK_SKIP_PIXELS,
+                gl::PACK_SKIP_ROWS,
+                gl::UNPACK_ALIGNMENT,
+                gl::UNPACK_ROW_LENGTH,
+                gl::UNPACK_IMAGE_HEIGHT,
+                gl::UNPACK_SKIP_PIXELS,
+                gl::UNPACK_SKIP_ROWS,
+                gl::UNPACK_SKIP_IMAGES,
+            ];
+            let pixel_store = PIXEL_STORE.map(|name| gl.get_parameter_i32(name));
+            for name in PIXEL_STORE {
+                let value = if name == gl::PACK_ALIGNMENT || name == gl::UNPACK_ALIGNMENT { 1 } else { 0 };
+                gl.pixel_store_i32(name, value);
+            }
+            let (mut w, mut h) = (width as usize, height as usize);
+            let mut pixels = vec![0u8; w * h * channels];
+            gl.get_tex_image(
+                target,
+                0,
+                format,
+                gl::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+            let mut level = 0;
+            while (w > 1 || h > 1) && level < max_level {
+                let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+                pixels = box_filter_level(&pixels, w, h, nw, nh, channels);
+                level += 1;
+                gl.tex_image_2d(
+                    target,
+                    level,
+                    internal_format as i32,
+                    nw as i32,
+                    nh as i32,
+                    0,
+                    format,
+                    gl::UNSIGNED_BYTE,
+                    PixelUnpackData::Slice(Some(&pixels)),
+                );
+                (w, h) = (nw, nh);
+            }
+            for (name, value) in PIXEL_STORE.into_iter().zip(pixel_store) {
+                gl.pixel_store_i32(name, value);
+            }
+        }
+        true
+    }
+
     fn zero_mipmaps(gl: &Gl, state: &mut GLState, target: u32) -> bool {
         let Some(zero) = state.zero_level0 else {
             return false;
@@ -5569,6 +5657,37 @@ fn surface_framebuffer(device: &Device, ctx: &Context) -> Option<gl::NativeFrame
         .ok()
         .flatten()
         .and_then(|info| info.framebuffer_object)
+}
+
+/// Partii (gaps-3): whether this GL is one of Mesa's software rasterizers.
+fn software_gl(gl: &Gl) -> bool {
+    let renderer = unsafe { gl.get_parameter_string(gl::RENDERER) }.to_ascii_lowercase();
+    ["llvmpipe", "softpipe", "swrast"]
+        .iter()
+        .any(|software| renderer.contains(software))
+}
+
+/// Partii (gaps-3): one mipmap level from the one above, `channels` bytes per pixel, rows tightly packed: each
+/// texel is the rounded average of the 2x2 (or, where a dimension is already 1, 2x1 / 1x2) texels above it.
+fn box_filter_level(src: &[u8], w: usize, h: usize, nw: usize, nh: usize, channels: usize) -> Vec<u8> {
+    let mut dst = vec![0u8; nw * nh * channels];
+    let (sx, sy) = (if w > 1 { 2 } else { 1 }, if h > 1 { 2 } else { 1 });
+    let n = (sx * sy) as u32;
+    for y in 0..nh {
+        for x in 0..nw {
+            for c in 0..channels {
+                let mut sum = 0u32;
+                for dy in 0..sy {
+                    for dx in 0..sx {
+                        let (px, py) = ((x * sx + dx).min(w - 1), (y * sy + dy).min(h - 1));
+                        sum += src[(py * w + px) * channels + c] as u32;
+                    }
+                }
+                dst[(y * nw + x) * channels + c] = ((sum + n / 2) / n) as u8;
+            }
+        }
+    }
+    dst
 }
 
 /// Partii: whether antialias: true gets the multisampled default framebuffer. `PARTII_WEBGL_MSAA=1`
