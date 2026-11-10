@@ -36,12 +36,35 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 
+/// Partii (gaps-5): what a translation depends on: the shader type, the source and the translator's settings
+/// (ShaderTranslation, as its Debug text).
+pub(crate) type CompileKey = (u32, String, String);
+
+thread_local! {
+    /// Partii (gaps-5): translations per script thread (see compile_cache_enabled).
+    static COMPILE_CACHE: RefCell<std::collections::HashMap<Rc<CompileKey>, ShaderCompileInfo>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Partii (gaps-5): compileShader of a source this script thread has had translated before, with the same
+/// translator settings, knows its outcome at once (the translator is deterministic), so COMPILE_STATUS and
+/// the info log don't wait for the WebGL thread to work through everything queued before the compile.
+/// The WebGL thread still compiles the shader. Phaser asks COMPILE_STATUS right after each of its 62
+/// compileShader calls a boot (Rocket to Heaven boots one after every death). `PARTII_WEBGL_COMPILE_CACHE=0`
+/// turns it off.
+fn compile_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_COMPILE_CACHE").map_or(true, |v| v != "0"))
+}
+
 /// A compileShader the WebGL thread translates (ANGLE) and compiles. Its answer is read
 /// lazily, so pages polling COMPLETION_STATUS_KHR (KHR_parallel_shader_compile) don't wait for
 /// it, and linkProgram takes the job so the link sees this compile even if the shader is
 /// recompiled before the link is read.
 pub(crate) struct CompileJob {
     receiver: RefCell<Option<GenericReceiver<ShaderCompileInfo>>>,
+    /// Partii (gaps-5): the translation's inputs (COMPILE_CACHE, and the program link cache's key).
+    pub(crate) key: Rc<CompileKey>,
     outcome: OnceCell<CompileOutcome>,
     shader_type: u32,
     pub(crate) essl3: bool,
@@ -68,6 +91,15 @@ impl CompileJob {
                 fragment_outputs: None,
             };
         };
+        if compile_cache_enabled() {
+            COMPILE_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.len() >= 512 {
+                    cache.clear();
+                }
+                cache.insert(self.key.clone(), info.clone());
+            });
+        }
         let fragment_outputs = match info.object_code {
             Some(ref object_code) if self.shader_type == constants::FRAGMENT_SHADER => {
                 parse_fragment_outputs(object_code, self.essl3)
@@ -509,6 +541,12 @@ impl WebGLShader {
             None
         };
         let interface = ShaderInterface::parse(&source, self.gl_type == constants::VERTEX_SHADER);
+        let key = Rc::new((self.gl_type, source.clone(), format!("{translation:?}")));
+        let cached = if compile_cache_enabled() {
+            COMPILE_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+        } else {
+            None
+        };
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast().send_command(WebGLCommand::CompileShader(
             self.id(),
@@ -516,14 +554,20 @@ impl WebGLShader {
             translation,
             sender,
         ));
-        *self.compile_job.borrow_mut() = Some(Rc::new(CompileJob {
+        let job = Rc::new(CompileJob {
             receiver: RefCell::new(Some(receiver)),
+            key,
             outcome: OnceCell::new(),
             shader_type: self.gl_type,
             essl3,
             vertex_inputs,
             interface,
-        }));
+        });
+        if let Some(info) = cached {
+            // The WebGL thread's answer (the same) is never read.
+            let _ = job.outcome.set(job.finish(Some(info)));
+        }
+        *self.compile_job.borrow_mut() = Some(job);
         Ok(())
     }
 
