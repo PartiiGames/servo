@@ -2859,8 +2859,22 @@ impl WebGLImpl {
             WebGLCommand::Finish(ref sender) => Self::finish(gl, sender),
             WebGLCommand::Flush => unsafe { gl.flush() },
             WebGLCommand::GenerateMipmap(target) => {
-                if !Self::zero_mipmaps(gl, state, target) {
+                let t0 = std::time::Instant::now();
+                let zero = Self::zero_mipmaps(gl, state, target);
+                if !zero {
                     unsafe { gl.generate_mipmap(target) }
+                }
+                // Partii (gaps-3, measurement): mipmap generations of 1 ms or more, with the level-0 size.
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                if ms >= 1.0 && std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace") {
+                    let (w, h, f) = unsafe {
+                        (
+                            gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_WIDTH),
+                            gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_HEIGHT),
+                            gl.get_tex_level_parameter_i32(target, 0, gl::TEXTURE_INTERNAL_FORMAT),
+                        )
+                    };
+                    eprintln!("partii-trace mipmap {w}x{h} fmt={f:#x} zero={zero} ms={ms:.1}");
                 }
             },
             WebGLCommand::CreateVertexArray(ref chan) => {
@@ -3907,7 +3921,15 @@ impl WebGLImpl {
         programs: &mut program_cache::Tracker,
         program: WebGLProgramId,
     ) -> ProgramLinkInfo {
+        let t0 = std::time::Instant::now();
         let linked = programs.link(gl, program);
+        if std::env::var("PARTII_FRAME_PROF").is_ok_and(|v| v == "trace") {
+            eprintln!(
+                "partii-trace link ms={:.2} linked={linked} cache={}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                program_cache::last()
+            );
+        }
         if !linked {
             return ProgramLinkInfo {
                 linked: false,
@@ -5877,6 +5899,10 @@ mod program_cache {
 
     const MAX_BINARIES: usize = 256;
     const MAX_BYTES: usize = 64 << 20;
+    thread_local!(static LAST: std::cell::Cell<&'static str> = const { std::cell::Cell::new("-") });
+    pub(super) fn last() -> &'static str {
+        LAST.get()
+    }
     thread_local!(static BINARIES: RefCell<Vec<(String, glow::ProgramBinary)>> = const { RefCell::new(Vec::new()) });
 
     fn enabled(gl: &Gl) -> bool {
@@ -5955,6 +5981,7 @@ mod program_cache {
         pub(super) fn link(&mut self, gl: &Gl, program: WebGLProgramId) -> bool {
             let p = program.glow();
             let key = if enabled(gl) { self.key(program) } else { None };
+            LAST.set(if enabled(gl) { "nokey" } else { "off" });
             let Some(key) = key else {
                 unsafe { gl.link_program(p) };
                 return unsafe { gl.get_program_link_status(p) };
@@ -5966,11 +5993,13 @@ mod program_cache {
                 b.push(e);
                 Some(bin)
             });
-            if let Some(bin) = hit {
-                unsafe { gl.program_binary(p, &bin) };
+            if let Some(bin) = &hit {
+                unsafe { gl.program_binary(p, bin) };
                 if unsafe { gl.get_program_link_status(p) } {
+                    LAST.set("hit");
                     return true;
                 }
+                LAST.set("refused");
                 // Refused: forget it and link.
                 let _ = unsafe { gl.get_error() };
                 BINARIES.with_borrow_mut(|b| b.retain(|(k, _)| *k != key));
@@ -5981,7 +6010,13 @@ mod program_cache {
             }
             let linked = unsafe { gl.get_program_link_status(p) };
             if linked {
+                if hit.is_none() {
+                    LAST.set("miss");
+                }
                 if let Some(bin) = unsafe { gl.get_program_binary(p) } {
+                    if bin.buffer.is_empty() {
+                        LAST.set("empty");
+                    }
                     if !bin.buffer.is_empty() {
                         BINARIES.with_borrow_mut(|b| {
                             b.push((key, bin));
