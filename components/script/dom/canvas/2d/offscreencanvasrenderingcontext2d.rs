@@ -264,6 +264,17 @@ impl OffscreenCanvasRenderingContext2DMethods<crate::DomTypeHolder>
             .CreateRadialGradient(cx, x0, y0, r0, x1, y1, r1)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-createconicgradient>
+    fn CreateConicGradient(
+        &self,
+        cx: &mut JSContext,
+        start_angle: Finite<f64>,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> DomRoot<CanvasGradient> {
+        self.context.CreateConicGradient(cx, start_angle, x, y)
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-createpattern>
     fn CreatePattern(
         &self,

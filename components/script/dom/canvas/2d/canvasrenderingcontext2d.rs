@@ -755,6 +755,18 @@ impl CanvasRenderingContext2DMethods<crate::DomTypeHolder> for CanvasRenderingCo
             .create_radial_gradient(&self.global(), cx, x0, y0, r0, x1, y1, r1)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-createconicgradient>
+    fn CreateConicGradient(
+        &self,
+        cx: &mut JSContext,
+        start_angle: Finite<f64>,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> DomRoot<CanvasGradient> {
+        self.canvas_state
+            .create_conic_gradient(&self.global(), cx, start_angle, x, y)
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-createpattern>
     fn CreatePattern(
         &self,

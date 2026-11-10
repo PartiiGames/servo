@@ -153,21 +153,29 @@ impl Convert<peniko::Brush> for FillOrStrokeStyle {
             LinearGradient(style) => {
                 let start = kurbo::Point::new(style.x0, style.y0);
                 let end = kurbo::Point::new(style.x1, style.y1);
-                let mut gradient = peniko::Gradient::new_linear(start, end);
-                gradient.stops = style.stops.convert();
-                peniko::Brush::Gradient(gradient)
+                let gradient = peniko::Gradient::new_linear(start, end);
+                peniko::Brush::Gradient(canvas_gradient(gradient, style.stops))
             },
             RadialGradient(style) => {
                 let center1 = kurbo::Point::new(style.x0, style.y0);
                 let center2 = kurbo::Point::new(style.x1, style.y1);
-                let mut gradient = peniko::Gradient::new_two_point_radial(
+                let gradient = peniko::Gradient::new_two_point_radial(
                     center1,
                     style.r0 as f32,
                     center2,
                     style.r1 as f32,
                 );
-                gradient.stops = style.stops.convert();
-                peniko::Brush::Gradient(gradient)
+                peniko::Brush::Gradient(canvas_gradient(gradient, style.stops))
+            },
+            ConicGradient(style) => {
+                // Partii: one turn clockwise from the start angle.
+                let start = style.angle as f32;
+                let gradient = peniko::Gradient::new_sweep(
+                    kurbo::Point::new(style.x, style.y),
+                    start,
+                    start + std::f32::consts::TAU,
+                );
+                peniko::Brush::Gradient(canvas_gradient(gradient, style.stops))
             },
             Surface(surface_style) => {
                 let snapshot = &surface_style.surface_data;
@@ -223,6 +231,23 @@ impl Convert<peniko::ColorStops> for Vec<CanvasGradientStop> {
             .sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap());
         stops
     }
+}
+
+/// Partii: a canvas gradient with its stops. HTML interpolates canvas gradients unpremultiplied;
+/// stops in a non-legacy colour syntax (color(), oklch(), color-mix(), relative colours) switch
+/// interpolation to Oklab, as CSS gradients do and as Chromium does for canvas.
+pub(crate) fn canvas_gradient(
+    gradient: peniko::Gradient,
+    stops: Vec<CanvasGradientStop>,
+) -> peniko::Gradient {
+    let legacy = stops.iter().all(|stop| stop.color.is_legacy_syntax());
+    let mut gradient =
+        gradient.with_interpolation_alpha_space(peniko::InterpolationAlphaSpace::Unpremultiplied);
+    if !legacy {
+        gradient = gradient.with_interpolation_cs(peniko::color::ColorSpaceTag::Oklab);
+    }
+    gradient.stops = stops.convert();
+    gradient
 }
 
 impl Convert<peniko::ImageQuality> for Filter {

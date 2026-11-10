@@ -24,6 +24,7 @@ use webrender_api::{ImageDescriptor, ImageDescriptorFlags};
 
 use crate::backend::{CanvasStoreSizesPerType, Convert, GenericDrawTarget};
 use crate::canvas_data::Filter;
+use crate::peniko_conversions::canvas_gradient;
 
 thread_local! {
     /// The shared font cache used by all canvases that render on a thread.
@@ -696,21 +697,29 @@ impl Convert<vello_cpu::PaintType> for FillOrStrokeStyle {
             LinearGradient(style) => {
                 let start = kurbo::Point::new(style.x0, style.y0);
                 let end = kurbo::Point::new(style.x1, style.y1);
-                let mut gradient = peniko::Gradient::new_linear(start, end);
-                gradient.stops = style.stops.convert();
-                vello_cpu::PaintType::Gradient(gradient)
+                let gradient = peniko::Gradient::new_linear(start, end);
+                vello_cpu::PaintType::Gradient(canvas_gradient(gradient, style.stops))
             },
             RadialGradient(style) => {
                 let center1 = kurbo::Point::new(style.x0, style.y0);
                 let center2 = kurbo::Point::new(style.x1, style.y1);
-                let mut gradient = peniko::Gradient::new_two_point_radial(
+                let gradient = peniko::Gradient::new_two_point_radial(
                     center1,
                     style.r0 as f32,
                     center2,
                     style.r1 as f32,
                 );
-                gradient.stops = style.stops.convert();
-                vello_cpu::PaintType::Gradient(gradient)
+                vello_cpu::PaintType::Gradient(canvas_gradient(gradient, style.stops))
+            },
+            ConicGradient(style) => {
+                // Partii: one turn clockwise from the start angle.
+                let start = style.angle as f32;
+                let gradient = peniko::Gradient::new_sweep(
+                    kurbo::Point::new(style.x, style.y),
+                    start,
+                    start + std::f32::consts::TAU,
+                );
+                vello_cpu::PaintType::Gradient(canvas_gradient(gradient, style.stops))
             },
             Surface(surface_style) => {
                 let pixmap = snapshot_as_pixmap(surface_style.surface_data.to_owned());

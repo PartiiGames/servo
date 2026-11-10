@@ -109,6 +109,7 @@ interface mixin CanvasFillStrokeStyles {
   CanvasGradient createLinearGradient(double x0, double y0, double x1, double y1);
   [Throws]
   CanvasGradient createRadialGradient(double x0, double y0, double r0, double x1, double y1, double r1);
+  CanvasGradient createConicGradient(double startAngle, double x, double y);
   [Throws]
   CanvasPattern? createPattern(CanvasImageSource image, [LegacyNullToEmptyString] DOMString repetition);
 };

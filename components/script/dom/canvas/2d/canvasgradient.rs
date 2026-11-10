@@ -9,7 +9,8 @@ use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use servo_canvas_traits::canvas::{
-    CanvasGradientStop, FillOrStrokeStyle, LinearGradientStyle, RadialGradientStyle,
+    CanvasGradientStop, ConicGradientStyle, FillOrStrokeStyle, LinearGradientStyle,
+    RadialGradientStyle,
 };
 
 use super::canvas_state::parse_color;
@@ -33,6 +34,7 @@ pub(crate) struct CanvasGradient {
 pub(crate) enum CanvasGradientStyle {
     Linear(#[no_trace] LinearGradientStyle),
     Radial(#[no_trace] RadialGradientStyle),
+    Conic(#[no_trace] ConicGradientStyle),
 }
 
 impl CanvasGradient {
@@ -98,6 +100,14 @@ impl ToFillOrStrokeStyle for &CanvasGradient {
                     gradient.x1,
                     gradient.y1,
                     gradient.r1,
+                    gradient_stops,
+                ))
+            },
+            CanvasGradientStyle::Conic(ref gradient) => {
+                FillOrStrokeStyle::ConicGradient(ConicGradientStyle::new(
+                    gradient.angle,
+                    gradient.x,
+                    gradient.y,
                     gradient_stops,
                 ))
             },
