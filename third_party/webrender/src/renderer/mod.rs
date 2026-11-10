@@ -4066,7 +4066,20 @@ impl Renderer {
                 let u = target.used_rect.map_or((0, 0), |r| (r.width(), r.height()));
                 tmark(
                     &mut self.device,
-                    format_args!("p{}c{}x{}/{}", _pass_index, u.0, u.1, target.alpha_batch_containers.len()),
+                    format_args!(
+                        "p{}c{}x{}/{}[v{}h{}s{}b{}r{}m{}cl{}]",
+                        _pass_index,
+                        u.0,
+                        u.1,
+                        target.alpha_batch_containers.len(),
+                        target.vertical_blurs.values().map(|v| v.len()).sum::<usize>(),
+                        target.horizontal_blurs.values().map(|v| v.len()).sum::<usize>(),
+                        target.scalings.values().map(|v| v.len()).sum::<usize>(),
+                        target.blits.len(),
+                        target.resolve_ops.len(),
+                        target.clip_masks.mask_instances_fast.len() + target.clip_masks.mask_instances_slow.len(),
+                        target.clears.len(),
+                    ),
                     &mut tstart,
                 );
             }

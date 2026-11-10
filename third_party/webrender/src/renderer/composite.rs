@@ -462,6 +462,20 @@ impl Renderer {
             }
         }
 
+        // Partii (measurement): PARTII_WR_TARGET_PROF times the composite's clear, opaque and
+        // alpha tile lists (GL finish around each).
+        let cprof = std::env::var_os("PARTII_WR_TARGET_PROF").is_some();
+        let mut cstart = std::time::Instant::now();
+        let mut clog = String::new();
+        let mut cmark = |device: &mut crate::device::Device, label: &str, start: &mut std::time::Instant| {
+            if cprof {
+                device.gl().finish();
+                let now = std::time::Instant::now();
+                clog.push_str(&format!(" {}={:.2}", label, (now - *start).as_secs_f64() * 1000.0));
+                *start = now;
+            }
+        };
+        cmark(&mut self.device, "pre", &mut cstart);
         // Clear the framebuffer
         let clear_color = Some(clear_color.to_array());
 
@@ -486,6 +500,7 @@ impl Renderer {
             }
         }
 
+        cmark(&mut self.device, "clear", &mut cstart);
         // Draw opaque tiles
         let opaque_items = layer.occlusion.opaque_items();
         if !opaque_items.is_empty() {
@@ -500,6 +515,8 @@ impl Renderer {
             );
             self.gpu_profiler.finish_sampler(opaque_sampler);
         }
+        let n_opaque = opaque_items.len();
+        cmark(&mut self.device, "opaque", &mut cstart);
 
         // Draw alpha tiles
         let alpha_items = layer.occlusion.alpha_items();
@@ -515,6 +532,11 @@ impl Renderer {
                 &mut results.stats,
             );
             self.gpu_profiler.finish_sampler(transparent_sampler);
+        }
+        let n_alpha = alpha_items.len();
+        cmark(&mut self.device, "alpha", &mut cstart);
+        if cprof {
+            eprintln!("partii-wr-composite{} n_opaque={} n_alpha={}", clog, n_opaque, n_alpha);
         }
     }
 
