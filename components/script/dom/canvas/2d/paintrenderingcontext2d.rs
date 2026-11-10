@@ -15,7 +15,7 @@ use webrender_api::units::DevicePixel;
 
 use super::canvas_state::CanvasState;
 use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
-    CanvasFillRule, CanvasImageSource, CanvasLineCap, CanvasLineJoin,
+    CanvasFillRule, CanvasImageSource, CanvasLineCap, CanvasLineJoin, ImageSmoothingQuality,
 };
 use crate::dom::bindings::codegen::Bindings::DOMMatrixBinding::DOMMatrix2DInit;
 use crate::dom::bindings::codegen::Bindings::PaintRenderingContext2DBinding::PaintRenderingContext2DMethods;
@@ -350,6 +350,16 @@ impl PaintRenderingContext2DMethods<crate::DomTypeHolder> for PaintRenderingCont
     ) -> ErrorResult {
         self.canvas_state
             .ellipse(x, y, rx, ry, rotation, start, end, ccw)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingquality>
+    fn ImageSmoothingQuality(&self) -> ImageSmoothingQuality {
+        self.canvas_state.image_smoothing_quality()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingquality>
+    fn SetImageSmoothingQuality(&self, value: ImageSmoothingQuality) {
+        self.canvas_state.set_image_smoothing_quality(value)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingenabled>

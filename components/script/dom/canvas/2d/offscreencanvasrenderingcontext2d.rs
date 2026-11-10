@@ -18,6 +18,7 @@ use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
     CanvasDirection, CanvasFillRule, CanvasFontKerning, CanvasFontStretch, CanvasFontVariantCaps,
     CanvasImageSource, CanvasLineCap, CanvasLineJoin, CanvasRenderingContext2DMethods,
     CanvasRenderingContext2DSettings, CanvasTextAlign, CanvasTextBaseline, CanvasTextRendering,
+    ImageSmoothingQuality,
 };
 use crate::dom::bindings::codegen::Bindings::DOMMatrixBinding::DOMMatrix2DInit;
 use crate::dom::bindings::codegen::Bindings::OffscreenCanvasRenderingContext2DBinding::OffscreenCanvasRenderingContext2DMethods;
@@ -320,6 +321,16 @@ impl OffscreenCanvasRenderingContext2DMethods<crate::DomTypeHolder>
         self.context.SetGlobalCompositeOperation(op_str)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingquality>
+    fn ImageSmoothingQuality(&self) -> ImageSmoothingQuality {
+        self.context.ImageSmoothingQuality()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingquality>
+    fn SetImageSmoothingQuality(&self, value: ImageSmoothingQuality) {
+        self.context.SetImageSmoothingQuality(value)
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingenabled>
     fn ImageSmoothingEnabled(&self) -> bool {
         self.context.ImageSmoothingEnabled()
@@ -403,6 +414,16 @@ impl OffscreenCanvasRenderingContext2DMethods<crate::DomTypeHolder>
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-wordspacing>
     fn SetWordSpacing(&self, value: DOMString) {
         self.context.SetWordSpacing(value)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-lang>
+    fn Lang(&self) -> DOMString {
+        self.context.Lang()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-lang>
+    fn SetLang(&self, value: DOMString) {
+        self.context.SetLang(value)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-fontkerning>

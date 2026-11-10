@@ -96,10 +96,12 @@ interface mixin CanvasCompositing {
   attribute DOMString globalCompositeOperation; // (default source-over)
 };
 
+enum ImageSmoothingQuality { "low", "medium", "high" };
+
 interface mixin CanvasImageSmoothing {
   // image smoothing
   attribute boolean imageSmoothingEnabled; // (default true)
-  // attribute ImageSmoothingQuality imageSmoothingQuality; // (default low)
+  attribute ImageSmoothingQuality imageSmoothingQuality; // (default low)
 };
 
 interface mixin CanvasFillStrokeStyles {
@@ -232,7 +234,8 @@ interface mixin CanvasTextDrawingStyles {
   attribute CanvasTextBaseline textBaseline; // "top", "hanging", "middle", "alphabetic",
                                       // "ideographic", "bottom" (default: "alphabetic")
   attribute CanvasDirection direction; // "ltr", "rtl", "inherit" (default: "inherit")
-  // Partii: the rest of the HTML spec's text drawing styles (lang is not supported yet).
+  // Partii: the rest of the HTML spec's text drawing styles.
+  attribute DOMString lang; // (default: "inherit")
   attribute DOMString letterSpacing; // CSS letter-spacing (default: "0px")
   attribute CanvasFontKerning fontKerning; // "auto", "normal", "none" (default: "auto")
   attribute CanvasFontStretch fontStretch; // (default: "normal")

@@ -58,7 +58,7 @@ use crate::css::css::{ANONYMOUS_CONTENT_URL_DATA, parser_context_for_anonymous_c
 use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
     CanvasDirection, CanvasFillRule, CanvasFontKerning, CanvasFontStretch, CanvasFontVariantCaps,
     CanvasImageSource, CanvasLineCap, CanvasLineJoin, CanvasTextAlign, CanvasTextBaseline,
-    CanvasTextRendering, ImageDataMethods,
+    CanvasTextRendering, ImageDataMethods, ImageSmoothingQuality,
 };
 use crate::dom::bindings::codegen::Bindings::DOMMatrixBinding::DOMMatrix2DInit;
 use crate::dom::bindings::codegen::UnionTypes::{
@@ -114,6 +114,7 @@ pub(super) struct CanvasContextState {
     #[no_trace]
     global_composition: CompositionOrBlending,
     image_smoothing_enabled: bool,
+    image_smoothing_quality: ImageSmoothingQuality,
     fill_style: CanvasFillOrStrokeStyle,
     stroke_style: CanvasFillOrStrokeStyle,
     line_width: f64,
@@ -148,6 +149,8 @@ pub(super) struct CanvasContextState {
     font_stretch: CanvasFontStretch,
     font_variant_caps: CanvasFontVariantCaps,
     text_rendering: CanvasTextRendering,
+    /// Partii: <https://html.spec.whatwg.org/multipage/#dom-context-2d-lang>
+    lang: String,
     /// The number of clips pushed onto the context while in this state.
     /// When restoring old state, same number of clips will be popped to restore state.
     clips_pushed: usize,
@@ -161,6 +164,7 @@ impl CanvasContextState {
             global_alpha: 1.0,
             global_composition: CompositionOrBlending::default(),
             image_smoothing_enabled: true,
+            image_smoothing_quality: ImageSmoothingQuality::Low,
             fill_style: CanvasFillOrStrokeStyle::Color(AbsoluteColor::BLACK),
             stroke_style: CanvasFillOrStrokeStyle::Color(AbsoluteColor::BLACK),
             line_width: 1.0,
@@ -182,6 +186,7 @@ impl CanvasContextState {
             font_stretch: CanvasFontStretch::Normal,
             font_variant_caps: CanvasFontVariantCaps::Normal,
             text_rendering: CanvasTextRendering::Auto,
+            lang: "inherit".to_owned(),
             line_dash: Vec::new(),
             line_dash_offset: 0.0,
             clips_pushed: 0,
@@ -1633,6 +1638,7 @@ impl CanvasState {
         let size = self.font_style().font_size.computed_size().px() as f64;
 
         let is_rtl = self.is_rtl(canvas);
+        let language = self.text_language(canvas);
         let Some((bounds, text_run)) = self.text_with_size(
             global_scope,
             &text.str(),
@@ -1640,6 +1646,7 @@ impl CanvasState {
             size,
             max_width,
             is_rtl,
+            language,
         ) else {
             return;
         };
@@ -1683,6 +1690,7 @@ impl CanvasState {
         let size = self.font_style().font_size.computed_size().px() as f64;
 
         let is_rtl = self.is_rtl(canvas);
+        let language = self.text_language(canvas);
         let Some((bounds, text_run)) = self.text_with_size(
             global_scope,
             &text.str(),
@@ -1690,6 +1698,7 @@ impl CanvasState {
             size,
             max_width,
             is_rtl,
+            language,
         ) else {
             return;
         };
@@ -1736,7 +1745,8 @@ impl CanvasState {
         let font = font_group.first(font_context).expect("couldn't find font");
         let ascent = font.metrics().ascent.to_f64_px();
         let descent = font.metrics().descent.to_f64_px();
-        let runs = self.build_unshaped_text_runs(font_context, &text, &font_group);
+        let language = self.text_language(canvas);
+        let runs = self.build_unshaped_text_runs(font_context, &text, &font_group, language);
         let spacing = self.text_spacing();
 
         let mut total_advance = 0.0;
@@ -1946,6 +1956,39 @@ impl CanvasState {
 
     pub(super) fn set_text_rendering(&self, value: CanvasTextRendering) {
         self.state.borrow_mut().text_rendering = value;
+    }
+
+    pub(super) fn lang(&self) -> DOMString {
+        DOMString::from(self.state.borrow().lang.clone())
+    }
+
+    pub(super) fn set_lang(&self, value: DOMString) {
+        self.state.borrow_mut().lang = value.to_string();
+    }
+
+    pub(super) fn image_smoothing_quality(&self) -> ImageSmoothingQuality {
+        self.state.borrow().image_smoothing_quality
+    }
+
+    pub(super) fn set_image_smoothing_quality(&self, value: ImageSmoothingQuality) {
+        self.state.borrow_mut().image_smoothing_quality = value;
+    }
+
+    /// Partii: the language text is shaped in: `lang`, with "inherit" resolved against the canvas
+    /// element's language (else the font's).
+    fn text_language(&self, canvas: Option<&HTMLCanvasElement>) -> Language {
+        let lang = self.state.borrow().lang.clone();
+        let tag = if lang == "inherit" {
+            canvas
+                .and_then(|canvas| canvas.upcast::<Node>().get_lang())
+                .unwrap_or_else(|| self.font_style()._x_lang.0.to_string())
+        } else {
+            lang
+        };
+        tag.split(['-', '_'])
+            .next()
+            .and_then(|primary| primary.parse().ok())
+            .unwrap_or(Language::UNKNOWN)
     }
 
     /// The letterSpacing, wordSpacing and fontKerning state used when shaping text.
@@ -2629,6 +2672,7 @@ impl CanvasState {
         size: f64,
         max_width: Option<f64>,
         is_rtl: bool,
+        language: Language,
     ) -> Option<(Rect<f64>, Vec<TextRun>)> {
         let font_context = &global_scope.font_context();
 
@@ -2649,7 +2693,7 @@ impl CanvasState {
             return None;
         };
 
-        let runs = self.build_unshaped_text_runs(font_context, &text, &font_group);
+        let runs = self.build_unshaped_text_runs(font_context, &text, &font_group, language);
         let spacing = self.text_spacing();
 
         // TODO: This doesn't do any kind of line layout at all. In particular, there needs
@@ -2684,6 +2728,7 @@ impl CanvasState {
                     new_size,
                     Some(max_width),
                     is_rtl,
+                    language,
                 );
             }
         }
@@ -2719,12 +2764,9 @@ impl CanvasState {
         font_context: &FontContext,
         text: &'text str,
         font_group: &FontGroup,
+        language: Language,
     ) -> Vec<UnshapedTextRun<'text>> {
         let mut runs = Vec::new();
-        // TODO: canvas also has experimental `lang` attribute (https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/lang),
-        // which Servo doesn't support yet. When this attribute is supported, some changes may be needed here.
-        let x_language = self.font_style()._x_lang.clone();
-        let language = x_language.0.parse().unwrap_or(Language::UNKNOWN);
         let mut current_text_run = UnshapedTextRun::new(language);
         let mut current_text_run_start_index = 0;
 

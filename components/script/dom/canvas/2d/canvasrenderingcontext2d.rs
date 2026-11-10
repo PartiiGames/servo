@@ -17,7 +17,7 @@ use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
     CanvasColorType, CanvasDirection, CanvasFillRule, CanvasFontKerning, CanvasFontStretch,
     CanvasFontVariantCaps, CanvasImageSource, CanvasLineCap, CanvasLineJoin,
     CanvasRenderingContext2DMethods, CanvasRenderingContext2DSettings, CanvasTextAlign,
-    CanvasTextBaseline, CanvasTextRendering, PredefinedColorSpace,
+    CanvasTextBaseline, CanvasTextRendering, ImageSmoothingQuality, PredefinedColorSpace,
 };
 use crate::dom::bindings::codegen::Bindings::DOMMatrixBinding::DOMMatrix2DInit;
 use crate::dom::bindings::codegen::UnionTypes::{
@@ -478,6 +478,16 @@ impl CanvasRenderingContext2DMethods<crate::DomTypeHolder> for CanvasRenderingCo
         self.canvas_state.set_word_spacing(value)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-lang>
+    fn Lang(&self) -> DOMString {
+        self.canvas_state.lang()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-lang>
+    fn SetLang(&self, value: DOMString) {
+        self.canvas_state.set_lang(value)
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-fontkerning>
     fn FontKerning(&self) -> CanvasFontKerning {
         self.canvas_state.font_kerning()
@@ -626,6 +636,16 @@ impl CanvasRenderingContext2DMethods<crate::DomTypeHolder> for CanvasRenderingCo
     ) -> ErrorResult {
         self.canvas_state
             .ellipse(x, y, rx, ry, rotation, start, end, ccw)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingquality>
+    fn ImageSmoothingQuality(&self) -> ImageSmoothingQuality {
+        self.canvas_state.image_smoothing_quality()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingquality>
+    fn SetImageSmoothingQuality(&self, value: ImageSmoothingQuality) {
+        self.canvas_state.set_image_smoothing_quality(value)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingenabled>
