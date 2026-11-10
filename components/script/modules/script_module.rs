@@ -244,21 +244,36 @@ impl ModuleTree {
             line_number,
         );
 
-        let mut source = if let Some(unminified_js_dir) = global.unminified_js_dir() {
+        let unminified_js_dir = global.unminified_js_dir();
+        let cacheable = unminified_js_dir.is_none() && super::stencil_cache::enabled();
+        let mut source = if let Some(unminified_js_dir) = unminified_js_dir {
             let mut module_source = ScriptSource {
                 source,
                 external,
                 url,
             };
             unminify_js(&mut module_source, unminified_js_dir);
-            transform_str_to_source_text(&module_source.source)
+            Cow::Owned(module_source.source.into_owned())
         } else {
-            transform_str_to_source_text(&source)
+            source
         };
 
         unsafe {
             // Step 7. Let result be ParseModule(source, settings's realm, script).
-            rooted!(&in(cx) let module_script = CompileModule1(cx, compile_options.ptr, &mut source));
+            // Partii (gaps-3): a module this script thread compiled before is instantiated from its cached stencil
+            // (modules/stencil_cache.rs).
+            rooted!(&in(cx) let module_script = if cacheable {
+                super::stencil_cache::compile_module(
+                    cx,
+                    compile_options.ptr,
+                    url.as_str(),
+                    line_number,
+                    introduction_type,
+                    &source,
+                )
+            } else {
+                CompileModule1(cx, compile_options.ptr, &mut transform_str_to_source_text(&source))
+            });
 
             // Step 8. If result is a list of errors, then:
             if module_script.is_null() {
