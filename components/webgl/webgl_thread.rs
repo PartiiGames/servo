@@ -6226,7 +6226,11 @@ mod frame_prof {
                 .unwrap_or_default();
             sum_msg(kind, (d.as_micros() % 10_000_000_000) as f64 / 1000.0 - ms, ms);
         }
-        if ms >= 4.0 {
+        static MIN: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        let min = *MIN.get_or_init(|| {
+            std::env::var("PARTII_WEBGL_TRACE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(4.0)
+        });
+        if ms >= min {
             let d = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
