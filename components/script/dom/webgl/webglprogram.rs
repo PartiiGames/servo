@@ -208,7 +208,6 @@ pub(crate) struct WebGLProgram {
     #[ignore_malloc_size_of = "channel"]
     pending_link: RefCell<Option<GenericReceiver<ProgramLinkInfo>>>,
     /// Partii (gaps-5): the LINK_CACHE key of the pending link (None: not cacheable).
-    #[no_trace]
     #[ignore_malloc_size_of = "Rc"]
     pending_link_key: RefCell<Option<LinkKey>>,
     /// Partii (gaps-5): transformFeedbackVaryings was called (such links aren't cached).
