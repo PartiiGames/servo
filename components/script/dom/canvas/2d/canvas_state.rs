@@ -1611,12 +1611,14 @@ impl CanvasState {
         // the initial values for the text style.
         let size = self.font_style().font_size.computed_size().px() as f64;
 
+        let is_rtl = self.is_rtl(canvas);
         let Some((bounds, text_run)) = self.text_with_size(
             global_scope,
             &text.str(),
             Point2D::new(x, y),
             size,
             max_width,
+            is_rtl,
         ) else {
             return;
         };
@@ -1659,12 +1661,14 @@ impl CanvasState {
         // the initial values for the text style.
         let size = self.font_style().font_size.computed_size().px() as f64;
 
+        let is_rtl = self.is_rtl(canvas);
         let Some((bounds, text_run)) = self.text_with_size(
             global_scope,
             &text.str(),
             Point2D::new(x, y),
             size,
             max_width,
+            is_rtl,
         ) else {
             return;
         };
@@ -1730,30 +1734,22 @@ impl CanvasState {
             .reduce(|a, b| a.union(&b))
             .unwrap_or_default();
 
-        let baseline = font.baseline().unwrap_or_else(|| FontBaseline {
-            hanging_baseline: (ascent * HANGING_BASELINE_DEFAULT) as f32,
-            ideographic_baseline: (-descent * IDEOGRAPHIC_BASELINE_DEFAULT) as f32,
-            alphabetic_baseline: 0.,
-        });
+        let baseline = font_baselines(&font);
         let ideographic_baseline = baseline.ideographic_baseline as f64;
         let alphabetic_baseline = baseline.alphabetic_baseline as f64;
         let hanging_baseline = baseline.hanging_baseline as f64;
 
+        // Partii: start/end follow the direction (2d.text.drawing.style.measure.direction).
+        let is_rtl = self.is_rtl(canvas);
         let state = self.state.borrow();
         let anchor_x = match state.text_align {
-            CanvasTextAlign::End => total_advance,
+            CanvasTextAlign::Start if is_rtl => total_advance,
+            CanvasTextAlign::End if !is_rtl => total_advance,
             CanvasTextAlign::Center => total_advance / 2.,
             CanvasTextAlign::Right => total_advance,
             _ => 0.,
         } as f64;
-        let anchor_y = match state.text_baseline {
-            CanvasTextBaseline::Top => ascent,
-            CanvasTextBaseline::Hanging => hanging_baseline,
-            CanvasTextBaseline::Ideographic => ideographic_baseline,
-            CanvasTextBaseline::Middle => (ascent - descent) / 2.,
-            CanvasTextBaseline::Alphabetic => alphabetic_baseline,
-            CanvasTextBaseline::Bottom => -descent,
-        };
+        let anchor_y = text_baseline_offset(&font, state.text_baseline);
 
         TextMetrics::new(
             global,
@@ -2611,6 +2607,7 @@ impl CanvasState {
         origin: Point2D<f64>,
         size: f64,
         max_width: Option<f64>,
+        is_rtl: bool,
     ) -> Option<(Rect<f64>, Vec<TextRun>)> {
         let font_context = &global_scope.font_context();
 
@@ -2659,13 +2656,20 @@ impl CanvasState {
         if let Some(max_width) = max_width {
             let new_size = (max_width / total_advance * size).floor().max(5.);
             if total_advance > max_width && new_size != size {
-                return self.text_with_size(global_scope, &text, origin, new_size, Some(max_width));
+                return self.text_with_size(
+                    global_scope,
+                    &text,
+                    origin,
+                    new_size,
+                    Some(max_width),
+                    is_rtl,
+                );
             }
         }
 
         // > Step 7: Find the anchor point for the line of text.
         let start =
-            self.find_anchor_point_for_line_of_text(origin, first_font.metrics(), total_advance);
+            self.find_anchor_point_for_line_of_text(origin, &first_font, total_advance, is_rtl);
 
         // > Step 8: Let result be an array constructed by iterating over each glyph in the inline box
         // > from left to right (if any), adding to the array, for each glyph, the shape of the glyph
@@ -2752,16 +2756,10 @@ impl CanvasState {
     fn find_anchor_point_for_line_of_text(
         &self,
         origin: Point2D<f64>,
-        metrics: &FontMetrics,
+        font: &FontRef,
         width: f64,
+        is_rtl: bool,
     ) -> Point2D<f64> {
-        let state = self.state.borrow();
-        let is_rtl = match state.direction {
-            CanvasDirection::Ltr => false,
-            CanvasDirection::Rtl => true,
-            CanvasDirection::Inherit => false, // TODO: resolve direction wrt to canvas element
-        };
-
         let text_align = match self.text_align() {
             CanvasTextAlign::Start if is_rtl => CanvasTextAlign::Right,
             CanvasTextAlign::Start => CanvasTextAlign::Left,
@@ -2775,18 +2773,22 @@ impl CanvasState {
             _ => 0.,
         };
 
-        let ascent = metrics.ascent.to_f64_px();
-        let descent = metrics.descent.to_f64_px();
-        let anchor_y = match self.text_baseline() {
-            CanvasTextBaseline::Top => ascent,
-            CanvasTextBaseline::Hanging => ascent * HANGING_BASELINE_DEFAULT,
-            CanvasTextBaseline::Ideographic => -descent * IDEOGRAPHIC_BASELINE_DEFAULT,
-            CanvasTextBaseline::Middle => (ascent - descent) / 2.,
-            CanvasTextBaseline::Alphabetic => 0.,
-            CanvasTextBaseline::Bottom => -descent,
-        };
+        // Partii: the same baselines measureText() reports (the font's BASE table when it has one).
+        let anchor_y = text_baseline_offset(font, self.text_baseline());
 
         origin + Vector2D::new(anchor_x, anchor_y)
+    }
+
+    /// Partii: whether text runs right to left: `direction`, with "inherit" resolved against the
+    /// canvas element's directionality (an OffscreenCanvas has no element: left to right).
+    fn is_rtl(&self, canvas: Option<&HTMLCanvasElement>) -> bool {
+        match self.state.borrow().direction {
+            CanvasDirection::Ltr => false,
+            CanvasDirection::Rtl => true,
+            CanvasDirection::Inherit => {
+                canvas.is_some_and(|canvas| canvas.upcast::<Element>().directionality() == "rtl")
+            },
+        }
     }
 }
 
@@ -3114,4 +3116,32 @@ fn spacing_to_px(length: &NoCalcLength, metrics: &FontMetrics) -> f64 {
         _ => 0.,
     };
     value * factor
+}
+
+/// Partii: the font's hanging, ideographic and alphabetic baselines in CSS px above the alphabetic
+/// baseline (from its BASE table, else the usual fractions of the ascent and descent).
+fn font_baselines(font: &FontRef) -> FontBaseline {
+    let ascent = font.metrics().ascent.to_f64_px();
+    let descent = font.metrics().descent.to_f64_px();
+    font.baseline().unwrap_or_else(|| FontBaseline {
+        hanging_baseline: (ascent * HANGING_BASELINE_DEFAULT) as f32,
+        ideographic_baseline: (-descent * IDEOGRAPHIC_BASELINE_DEFAULT) as f32,
+        alphabetic_baseline: 0.,
+    })
+}
+
+/// Partii: how far below the `textBaseline` line the alphabetic baseline lies, in CSS px; used by
+/// both drawing and measureText so they agree.
+fn text_baseline_offset(font: &FontRef, text_baseline: CanvasTextBaseline) -> f64 {
+    let ascent = font.metrics().ascent.to_f64_px();
+    let descent = font.metrics().descent.to_f64_px();
+    let baseline = font_baselines(font);
+    match text_baseline {
+        CanvasTextBaseline::Top => ascent,
+        CanvasTextBaseline::Hanging => baseline.hanging_baseline as f64,
+        CanvasTextBaseline::Ideographic => baseline.ideographic_baseline as f64,
+        CanvasTextBaseline::Middle => (ascent - descent) / 2.,
+        CanvasTextBaseline::Alphabetic => baseline.alphabetic_baseline as f64,
+        CanvasTextBaseline::Bottom => -descent,
+    }
 }

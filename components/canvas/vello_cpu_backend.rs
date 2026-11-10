@@ -52,7 +52,8 @@ pub(crate) struct VelloCPUDrawTarget {
     ctx: vello_cpu::RenderContext,
     resources: vello_cpu::Resources,
     pixmap: vello_cpu::Pixmap,
-    clips: Vec<(Path, kurbo::Affine)>,
+    /// Partii: with each clip's fill rule, so a clip pushed back after a render keeps it.
+    clips: Vec<(Path, kurbo::Affine, peniko::Fill)>,
     state: State,
 }
 
@@ -80,10 +81,12 @@ impl VelloCPUDrawTarget {
         }
         f(self);
         // push all clip layers back
-        for (path, affine) in &self.clips {
+        for (path, affine, fill_rule) in &self.clips {
             self.ctx.set_transform(*affine);
+            self.ctx.set_fill_rule(*fill_rule);
             self.ctx.push_clip_layer(&path.0);
         }
+        self.ctx.set_fill_rule(peniko::Fill::NonZero);
     }
 
     fn ensure_drawing(&mut self) {
@@ -198,16 +201,15 @@ impl VelloCPUDrawTarget {
             return false;
         }
         let viewport: Rect<f64> = Rect::from_size(self.get_size().cast());
-        let Some(clip) = self.clips.iter().try_fold(viewport, |acc, (path, affine)| {
+        // Partii: every clip must leave the whole viewport drawable; a bounding box covering the
+        // viewport is not enough (clip paths with holes: 2d.path.clip.winding.*).
+        let unclipped = self.clips.iter().all(|(path, affine, _)| {
             let mut bez = path.0.clone();
             bez.apply_affine(*affine);
-            acc.intersection(&bez.bounding_box().into())
-        }) else {
-            // clip makes no visible side effects
-            return false;
-        };
+            crate::backend::clip_covers_viewport(&bez, &viewport)
+        });
         transformed_rect.cast().contains_rect(&viewport) && // whole viewport is cleared
-            clip.contains_rect(&viewport) // viewport is not clipped
+            unclipped // viewport is not clipped
     }
 }
 
@@ -534,9 +536,10 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
     fn push_clip(&mut self, path: &Path, fill_rule: FillRule, transform: Transform2D<f64>) {
         let affine = transform.cast().into();
         self.ctx.set_transform(affine);
-        self.ctx.set_fill_rule(fill_rule.convert());
+        let fill_rule = fill_rule.convert();
+        self.ctx.set_fill_rule(fill_rule);
         self.ctx.push_clip_layer(&path.0);
-        self.clips.push((path.clone(), affine));
+        self.clips.push((path.clone(), affine, fill_rule));
         self.ctx.set_fill_rule(peniko::Fill::NonZero);
     }
 

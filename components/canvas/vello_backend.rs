@@ -173,14 +173,13 @@ impl VelloDrawTarget {
             return false;
         }
         let viewport: Rect<f64> = Rect::from_size(self.get_size().cast());
-        let Some(clip) = self.clips.iter().try_fold(viewport, |acc, e| {
-            acc.intersection(&e.0.bounding_box().into())
-        }) else {
-            // clip makes no visible side effects
-            return false;
-        };
+        // Partii: see crate::backend::clip_covers_viewport (clip paths with holes).
+        let unclipped = self
+            .clips
+            .iter()
+            .all(|e| crate::backend::clip_covers_viewport(&e.0, &viewport));
         transformed_rect.cast().contains_rect(&viewport) && // whole viewport is cleared
-            clip.contains_rect(&viewport) // viewport is not clipped
+            unclipped // viewport is not clipped
     }
 
     fn ensure_drawing(&mut self) {

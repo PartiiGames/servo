@@ -117,3 +117,44 @@ pub(crate) trait GenericDrawTarget {
 pub(crate) trait Convert<T> {
     fn convert(self) -> T;
 }
+
+/// Partii: whether a clip path (already in device space) leaves all of `viewport` drawable: it is
+/// one axis-aligned rectangle that contains the viewport. A clip whose bounding box covers the
+/// viewport may still have holes (several subpaths, a winding rule, a self-intersecting outline), so
+/// the bounding box alone does not tell.
+pub(crate) fn clip_covers_viewport(path: &kurbo::BezPath, viewport: &Rect<f64>) -> bool {
+    use kurbo::{PathEl, Shape};
+    // A lone trailing move-to (rect() starts a new subpath at its origin) draws nothing.
+    let mut elements = path.elements();
+    while let [rest @ .., PathEl::MoveTo(_)] = elements {
+        if rest.is_empty() {
+            break;
+        }
+        elements = rest;
+    }
+    let mut points = Vec::with_capacity(5);
+    for (i, element) in elements.iter().enumerate() {
+        match element {
+            PathEl::MoveTo(p) if i == 0 => points.push(*p),
+            PathEl::LineTo(p) if i > 0 => points.push(*p),
+            PathEl::ClosePath if i > 0 && i == elements.len() - 1 => {},
+            _ => return false,
+        }
+    }
+    if points.len() == 5 && points[4] == points[0] {
+        points.pop();
+    }
+    if points.len() != 4 {
+        return false;
+    }
+    let axis_aligned = (0..4).all(|k| {
+        let (a, b) = (points[k], points[(k + 1) % 4]);
+        a.x == b.x || a.y == b.y
+    });
+    let bounds = path.bounding_box();
+    axis_aligned &&
+        bounds.x0 <= viewport.min_x() &&
+        bounds.y0 <= viewport.min_y() &&
+        bounds.x1 >= viewport.max_x() &&
+        bounds.y1 >= viewport.max_y()
+}
