@@ -2013,7 +2013,7 @@ impl WebGLImpl {
                 Self::program_info_log(gl, program_id, chan)
             },
             WebGLCommand::CompileShader(shader_id, ref source, ref translation, ref sender) => {
-                let info = Self::translate_shader(gl, source, translation);
+                let info = Self::translate_shader_cached(gl, source, translation);
                 if let Some(ref object_code) = info.object_code {
                     Self::compile_shader(gl, shader_id, object_code);
                 }
@@ -4157,6 +4157,40 @@ impl WebGLImpl {
 
     #[inline]
     /// Translates a WebGL shader with ANGLE into the GLSL this context takes.
+    /// Partii (gaps-3): `translate_shader` through a per-thread cache of its results, keyed by the source and
+    /// everything the translation reads (`ShaderTranslation`; the GL is this thread's). A game that makes a new
+    /// context for every round (Phaser's `new Game` in Rocket to Heaven, after each death and on each reload)
+    /// compiles the same ~60 shaders each time, and ANGLE translates them the same way every time: 15-27 ms of
+    /// the WebGL thread per boot on the farm, which the boot's createProgram and getShaderParameter wait out.
+    /// 256 shaders, least recently used out. `PARTII_SHADER_CACHE=0` turns it off.
+    fn translate_shader_cached(gl: &Gl, source: &str, t: &ShaderTranslation) -> ShaderCompileInfo {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("PARTII_SHADER_CACHE").map_or(true, |v| v != "0")) {
+            return Self::translate_shader(gl, source, t);
+        }
+        type Entry = (String, String, ShaderCompileInfo);
+        thread_local!(static CACHE: std::cell::RefCell<Vec<Entry>> = const { std::cell::RefCell::new(Vec::new()) });
+        let key = format!("{t:?}");
+        let hit = CACHE.with_borrow_mut(|c| {
+            let i = c.iter().position(|(k, s, _)| *k == key && s == source)?;
+            let e = c.remove(i);
+            let info = e.2.clone();
+            c.push(e);
+            Some(info)
+        });
+        if let Some(info) = hit {
+            return info;
+        }
+        let info = Self::translate_shader(gl, source, t);
+        CACHE.with_borrow_mut(|c| {
+            c.push((key, source.to_owned(), info.clone()));
+            if c.len() > 256 {
+                c.remove(0);
+            }
+        });
+        info
+    }
+
     fn translate_shader(gl: &Gl, source: &str, t: &ShaderTranslation) -> ShaderCompileInfo {
         static INITIALIZATION: std::sync::Once = std::sync::Once::new();
         INITIALIZATION.call_once(|| mozangle::shaders::initialize().unwrap());
