@@ -206,10 +206,25 @@ impl Drop for DroppableWebGLRenderingContext {
 /// oldest context; until context loss exists here, a GC past the threshold frees the unreachable
 /// ones (foreground finalizers send RemoveContext at once). The threshold doubles over the
 /// contexts still live after it, so a page that really keeps many pays one GC per doubling.
-const MIN_CONTEXTS_BEFORE_GC: usize = 16;
+///
+/// Partii (mem-1): the threshold is 4, not 16 (`PARTII_WEBGL_GC_CONTEXTS=N` sets it; 16 is the old
+/// behaviour). Rocket to Heaven makes a new Phaser game and WebGL context on every death and asks
+/// for WEBGL_lose_context, which isn't here, so each dead context (its textures and render
+/// targets in Mesa, tens of MB) waited for a GC: in the 20-min lx soak the live heap jumped
+/// 470 -> 800 MB and RSS swung 800-1180 MB with up to 15 of them waiting.
+fn min_contexts_before_gc() -> usize {
+    static MIN: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        std::env::var("PARTII_WEBGL_GC_CONTEXTS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|n: &usize| *n >= 2)
+            .unwrap_or(4)
+    });
+    *MIN
+}
 thread_local! {
     static LIVE_CONTEXTS: Cell<usize> = const { Cell::new(0) };
-    static NEXT_GC_AT: Cell<usize> = const { Cell::new(MIN_CONTEXTS_BEFORE_GC) };
+    static NEXT_GC_AT: Cell<usize> = Cell::new(min_contexts_before_gc());
 }
 
 #[expect(unsafe_code)]
@@ -219,7 +234,7 @@ fn collect_dead_contexts_if_many(cx: &mut JSContext) {
     }
     unsafe { js::rust::wrappers2::JS_GC(cx, js::jsapi::GCReason::API) };
     let live = LIVE_CONTEXTS.with(Cell::get);
-    NEXT_GC_AT.with(|next| next.set((live * 2).max(MIN_CONTEXTS_BEFORE_GC)));
+    NEXT_GC_AT.with(|next| next.set((live * 2).max(min_contexts_before_gc())));
 }
 
 #[dom_struct]
