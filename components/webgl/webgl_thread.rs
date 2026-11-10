@@ -140,6 +140,20 @@ pub struct GLState {
     pending_renderbuffers: FxHashMap<u32, (u32, u32, i32, i32)>,
     /// Partii (perf): renderbuffers ever attached to each framebuffer (by name), while it exists.
     framebuffer_renderbuffers: FxHashMap<u32, Vec<u32>>,
+    /// Partii (gaps-5): texImage2D(null) levels of 2D textures not made yet, by texture name. A level is
+    /// allocated and cleared to zero when a command may draw to, clear, sample or read it: before a draw,
+    /// clear, read, copy or blit, every pending texture bound to a unit or attached to a bound framebuffer
+    /// is made, before a sub-image upload or generateMipmap the bound one (see make_pending_textures).
+    /// Phaser's boot makes ~80 full-canvas render targets (each ~3.6 MB zeroed: llvmpipe faults in and
+    /// clears ~300 MB a boot) and draws to a few of them. Chromium clears these lazily too.
+    pending_textures: FxHashMap<u32, Vec<PendingTextureLevel>>,
+    /// Partii (gaps-5): the TEXTURE_2D binding of each texture unit, as the content bound them (while
+    /// lazy textures are on).
+    unit_textures: Vec<u32>,
+    /// Partii (gaps-5): the active texture unit (0-based).
+    active_unit: usize,
+    /// Partii (gaps-5): textures ever attached to each framebuffer (by name), while it exists.
+    framebuffer_textures: FxHashMap<u32, Vec<u32>>,
     /// Partii (perf): the framebuffer names bound to DRAW_FRAMEBUFFER and READ_FRAMEBUFFER (0: the
     /// canvas's own), as the content bound them.
     bound_framebuffers: (u32, u32),
@@ -148,6 +162,16 @@ pub struct GLState {
     /// The stand-in for the default framebuffer after drawingBufferStorage with a format the
     /// surface can't have (SRGB8_ALPHA8, RGBA16F).
     storage: Option<StorageFramebuffer>,
+}
+
+/// Partii (gaps-5): a texImage2D(null) level not allocated yet (GLState::pending_textures).
+#[derive(Clone, Copy, Debug)]
+struct PendingTextureLevel {
+    level: i32,
+    internal_format: u32,
+    size: Size2D<u32>,
+    format: u32,
+    data_type: u32,
 }
 
 /// Partii (perf): see GLState::zero_level0.
@@ -468,6 +492,10 @@ impl Default for GLState {
             zero_level0: None,
             pending_renderbuffers: FxHashMap::default(),
             framebuffer_renderbuffers: FxHashMap::default(),
+            pending_textures: FxHashMap::default(),
+            unit_textures: Vec::new(),
+            active_unit: 0,
+            framebuffer_textures: FxHashMap::default(),
             bound_framebuffers: (0, 0),
             color_write_mask: [true, true, true, true],
             color_write_masks: Vec::new(),
@@ -1530,6 +1558,13 @@ impl WebGLImpl {
             Self::make_pending_renderbuffers(gl, state, &command);
         }
 
+        if lazy_textures_enabled() {
+            Self::track_textures(state, &command);
+            if !state.pending_textures.is_empty() {
+                Self::make_pending_textures(gl, state, &command);
+            }
+        }
+
         if state.msaa.is_some() {
             let reads = matches!(
                 command,
@@ -2377,6 +2412,41 @@ impl WebGLImpl {
                 // through a temporary framebuffer (tex_image_2d_cleared): no upload at all on a GPU,
                 // and llvmpipe's threads do the clear. `PARTII_WEBGL_TEX_CLEAR=0` keeps the upload.
                 let zero_fill = data.is_empty() && size.width > 0 && size.height > 0;
+                // Partii (gaps-5): an RGBA/RGB 8-bit 2D level is only recorded, and made on first use
+                // (GLState::pending_textures).
+                if zero_fill &&
+                    lazy_textures_enabled() &&
+                    target == gl::TEXTURE_2D &&
+                    effective_data_type == gl::UNSIGNED_BYTE &&
+                    matches!(format.as_gl_constant(), gl::RGBA | gl::RGB) &&
+                    matches!(
+                        internal_format.as_gl_constant(),
+                        gl::RGBA | gl::RGB | gl::RGBA8 | gl::RGB8
+                    ) &&
+                    gl.version().major >= 3
+                {
+                    let (internal_format, format) = luminance_formats(
+                        state,
+                        gl,
+                        target,
+                        internal_format,
+                        format,
+                        effective_data_type,
+                    );
+                    let texture = unsafe { gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) } as u32;
+                    if texture != 0 {
+                        let levels = state.pending_textures.entry(texture).or_default();
+                        levels.retain(|pending| pending.level != level as i32);
+                        levels.push(PendingTextureLevel {
+                            level: level as i32,
+                            internal_format,
+                            size,
+                            format,
+                            data_type: effective_data_type,
+                        });
+                        return;
+                    }
+                }
                 if zero_fill && tex_clear_enabled() {
                     let (internal_format, format) = luminance_formats(
                         state,
@@ -2811,6 +2881,9 @@ impl WebGLImpl {
             WebGLCommand::Finish(ref sender) => Self::finish(gl, sender),
             WebGLCommand::Flush => unsafe { gl.flush() },
             WebGLCommand::GenerateMipmap(target) => {
+                if Self::pending_mipmaps(gl, state, target) {
+                    return;
+                }
                 if !Self::zero_mipmaps(gl, state, target) && !Self::software_mipmaps(gl, target) {
                     unsafe { gl.generate_mipmap(target) }
                 }
@@ -3854,6 +3927,277 @@ impl WebGLImpl {
             }
         }
         true
+    }
+
+    /// Partii (gaps-5): follows the TEXTURE_2D bindings and the framebuffer attachments the content makes
+    /// (GLState::unit_textures, framebuffer_textures), and drops the pending levels a command redefines.
+    fn track_textures(state: &mut GLState, command: &WebGLCommand) {
+        match *command {
+            WebGLCommand::ActiveTexture(unit) => {
+                state.active_unit = unit.saturating_sub(gl::TEXTURE0) as usize;
+            },
+            WebGLCommand::BindTexture(gl::TEXTURE_2D, id) => {
+                let unit = state.active_unit;
+                if state.unit_textures.len() <= unit {
+                    state.unit_textures.resize(unit + 1, 0);
+                }
+                state.unit_textures[unit] = id.map_or(0, |id| id.glow().0.get());
+            },
+            WebGLCommand::BindIncompleteTexture(gl::TEXTURE_2D) => {
+                if let Some(bound) = state.unit_textures.get_mut(state.active_unit) {
+                    *bound = 0;
+                }
+            },
+            WebGLCommand::FramebufferTexture2D(target, _, _, Some(texture), _) => {
+                let framebuffer = if target == gl::READ_FRAMEBUFFER {
+                    state.bound_framebuffers.1
+                } else {
+                    state.bound_framebuffers.0
+                };
+                let attached = state.framebuffer_textures.entry(framebuffer).or_default();
+                let name = texture.glow().0.get();
+                if !attached.contains(&name) {
+                    attached.push(name);
+                }
+            },
+            WebGLCommand::DeleteFramebuffer(id) => {
+                state.framebuffer_textures.remove(&id.glow().0.get());
+            },
+            WebGLCommand::DeleteTexture(id) => {
+                // GL unbinds a deleted texture from every unit.
+                let name = id.glow().0.get();
+                for bound in state.unit_textures.iter_mut().filter(|bound| **bound == name) {
+                    *bound = 0;
+                }
+            },
+            _ => {},
+        }
+    }
+
+    /// Partii (gaps-5): before `command` runs, makes the pending texture levels (GLState::pending_textures)
+    /// it may draw to, clear, sample, read or partly overwrite.
+    fn make_pending_textures(gl: &Gl, state: &mut GLState, command: &WebGLCommand) {
+        let bound_2d = || unsafe { gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) } as u32;
+        let names: Vec<u32> = match *command {
+            // A whole level redefined: its pending zeros are moot (the lazy texImage2D(null) path
+            // records it again).
+            WebGLCommand::TexImage2D {
+                target: gl::TEXTURE_2D,
+                level,
+                ..
+            } |
+            WebGLCommand::TexImage2DPBO {
+                target: gl::TEXTURE_2D,
+                level,
+                ..
+            } |
+            WebGLCommand::CompressedTexImage2D {
+                target: gl::TEXTURE_2D,
+                level,
+                ..
+            } => {
+                let texture = bound_2d();
+                if let Some(levels) = state.pending_textures.get_mut(&texture) {
+                    levels.retain(|pending| pending.level != level as i32);
+                    if levels.is_empty() {
+                        state.pending_textures.remove(&texture);
+                    }
+                }
+                return;
+            },
+            WebGLCommand::TexStorage2D(gl::TEXTURE_2D, ..) => {
+                state.pending_textures.remove(&bound_2d());
+                return;
+            },
+            WebGLCommand::DeleteTexture(id) => {
+                // A deleted texture still attached to a framebuffer lives on as its attachment: make it.
+                let name = id.glow().0.get();
+                if !state.pending_textures.contains_key(&name) {
+                    return;
+                }
+                if state
+                    .framebuffer_textures
+                    .values()
+                    .any(|attached| attached.contains(&name))
+                {
+                    vec![name]
+                } else {
+                    state.pending_textures.remove(&name);
+                    return;
+                }
+            },
+            // generateMipmap of a pending level 0 stays pending (pending_mipmaps); else the bound
+            // texture's levels are made first.
+            WebGLCommand::GenerateMipmap(gl::TEXTURE_2D) => {
+                let texture = bound_2d();
+                if Self::pending_base_level(gl, state, texture) {
+                    return;
+                }
+                vec![texture]
+            },
+            WebGLCommand::TexSubImage2D { .. } |
+            WebGLCommand::TexSubImage2DPBO { .. } |
+            WebGLCommand::CompressedTexSubImage2D { .. } => vec![bound_2d()],
+            WebGLCommand::Clear(..) |
+            WebGLCommand::ClearBufferfv(..) |
+            WebGLCommand::ClearBufferiv(..) |
+            WebGLCommand::ClearBufferuiv(..) |
+            WebGLCommand::ClearBufferfi(..) |
+            WebGLCommand::InitializeFramebuffer { .. } |
+            WebGLCommand::DrawArrays { .. } |
+            WebGLCommand::DrawArraysInstanced { .. } |
+            WebGLCommand::DrawElements { .. } |
+            WebGLCommand::DrawElementsInstanced { .. } |
+            WebGLCommand::DrawArraysInstancedBaseInstance { .. } |
+            WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance { .. } |
+            WebGLCommand::ReadPixels(..) |
+            WebGLCommand::ReadPixelsPP(..) |
+            WebGLCommand::CopyTexImage2D { .. } |
+            WebGLCommand::CopyTexSubImage2D(..) |
+            WebGLCommand::CopyTexSubImage3D(..) |
+            WebGLCommand::BlitFrameBuffer(..) |
+            WebGLCommand::GetFramebufferAttachmentParameter(..) => {
+                let (draw, read) = state.bound_framebuffers;
+                let mut names: Vec<u32> = state
+                    .unit_textures
+                    .iter()
+                    .copied()
+                    .filter(|name| state.pending_textures.contains_key(name))
+                    .collect();
+                for framebuffer in [draw, read] {
+                    if let Some(attached) = state.framebuffer_textures.get(&framebuffer) {
+                        names.extend(
+                            attached
+                                .iter()
+                                .filter(|name| state.pending_textures.contains_key(name)),
+                        );
+                    }
+                }
+                names
+            },
+            _ => return,
+        };
+        Self::make_textures(gl, state, names);
+    }
+
+    /// Partii (gaps-5): whether `texture`'s level 0 is pending and its base level is 0.
+    fn pending_base_level(gl: &Gl, state: &GLState, texture: u32) -> bool {
+        state
+            .pending_textures
+            .get(&texture)
+            .is_some_and(|levels| levels.iter().any(|pending| pending.level == 0)) &&
+            unsafe { gl.get_tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_BASE_LEVEL) } == 0
+    }
+
+    /// Partii (gaps-5): generateMipmap on a 2D texture whose level 0 is pending (all zeros): the levels
+    /// are zeros too, so they become pending as well (the same levels glGenerateMipmap makes: 1 up to
+    /// min(TEXTURE_MAX_LEVEL, log2 of the larger side)). False when this doesn't apply.
+    fn pending_mipmaps(gl: &Gl, state: &mut GLState, target: u32) -> bool {
+        if target != gl::TEXTURE_2D || !lazy_textures_enabled() {
+            return false;
+        }
+        let texture = unsafe { gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) } as u32;
+        if !Self::pending_base_level(gl, state, texture) {
+            return false;
+        }
+        let max_level = unsafe { gl.get_tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_MAX_LEVEL) }.max(0);
+        let Some(levels) = state.pending_textures.get_mut(&texture) else {
+            return false;
+        };
+        let Some(base) = levels.iter().find(|pending| pending.level == 0).copied() else {
+            return false;
+        };
+        let top = 31 - base.size.width.max(base.size.height).max(1).leading_zeros() as i32;
+        levels.retain(|pending| pending.level == 0);
+        for level in 1..=top.min(max_level) {
+            levels.push(PendingTextureLevel {
+                level,
+                size: Size2D::new(
+                    (base.size.width >> level).max(1),
+                    (base.size.height >> level).max(1),
+                ),
+                ..base
+            });
+        }
+        true
+    }
+
+    /// Partii (gaps-5): allocates and zeroes the pending levels of these textures, keeping every binding
+    /// and the pixel unpack state as they were.
+    fn make_textures(gl: &Gl, state: &mut GLState, names: Vec<u32>) {
+        let mut levels = Vec::new();
+        for name in names {
+            if let Some(pending) = state.pending_textures.remove(&name) {
+                levels.push((name, pending));
+            }
+        }
+        if levels.is_empty() {
+            return;
+        }
+        unsafe {
+            let bound = gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) as u32;
+            let unpack_buffer = gl.get_parameter_i32(gl::PIXEL_UNPACK_BUFFER_BINDING) as u32;
+            if unpack_buffer != 0 {
+                gl.bind_buffer(gl::PIXEL_UNPACK_BUFFER, None);
+            }
+            for (name, pending) in levels {
+                gl.bind_texture(gl::TEXTURE_2D, NonZeroU32::new(name).map(glow::NativeTexture));
+                for level in pending {
+                    if !Self::tex_image_2d_cleared(
+                        gl,
+                        state,
+                        gl::TEXTURE_2D,
+                        level.level,
+                        level.internal_format,
+                        level.size,
+                        level.format,
+                        level.data_type,
+                    ) {
+                        Self::tex_image_2d_zeros(gl, level);
+                    }
+                }
+            }
+            gl.bind_texture(gl::TEXTURE_2D, NonZeroU32::new(bound).map(glow::NativeTexture));
+            if unpack_buffer != 0 {
+                gl.bind_buffer(
+                    gl::PIXEL_UNPACK_BUFFER,
+                    NonZeroU32::new(unpack_buffer).map(glow::NativeBuffer),
+                );
+            }
+        }
+    }
+
+    /// Partii (gaps-5): uploads a zeroed RGBA/RGB 8-bit level to the bound 2D texture, with tightly packed
+    /// unpack state for the call (no unpack buffer bound).
+    fn tex_image_2d_zeros(gl: &Gl, level: PendingTextureLevel) {
+        const UNPACK: [u32; 4] = [
+            gl::UNPACK_ALIGNMENT,
+            gl::UNPACK_ROW_LENGTH,
+            gl::UNPACK_SKIP_PIXELS,
+            gl::UNPACK_SKIP_ROWS,
+        ];
+        let channels = if level.format == gl::RGB { 3 } else { 4 };
+        let zeros = vec![0u8; level.size.width as usize * level.size.height as usize * channels];
+        unsafe {
+            let saved = UNPACK.map(|name| gl.get_parameter_i32(name));
+            for name in UNPACK {
+                gl.pixel_store_i32(name, if name == gl::UNPACK_ALIGNMENT { 1 } else { 0 });
+            }
+            gl.tex_image_2d(
+                gl::TEXTURE_2D,
+                level.level,
+                level.internal_format as i32,
+                level.size.width as i32,
+                level.size.height as i32,
+                0,
+                level.format,
+                level.data_type,
+                PixelUnpackData::Slice(Some(&zeros)),
+            );
+            for (name, value) in UNPACK.into_iter().zip(saved) {
+                gl.pixel_store_i32(name, value);
+            }
+        }
     }
 
     /// Partii (perf): before `command` runs, makes the storage of the pending renderbuffers (see
@@ -5308,6 +5652,13 @@ unsafe fn copy_tex_image_2d(
         gl.pixel_store_i32(gl::PACK_ALIGNMENT, pack_alignment);
         gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpack_alignment);
     }
+}
+
+/// Partii (gaps-5): texImage2D(null) levels made on first use (GLState::pending_textures), unless
+/// `PARTII_WEBGL_LAZY_TEX=0`.
+fn lazy_textures_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_LAZY_TEX").map_or(true, |v| v != "0"))
 }
 
 /// Partii (perf): renderbufferStorage is put off until the renderbuffer may be used, unless
