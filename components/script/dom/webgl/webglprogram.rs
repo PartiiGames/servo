@@ -30,7 +30,7 @@ use crate::dom::webgl::shaderinterface::link_mismatch;
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use crate::dom::webgl::webglshader::{CompileJob, FragOutputKind, WebGLShader};
+use crate::dom::webgl::webglshader::{CompileJob, CompileKey, FragOutputKind, WebGLShader};
 use crate::dom::webgl::webgluniformlocation::WebGLUniformLocation;
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 
@@ -207,6 +207,12 @@ pub(crate) struct WebGLProgram {
     #[no_trace]
     #[ignore_malloc_size_of = "channel"]
     pending_link: RefCell<Option<GenericReceiver<ProgramLinkInfo>>>,
+    /// Partii (gaps-5): the LINK_CACHE key of the pending link (None: not cacheable).
+    #[no_trace]
+    #[ignore_malloc_size_of = "Rc"]
+    pending_link_key: RefCell<Option<LinkKey>>,
+    /// Partii (gaps-5): transformFeedbackVaryings was called (such links aren't cached).
+    transform_feedback_varyings_set: Cell<bool>,
     /// Texture units set on sampler uniforms (uniform location -> unit), for the WebGL 2
     /// draw-time sampler type check. Unset samplers use unit 0.
     sampler_units: DomRefCell<HashMap<i32, i32>>,
@@ -247,6 +253,8 @@ impl WebGLProgram {
             transform_feedback_mode: Default::default(),
             transform_feedback_varying_bytes: DomRefCell::new(vec![].into()),
             pending_link: RefCell::new(None),
+            pending_link_key: RefCell::new(None),
+            transform_feedback_varyings_set: Cell::new(false),
             sampler_units: Default::default(),
             attrib_bindings: Default::default(),
             link_compiles: Default::default(),
@@ -342,6 +350,7 @@ impl WebGLProgram {
     pub(crate) fn link(&self) -> WebGLResult<()> {
         // A previous link still in flight is superseded; take its answer off the channel.
         self.resolve_link();
+        self.pending_link_key.borrow_mut().take();
         self.sampler_units.borrow_mut().clear();
         self.linked.set(false);
         self.link_generation
@@ -369,12 +378,46 @@ impl WebGLProgram {
         else {
             return Ok(());
         };
+        let key = (link_cache_mode() != LinkCacheMode::Off &&
+            !self.transform_feedback_varyings_set.get())
+        .then(|| {
+            let mut bindings: Vec<(String, u32)> = self
+                .attrib_bindings
+                .borrow()
+                .iter()
+                .map(|(name, index)| (name.clone(), *index))
+                .collect();
+            bindings.sort();
+            (vertex.key.clone(), fragment.key.clone(), bindings)
+        });
         *self.link_compiles.borrow_mut() = Some((vertex, fragment));
         *self.link_attrib_bindings.borrow_mut() = self.attrib_bindings.borrow().clone();
 
         let (sender, receiver) = webgl_channel().unwrap();
         self.upcast()
             .send_command(WebGLCommand::LinkProgram(self.id(), sender));
+        // Partii (gaps-5): a link of the same compiles and bindings as one before on this script thread
+        // takes that link's answer now (LINK_CACHE); the WebGL thread still links.
+        let cached = key
+            .as_ref()
+            .and_then(|key| LINK_CACHE.with(|cache| cache.borrow().get(key).cloned()));
+        if let Some(cached) = cached {
+            let link_info = if link_cache_mode() == LinkCacheMode::Verify {
+                let real = receiver.recv().ok();
+                match real {
+                    Some(real) if format!("{real:?}") != format!("{cached:?}") => {
+                        eprintln!("partii: link cache answer differs from the link; using the link's");
+                        real
+                    },
+                    _ => cached,
+                }
+            } else {
+                cached
+            };
+            self.apply_link_info(link_info);
+            return Ok(());
+        }
+        *self.pending_link_key.borrow_mut() = key;
         *self.pending_link.borrow_mut() = Some(receiver);
         Ok(())
     }
@@ -428,8 +471,28 @@ impl WebGLProgram {
         if let Some(receiver) = receiver &&
             let Ok(link_info) = receiver.recv()
         {
+            self.remember_link(&link_info);
             self.apply_link_info(link_info);
         }
+    }
+
+    /// Partii (gaps-5): keeps a link's answer in LINK_CACHE under the pending link's key.
+    fn remember_link(&self, link_info: &ProgramLinkInfo) {
+        let Some(key) = self.pending_link_key.borrow_mut().take() else {
+            return;
+        };
+        LINK_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= 256 {
+                cache.clear();
+            }
+            cache.insert(key, link_info.clone());
+        });
+    }
+
+    /// Partii (gaps-5): transformFeedbackVaryings was called on this program.
+    pub(crate) fn note_transform_feedback_varyings(&self) {
+        self.transform_feedback_varyings_set.set(true);
     }
 
     /// COMPLETION_STATUS_KHR: whether the last link has finished, without waiting for it.
@@ -441,6 +504,7 @@ impl WebGLProgram {
         match result {
             Ok(link_info) => {
                 self.pending_link.borrow_mut().take();
+                self.remember_link(&link_info);
                 self.apply_link_info(link_info);
                 true
             },
@@ -1179,6 +1243,38 @@ fn validate_glsl_char(c: char) -> WebGLResult<()> {
 fn link_locations_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PARTII_WEBGL_LINK_LOCATIONS").map_or(true, |v| v != "0"))
+}
+
+/// Partii (gaps-5): a link's inputs besides the GL: the vertex and fragment compiles (CompileKey) and the
+/// bindAttribLocation calls, sorted.
+type LinkKey = (Rc<CompileKey>, Rc<CompileKey>, Vec<(String, u32)>);
+
+thread_local! {
+    /// Partii (gaps-5): link answers per script thread (see link_cache_mode).
+    static LINK_CACHE: RefCell<HashMap<LinkKey, ProgramLinkInfo>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LinkCacheMode {
+    On,
+    Off,
+    Verify,
+}
+
+/// Partii (gaps-5): linkProgram of the same compiles and attribute bindings as a link before on this script
+/// thread (any context: Phaser's boot after every death in Rocket to Heaven links the same 31 programs in a
+/// new context) applies that link's answer at once: active attributes and uniforms, their locations, the
+/// status. GL gives the same answer for the same translated sources on the same driver, so LINK_STATUS and
+/// the location queries after it don't wait for the WebGL thread to get through everything queued before
+/// the link; the WebGL thread still links. Programs given transformFeedbackVaryings are left out.
+/// `PARTII_WEBGL_LINK_CACHE=0` turns it off; `=verify` waits for the link anyway and reports a difference.
+fn link_cache_mode() -> LinkCacheMode {
+    static MODE: std::sync::OnceLock<LinkCacheMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("PARTII_WEBGL_LINK_CACHE").as_deref() {
+        Ok("0") => LinkCacheMode::Off,
+        Ok("verify") => LinkCacheMode::Verify,
+        _ => LinkCacheMode::On,
+    })
 }
 
 fn parse_uniform_name(name: &DOMString) -> Option<(String, Option<i32>)> {

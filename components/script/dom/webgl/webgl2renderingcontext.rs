@@ -7620,6 +7620,7 @@ impl WebGL2RenderingContextMethods<crate::DomTypeHolder> for WebGL2RenderingCont
             return;
         }
         handle_potential_webgl_error!(self.base, program.validate(), return);
+        program.note_transform_feedback_varyings();
         let strs = varyings
             .iter()
             .map(|name| String::from(name.to_owned()))
