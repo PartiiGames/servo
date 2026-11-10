@@ -2425,6 +2425,32 @@ impl WebGLImpl {
                 // through a temporary framebuffer (tex_image_2d_cleared): no upload at all on a GPU,
                 // and llvmpipe's threads do the clear. `PARTII_WEBGL_TEX_CLEAR=0` keeps the upload.
                 let zero_fill = data.is_empty() && size.width > 0 && size.height > 0;
+                // Measurement only (gaps-3): PARTII_TEX_ZERO_NONE=1 allocates texImage2D(null) levels without
+                // zeroing them, the upper bound of a lazy zeroing (contents undefined: never ship).
+                if zero_fill && std::env::var_os("PARTII_TEX_ZERO_NONE").is_some() {
+                    let (internal_format, format) = luminance_formats(
+                        state,
+                        gl,
+                        target,
+                        internal_format,
+                        format,
+                        effective_data_type,
+                    );
+                    unsafe {
+                        gl.tex_image_2d(
+                            target,
+                            level as i32,
+                            internal_format as i32,
+                            size.width as i32,
+                            size.height as i32,
+                            0,
+                            format,
+                            effective_data_type,
+                            PixelUnpackData::Slice(None),
+                        );
+                    }
+                    return;
+                }
                 if zero_fill && tex_clear_enabled() {
                     let (internal_format, format) = luminance_formats(
                         state,
