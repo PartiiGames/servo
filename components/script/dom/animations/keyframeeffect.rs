@@ -313,7 +313,7 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
             let base_keyframe = BaseComputedKeyframe {
                 composite: keyframe.composite,
                 offset: keyframe.offset,
-                computedOffset: Finite::wrap(computed_offset),
+                computedOffset: Some(Finite::wrap(computed_offset)),
                 easing: keyframe.easing_function.clone(),
             };
             rooted!(&in(cx) let mut output_keyframe = unsafe { JS_NewObject(cx, ptr::null()) });

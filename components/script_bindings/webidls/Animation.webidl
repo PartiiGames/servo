@@ -12,7 +12,7 @@ interface Animation : EventTarget {
               attribute AnimationEffect?         effect;
               attribute AnimationTimeline?       timeline;
               attribute double?                  startTime;
-  [Throws]    attribute double?                  currentTime;
+  [SetterThrows] attribute double?               currentTime;
               attribute double                   playbackRate;
   readonly attribute AnimationPlayState       playState;
   readonly attribute AnimationReplaceState    replaceState;

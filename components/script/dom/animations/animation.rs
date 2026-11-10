@@ -13,6 +13,7 @@ use script_bindings::codegen::GenericBindings::AnimationBinding::{
     AnimationPlayState, AnimationReplaceState,
 };
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
+use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::inheritance::Castable;
 use script_bindings::num::Finite;
 use script_bindings::reflector::reflect_dom_object_with_proto;

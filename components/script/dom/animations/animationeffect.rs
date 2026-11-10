@@ -328,9 +328,9 @@ impl AnimationEffectMethods<crate::DomTypeHolder> for AnimationEffect {
             },
             endTime: Some(script_timing.end_time() * 1000.),
             activeDuration: Some(script_timing.active_duration() * 1000.),
-            localTime: local_time.and_then(|time| Finite::new(time * 1000.)),
-            progress: computed.progress.and_then(Finite::new),
-            currentIteration: computed.current_iteration,
+            localTime: Some(local_time.and_then(|time| Finite::new(time * 1000.))),
+            progress: Some(computed.progress.and_then(Finite::new)),
+            currentIteration: Some(computed.current_iteration),
         }
     }
 
