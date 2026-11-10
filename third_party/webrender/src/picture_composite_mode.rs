@@ -15,6 +15,7 @@ use crate::render_task_graph::RenderTaskId;
 use crate::render_target::RenderTargetKind;
 use crate::render_task::{BlurTask, RenderTask, BlurTaskCache};
 use crate::render_task::RenderTaskKind;
+use crate::render_task_cache::{RenderTaskCacheKey, RenderTaskCacheKeyKind, RenderTaskParent};
 use crate::renderer::{BlendMode, GpuBufferAddress, GpuBufferBuilder};
 use crate::space::SpaceMapper;
 use crate::spatial_tree::SpatialTree;
@@ -59,6 +60,59 @@ pub enum PictureCompositeMode {
     SVGFEGraph(Vec<(FilterGraphNode, FilterGraphOp)>),
     /// A surface that is used as an input to another primitive
     IntermediateSurface,
+}
+
+/// Partii (gaps-4): a `filter: drop-shadow()` picture drawn straight onto a picture cache keeps its
+/// output (content and blur) in the render task cache while its content is unchanged, so a tile made
+/// dirty by something else (a game canvas or a backdrop-filter under it, other animated content) composites
+/// the cached result instead of re-running the picture and its downscale-and-blur chain every frame.
+/// The content key is the same per-primitive data picture-cache tile invalidation compares (intern uid,
+/// raster-space corners, clips, images and their generations, opacity/color binding values), hashed
+/// during the visibility pass (`SurfaceInfo::partii_content`); content that changes every frame never
+/// enters the cache (a key is cached from the second frame in a row it is asked for).
+/// `PARTII_WR_FILTER_CACHE=0` turns it off (upstream behaviour).
+pub fn partii_filter_cache() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WR_FILTER_CACHE").map_or(true, |v| v != "0"))
+}
+
+pub const PARTII_HASH_SEED: u64 = 0x7061_7274_6969_6734;
+
+/// A 64-bit running hash (splitmix64 finalizer per word) for `partii_filter_cache`.
+pub struct PartiiHasher(pub u64);
+
+impl PartiiHasher {
+    fn mix(&mut self, v: u64) {
+        let mut z = self.0 ^ v.wrapping_add(0x9e37_79b9_7f4a_7c15).wrapping_add(self.0 << 6).wrapping_add(self.0 >> 2);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        self.0 = z ^ (z >> 31);
+    }
+}
+
+impl std::hash::Hasher for PartiiHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut b = [0u8; 8];
+            b[.. chunk.len()].copy_from_slice(chunk);
+            self.mix(u64::from_le_bytes(b) ^ ((chunk.len() as u64) << 59));
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.mix(v);
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.mix(v as u64 | (1 << 40));
+    }
+    fn write_i32(&mut self, v: i32) {
+        self.mix(v as u32 as u64 | (2 << 40));
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.mix(v as u64 ^ (3 << 60));
+    }
 }
 
 impl PictureCompositeMode {
@@ -305,6 +359,7 @@ pub fn prepare_composite_mode(
     frame_state: &mut FrameBuildingState,
     data_stores: &mut DataStores,
     extra_gpu_data: &mut SmallVec<[GpuBufferAddress; 1]>,
+    partii_cache_key: Option<u64>,
 ) -> (SurfaceDescriptor, [Option<RenderTaskId>; 2]) {
     let surface = &frame_state.surfaces[surface_index.0];
     let surface_spatial_node_index = surface.surface_spatial_node_index;
@@ -403,25 +458,45 @@ pub fn prepare_composite_mode(
 
             let cmd_buffer_index = frame_state.cmd_buffers.create_cmd_buffer();
 
-            let picture_task_id = frame_state.rg_builder.add().init(
-                RenderTask::new_dynamic(
-                    surface_rects.task_size,
-                    RenderTaskKind::new_picture(
-                        surface_rects.task_size,
-                        surface_rects.needs_scissor_rect,
-                        device_rect.min,
-                        surface_spatial_node_index,
-                        raster_spatial_node_index,
-                        device_pixel_scale,
-                        None,
-                        None,
-                        None,
-                        cmd_buffer_index,
-                        can_use_shared_surface,
-                        None,
-                    ),
-                ).with_uv_rect_kind(surface_rects.uv_rect_kind)
-            );
+            let task_size = surface_rects.task_size;
+            let needs_scissor_rect = surface_rects.needs_scissor_rect;
+            let uv_rect_kind = surface_rects.uv_rect_kind;
+            let make_picture_task = |rg_builder: &mut RenderTaskGraphBuilder, clear_color, shared| {
+                rg_builder.add().init(
+                    RenderTask::new_dynamic(
+                        task_size,
+                        RenderTaskKind::new_picture(
+                            task_size,
+                            needs_scissor_rect,
+                            device_rect.min,
+                            surface_spatial_node_index,
+                            raster_spatial_node_index,
+                            device_pixel_scale,
+                            None,
+                            None,
+                            clear_color,
+                            cmd_buffer_index,
+                            shared,
+                            None,
+                        ),
+                    ).with_uv_rect_kind(uv_rect_kind)
+                )
+            };
+
+            // Partii (gaps-4): a cacheable drop-shadow renders its content and its blur into the
+            // texture cache (`partii_filter_cache`); later frames with the same content reuse both.
+            let picture_task_id = match partii_cache_key {
+                None => make_picture_task(frame_state.rg_builder, None, can_use_shared_surface),
+                Some(key) => frame_state.resource_cache.request_render_task(
+                    Some(partii_filter_cache_key(key, 0, surface_rects)),
+                    false,
+                    RenderTaskParent::Surface,
+                    &mut frame_state.frame_gpu_data.f32,
+                    frame_state.rg_builder,
+                    &mut frame_state.surface_builder,
+                    &mut |rg_builder, _| make_picture_task(rg_builder, Some(ColorF::TRANSPARENT), false),
+                ),
+            };
 
             let mut blur_tasks = BlurTaskCache::default();
 
@@ -433,19 +508,40 @@ pub fn prepare_composite_mode(
                     shadow.blur_radius,
                     shadow.blur_radius,
                 );
-
-                blur_render_task_id = RenderTask::new_blur(
-                    DeviceSize::new(
-                        blur_radius_x * surface.local_scale.0 * device_pixel_scale.0,
-                        blur_radius_y * surface.local_scale.1 * device_pixel_scale.0,
-                    ),
-                    picture_task_id,
-                    frame_state.rg_builder,
-                    RenderTargetKind::Color,
-                    Some(&mut blur_tasks),
-                    device_rect.size().to_i32(),
-                    BlurEdgeMode::Duplicate,
+                let blur_std_deviation = DeviceSize::new(
+                    blur_radius_x * surface.local_scale.0 * device_pixel_scale.0,
+                    blur_radius_y * surface.local_scale.1 * device_pixel_scale.0,
                 );
+
+                blur_render_task_id = match partii_cache_key {
+                    None => RenderTask::new_blur(
+                        blur_std_deviation,
+                        picture_task_id,
+                        frame_state.rg_builder,
+                        RenderTargetKind::Color,
+                        Some(&mut blur_tasks),
+                        device_rect.size().to_i32(),
+                        BlurEdgeMode::Duplicate,
+                    ),
+                    // Only pictures whose shadows share one blur radius are cached (one blur task).
+                    Some(key) => frame_state.resource_cache.request_render_task(
+                        Some(partii_filter_cache_key(key, 1, surface_rects)),
+                        false,
+                        RenderTaskParent::Surface,
+                        &mut frame_state.frame_gpu_data.f32,
+                        frame_state.rg_builder,
+                        &mut frame_state.surface_builder,
+                        &mut |rg_builder, _| RenderTask::new_blur(
+                            blur_std_deviation,
+                            picture_task_id,
+                            rg_builder,
+                            RenderTargetKind::Color,
+                            Some(&mut blur_tasks),
+                            device_rect.size().to_i32(),
+                            BlurEdgeMode::Duplicate,
+                        ),
+                    ),
+                };
             }
 
             frame_state.surface_builder.add_picture_render_task(picture_task_id);
@@ -798,6 +894,51 @@ pub fn prepare_composite_mode(
             secondary_render_task_id,
         ]
     )
+}
+
+/// Partii (gaps-4): the render task cache key of a cached drop-shadow picture's content (part 0) or blur
+/// (part 1).
+pub fn partii_filter_cache_key(key: u64, part: u8, surface_rects: &SurfaceAllocInfo) -> RenderTaskCacheKey {
+    RenderTaskCacheKey {
+        origin: surface_rects.clipped.min.to_i32(),
+        size: surface_rects.task_size,
+        kind: RenderTaskCacheKeyKind::PartiiFilter(key, part),
+    }
+}
+
+/// Partii (gaps-4): the content and blur of a cached drop-shadow picture whose outputs are both in the
+/// texture cache (`partii_filter_cache`): no task is drawn. Should an entry have gone after all, it is
+/// drawn as an empty (transparent) picture for this frame.
+pub fn partii_filter_cache_hit(
+    key: u64,
+    surface_rects: &SurfaceAllocInfo,
+    surface_index: SurfaceIndex,
+    frame_state: &mut FrameBuildingState,
+) -> (RenderTaskId, RenderTaskId) {
+    let surface = &frame_state.surfaces[surface_index.0];
+    let (ssn, rsn, dps) = (surface.surface_spatial_node_index, surface.raster_spatial_node_index, surface.device_pixel_scale);
+    let task_size = surface_rects.task_size;
+    let origin = surface_rects.clipped.min;
+    let mut ids = [RenderTaskId::INVALID; 2];
+    for part in 0 .. 2 {
+        let cmd_buffer_index = frame_state.cmd_buffers.create_cmd_buffer();
+        ids[part] = frame_state.resource_cache.request_render_task(
+            Some(partii_filter_cache_key(key, part as u8, surface_rects)),
+            false,
+            RenderTaskParent::Surface,
+            &mut frame_state.frame_gpu_data.f32,
+            frame_state.rg_builder,
+            &mut frame_state.surface_builder,
+            &mut |rg_builder, _| rg_builder.add().init(RenderTask::new_dynamic(
+                task_size,
+                RenderTaskKind::new_picture(
+                    task_size, false, origin, ssn, rsn, dps, None, None,
+                    Some(ColorF::TRANSPARENT), cmd_buffer_index, false, None,
+                ),
+            )),
+        );
+    }
+    (ids[0], ids[1])
 }
 
 fn request_render_task(

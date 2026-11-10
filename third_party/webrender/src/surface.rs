@@ -103,6 +103,13 @@ pub struct SurfaceInfo {
     pub allow_snapping: bool,
     /// If true, the scissor rect must be set when drawing this surface
     pub force_scissor_rect: bool,
+    /// Partii (gaps-4, `PARTII_WR_FILTER_CACHE`): a running hash of everything drawn into this surface
+    /// (the tile-invalidation dependencies of each primitive in it), built during the visibility pass for
+    /// surfaces drawn straight onto a picture cache; `None` once something in it can't be hashed.
+    pub partii_content: Option<u64>,
+    /// Partii: for a picture-cache surface, the picture-space rect its visible tiles cover (the clip a
+    /// cached filter picture is rendered against, so it is complete whichever tiles are dirty).
+    pub partii_visible_rect: Option<PictureRect>,
 }
 
 impl SurfaceInfo {
@@ -150,6 +157,8 @@ impl SurfaceInfo {
             local_scale,
             allow_snapping,
             force_scissor_rect,
+            partii_content: Some(crate::picture_composite_mode::PARTII_HASH_SEED),
+            partii_visible_rect: None,
             // TODO: At the moment all culling is done in world space but
             // but the plan is to move it to raster space.
             culling_rect: world_rect.cast_unit(),

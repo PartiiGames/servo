@@ -2844,6 +2844,20 @@ impl TileCacheInstance {
         //   (tile_pos - prim_min) / prim_size. Any position or size change
         //   shifts the UV mapping even if the tile stays fully covered.
 
+        if crate::picture_composite_mode::partii_filter_cache() {
+            partii_hash_prim(
+                prim_instance,
+                &prim_info,
+                &self.corners_cache,
+                &self.opacity_bindings,
+                &self.color_bindings,
+                self.surface_index,
+                surface_stack,
+                surfaces,
+                pictures,
+            );
+        }
+
         // For each affected tile, record the primitive dependencies.
         for y in p0.y .. p1.y {
             for x in p0.x .. p1.x {
@@ -3361,4 +3375,83 @@ struct TilePostUpdateState<'a> {
 
     /// Current configuration and setup for compositing all the picture cache tiles in renderer.
     composite_state: &'a mut CompositeState,
+}
+
+/// Partii (gaps-4): fold a primitive's tile dependencies into the content hash of the filter picture it is
+/// drawn in (the surface directly below this picture cache's on the stack; see
+/// `picture_composite_mode::partii_filter_cache`), or, for that picture's own primitive, its intern uid
+/// (which covers the filter's parameters) and corners.
+fn partii_hash_prim(
+    prim_instance: &PrimitiveInstance,
+    prim_info: &PrimitiveDependencyInfo,
+    corners_cache: &CornersCache,
+    opacity_bindings: &FastHashMap<PropertyBindingId, OpacityBindingInfo>,
+    color_bindings: &FastHashMap<PropertyBindingId, ColorBindingInfo>,
+    tile_cache_surface: SurfaceIndex,
+    surface_stack: &[(PictureIndex, SurfaceIndex)],
+    surfaces: &mut [SurfaceInfo],
+    pictures: &[PictureInstance],
+) {
+    use std::hash::{Hash, Hasher};
+    use crate::invalidation::compare::Binding;
+    use crate::picture_composite_mode::PartiiHasher;
+
+    let Some(pos) = surface_stack.iter().position(|(_, s)| *s == tile_cache_surface) else {
+        return;
+    };
+    let target = match surface_stack.get(pos + 1) {
+        Some(&(_, candidate)) => {
+            match prim_instance.kind {
+                // Content that reads what is under it, or may be a compositor surface: not cacheable.
+                PrimitiveKind::BackdropCapture { .. } |
+                PrimitiveKind::BackdropRender { .. } |
+                PrimitiveKind::YuvImage { .. } => {
+                    surfaces[candidate.0].partii_content = None;
+                    return;
+                }
+                _ => {}
+            }
+            candidate
+        }
+        None => match prim_instance.kind {
+            PrimitiveKind::Picture { pic_index, .. } => match pictures[pic_index.0].raster_config {
+                Some(ref rc) => rc.surface_index,
+                None => return,
+            },
+            _ => return,
+        },
+    };
+    let Some(state) = surfaces[target.0].partii_content else {
+        return;
+    };
+    let mut h = PartiiHasher(state);
+    prim_info.prim_uid.hash(&mut h);
+    corners_cache.partii_hash_scratch(&mut h);
+    for (uid, _) in &prim_info.clips {
+        uid.hash(&mut h);
+    }
+    for image in &prim_info.images {
+        image.key.hash(&mut h);
+        h.write_u32(image.generation.0);
+    }
+    for binding in &prim_info.opacity_bindings {
+        match binding {
+            Binding::Value(v) => h.write_u32(v.to_bits()),
+            Binding::Binding(id) => {
+                id.hash(&mut h);
+                h.write_u32(opacity_bindings.get(id).map_or(u32::MAX, |b| b.value.to_bits()));
+            }
+        }
+    }
+    if let Some(binding) = &prim_info.color_binding {
+        match binding {
+            Binding::Value(c) => c.hash(&mut h),
+            Binding::Binding(id) => {
+                id.hash(&mut h);
+                color_bindings.get(id).map(|b| b.value).hash(&mut h);
+            }
+        }
+    }
+    h.write_u32(0xffff_ffff);
+    surfaces[target.0].partii_content = Some(h.finish());
 }

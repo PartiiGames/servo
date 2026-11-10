@@ -651,6 +651,21 @@ impl ResourceCache {
         )
     }
 
+    /// Partii (gaps-4): see `RenderTaskCache::partii_is_cached`.
+    pub fn partii_is_cached(&self, key: &RenderTaskCacheKey) -> bool {
+        self.cached_render_tasks.partii_is_cached(key, &self.texture_cache)
+    }
+
+    /// Partii (gaps-4): see `RenderTaskCache::partii_evict`.
+    pub fn partii_evict(&mut self, key: &RenderTaskCacheKey) {
+        self.cached_render_tasks.partii_evict(key, &mut self.texture_cache)
+    }
+
+    /// Partii (gaps-4): see `RenderTaskCache::partii_note_seen`.
+    pub fn partii_note_seen(&mut self, hash: u64) -> bool {
+        self.cached_render_tasks.partii_note_seen(hash)
+    }
+
     pub fn render_as_image(
         &mut self,
         image_key: ImageKey,

@@ -139,6 +139,7 @@ use crate::invalidation::InvalidationReason;
 use crate::tile_cache::MAX_SURFACE_SIZE;
 
 pub use crate::picture_composite_mode::{PictureCompositeMode, prepare_composite_mode};
+use crate::picture_composite_mode::{SurfaceAllocInfo, PartiiHasher, partii_filter_cache, partii_filter_cache_key, partii_filter_cache_hit};
 
 // Maximum blur radius for blur filter (different than box-shadow blur).
 // Taken from FilterNodeSoftware.cpp in Gecko.
@@ -698,6 +699,83 @@ impl PictureInstance {
         }
     }
 
+    /// Partii (gaps-4): whether this picture's output comes from (or goes into) the render task cache
+    /// (`partii_filter_cache`): a `drop-shadow()` picture (shadows sharing one blur radius) drawn
+    /// straight onto a picture cache, with hashable content. Returns its surface rects, computed
+    /// against the picture cache's whole visible rect (not the dirty one) so the cached output is
+    /// complete, the content key, and whether both outputs are cached. `None`: draw as usual (also the
+    /// first frame a key is seen, so content that changes every frame never fills the cache).
+    fn partii_filter_cache_plan(
+        cacheable: bool,
+        raster_config: &RasterConfig,
+        parent_surface_index: SurfaceIndex,
+        parent_subpixel_mode: SubpixelMode,
+        frame_state: &mut FrameBuildingState,
+        frame_context: &FrameBuildingContext,
+        max_surface_size: f32,
+        force_scissor_rect: bool,
+    ) -> Option<(SurfaceAllocInfo, u64, bool)> {
+        use std::hash::{Hash, Hasher};
+
+        if !partii_filter_cache() {
+            return None;
+        }
+        let PictureCompositeMode::Filter(Filter::DropShadows(ref shadows)) = raster_config.composite_mode else {
+            return None;
+        };
+        let radius = shadows.first()?.blur_radius;
+        if radius <= 0.0 || shadows.iter().any(|s| s.blur_radius != radius) {
+            return None;
+        }
+        if !cacheable {
+            return None;
+        }
+        let content = frame_state.surfaces[raster_config.surface_index.0].partii_content?;
+        let visible_rect = frame_state.surfaces[parent_surface_index.0].partii_visible_rect?;
+
+        let dirty_clip = mem::replace(&mut frame_state.surfaces[parent_surface_index.0].clipping_rect, visible_rect);
+        let rects = get_surface_rects(
+            raster_config.surface_index,
+            &raster_config.composite_mode,
+            parent_surface_index,
+            &mut frame_state.surfaces,
+            frame_context.spatial_tree,
+            max_surface_size,
+            force_scissor_rect,
+        );
+        frame_state.surfaces[parent_surface_index.0].clipping_rect = dirty_clip;
+        let rects = rects?;
+
+        let surface = &frame_state.surfaces[raster_config.surface_index.0];
+        let mut h = PartiiHasher(content);
+        for v in [
+            rects.clipped.min.x, rects.clipped.min.y, rects.clipped.max.x, rects.clipped.max.y,
+            rects.unclipped.min.x, rects.unclipped.min.y, rects.unclipped.max.x, rects.unclipped.max.y,
+            surface.device_pixel_scale.0, surface.local_scale.0, surface.local_scale.1,
+        ] {
+            h.write_u32(v.to_bits());
+        }
+        h.write_u32((surface.raster_spatial_node_index == surface.surface_spatial_node_index) as u32);
+        format!("{:?}", parent_subpixel_mode).hash(&mut h);
+        let key = h.finish();
+
+        let pic_key = partii_filter_cache_key(key, 0, &rects);
+        let blur_key = partii_filter_cache_key(key, 1, &rects);
+        let hit = frame_state.resource_cache.partii_is_cached(&pic_key) &&
+            frame_state.resource_cache.partii_is_cached(&blur_key);
+        let seen = frame_state.resource_cache.partii_note_seen(key);
+        if hit {
+            return Some((rects, key, true));
+        }
+        // A part of a pair may still be cached: drop both, so both are drawn again together.
+        frame_state.resource_cache.partii_evict(&pic_key);
+        frame_state.resource_cache.partii_evict(&blur_key);
+        if !seen {
+            return None;
+        }
+        Some((rects, key, false))
+    }
+
     pub fn take_context(
         &mut self,
         pic_index: PictureIndex,
@@ -762,6 +840,7 @@ impl PictureInstance {
             pic_bounds,
         );
 
+        let mut partii_dirty_regions = 0;
         match self.raster_config {
             Some(RasterConfig { surface_index, composite_mode: PictureCompositeMode::TileCache { slice_id }, .. }) => {
                 prepare_tiled_picture_surface(
@@ -806,17 +885,35 @@ impl PictureInstance {
                     .max_surface_override
                     .unwrap_or(MAX_SURFACE_SIZE) as f32;
 
-                let surface_rects = match get_surface_rects(
-                    raster_config.surface_index,
-                    &raster_config.composite_mode,
+                // Partii (gaps-4): a drop-shadow picture whose content is unchanged reuses its cached
+                // output (`partii_filter_cache`).
+                let partii_cacheable = self.snapshot.is_none() &&
+                    !self.flags.intersects(PictureFlags::IS_SUB_GRAPH | PictureFlags::IS_RESOLVE_TARGET) &&
+                    matches!(self.context_3d, Picture3DContext::Out);
+                let partii_plan = Self::partii_filter_cache_plan(
+                    partii_cacheable,
+                    raster_config,
                     parent_surface_index,
-                    &mut frame_state.surfaces,
-                    frame_context.spatial_tree,
+                    parent_subpixel_mode,
+                    frame_state,
+                    frame_context,
                     max_surface_size,
                     force_scissor_rect,
-                ) {
-                    Some(rects) => rects,
-                    None => return None,
+                );
+                let (surface_rects, partii_cache) = match partii_plan {
+                    Some((rects, key, hit)) => (rects, Some((key, hit))),
+                    None => match get_surface_rects(
+                        raster_config.surface_index,
+                        &raster_config.composite_mode,
+                        parent_surface_index,
+                        &mut frame_state.surfaces,
+                        frame_context.spatial_tree,
+                        max_surface_size,
+                        force_scissor_rect,
+                    ) {
+                        Some(rects) => (rects, None),
+                        None => return None,
+                    },
                 };
 
                 if let PictureCompositeMode::IntermediateSurface = raster_config.composite_mode {
@@ -825,6 +922,28 @@ impl PictureInstance {
                     }
                 }
 
+                if let Some((key, true)) = partii_cache {
+                    // Cached: composite the stored content and blur; the picture's primitives aren't
+                    // drawn (an empty surface gives them no command buffers).
+                    let (picture_task_id, blur_task_id) = partii_filter_cache_hit(
+                        key,
+                        &surface_rects,
+                        surface_index,
+                        frame_state,
+                    );
+                    picture_scratch.primary_render_task_id = Some(blur_task_id);
+                    picture_scratch.secondary_render_task_id = Some(picture_task_id);
+                    partii_filter_cache_count(true);
+
+                    frame_state.surface_builder.push_surface(
+                        raster_config.surface_index,
+                        false,
+                        surface_rects.clipped_local,
+                        None,
+                        frame_state.surfaces,
+                        frame_state.rg_builder,
+                    );
+                } else {
                 let can_use_shared_surface = !self.flags.contains(PictureFlags::IS_RESOLVE_TARGET);
                 let (surface_descriptor, render_tasks) = prepare_composite_mode(
                     &raster_config.composite_mode,
@@ -837,6 +956,7 @@ impl PictureInstance {
                     frame_state,
                     data_stores,
                     &mut picture_scratch.extra_gpu_data,
+                    partii_cache.map(|(key, _)| key),
                 );
 
                 picture_scratch.primary_render_task_id = render_tasks[0];
@@ -852,6 +972,16 @@ impl PictureInstance {
                     frame_state.surfaces,
                     frame_state.rg_builder,
                 );
+
+                if partii_cache.is_some() {
+                    // Drawn into the cache: draw all of it, not only what the dirty tiles show.
+                    partii_filter_cache_count(false);
+                    let mut region = frame_state.current_dirty_region().clone();
+                    region.combined = frame_context.global_screen_world_rect.cast_unit();
+                    frame_state.push_dirty_region(region);
+                    partii_dirty_regions += 1;
+                }
+                }
             }
             None => {}
         };
@@ -861,7 +991,7 @@ impl PictureInstance {
             map_pic_to_vis,
         };
 
-        let mut dirty_region_count = 0;
+        let mut dirty_region_count = partii_dirty_regions;
 
         // If this is a picture cache, push the dirty region to ensure any
         // child primitives are culled and clipped to the dirty rect(s).
@@ -2247,6 +2377,9 @@ fn prepare_tiled_picture_surface(
         frame_state.surfaces,
         frame_state.rg_builder,
     );
+    // Partii (gaps-4): the whole visible area, which a cached filter picture is rendered against.
+    frame_state.surfaces[surface_index.0].partii_visible_rect = tile_cache.local_clip_rect
+        .intersection(&tile_cache.screen_rect_in_pic_space);
 }
 
 fn compute_subpixel_mode(
@@ -2350,6 +2483,8 @@ fn test_large_surface_scale_1() {
             local_scale: (1.0, 1.0),
             allow_snapping: true,
             force_scissor_rect: false,
+            partii_content: None,
+            partii_visible_rect: None,
         },
         SurfaceInfo {
             unclipped_local_rect: PictureRect::new(
@@ -2369,6 +2504,8 @@ fn test_large_surface_scale_1() {
             local_scale: (1.0, 1.0),
             allow_snapping: true,
             force_scissor_rect: false,
+            partii_content: None,
+            partii_visible_rect: None,
         },
     ];
 
@@ -2422,6 +2559,8 @@ fn test_drop_filter_dirty_region_outside_prim() {
             local_scale: (1.0, 1.0),
             allow_snapping: true,
             force_scissor_rect: false,
+            partii_content: None,
+            partii_visible_rect: None,
             culling_rect: VisRect::max_rect(),
         },
         SurfaceInfo {
@@ -2444,6 +2583,8 @@ fn test_drop_filter_dirty_region_outside_prim() {
             local_scale: (1.0, 1.0),
             allow_snapping: true,
             force_scissor_rect: false,
+            partii_content: None,
+            partii_visible_rect: None,
             culling_rect: VisRect::max_rect(),
         },
     ];
@@ -2537,6 +2678,8 @@ fn test_drop_filter_partial_dirty_content_inflate() {
             local_scale: (1.0, 1.0),
             allow_snapping: true,
             force_scissor_rect: false,
+            partii_content: None,
+            partii_visible_rect: None,
             culling_rect: VisRect::max_rect(),
         },
         SurfaceInfo {
@@ -2559,6 +2702,8 @@ fn test_drop_filter_partial_dirty_content_inflate() {
             local_scale: (1.0, 1.0),
             allow_snapping: true,
             force_scissor_rect: false,
+            partii_content: None,
+            partii_visible_rect: None,
             culling_rect: VisRect::max_rect(),
         },
     ];
@@ -2591,4 +2736,21 @@ fn test_drop_filter_partial_dirty_content_inflate() {
     // 560x401 with the texture's right and bottom edges sitting on the
     // 500x500 image content, producing the visible bleed.
     assert_eq!(info.task_size, DeviceIntSize::new(620, 461));
+}
+
+/// Partii (gaps-4), measurement: with `PARTII_WR_INVAL_LOG` set, cached drop-shadow pictures composited
+/// from the cache (hits) and drawn into it (fills), per 2-s summary.
+pub fn partii_filter_cache_count(hit: bool) {
+    if !crate::invalidation::partii_log::enabled() {
+        return;
+    }
+    PARTII_CACHE_COUNTS.with(|c| {
+        let (h, f) = c.get();
+        c.set(if hit { (h + 1, f) } else { (h, f + 1) });
+    });
+}
+
+thread_local! {
+    /// Partii (gaps-4), measurement: (hits, fills) of the filter cache since the last summary.
+    pub static PARTII_CACHE_COUNTS: std::cell::Cell<(usize, usize)> = std::cell::Cell::new((0, 0));
 }

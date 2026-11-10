@@ -1523,11 +1523,12 @@ fn partii_inval_flush(graph: &RenderTaskGraph) {
     }
     if now - since >= std::time::Duration::from_secs(2) {
         let frames = acc.frames;
+        let (hits, fills) = crate::picture::PARTII_CACHE_COUNTS.with(|c| c.replace((0, 0)));
         let mut v: Vec<_> = acc.tiles.iter().map(|(k, n)| format!("{k}={n}")).collect();
         v.sort();
         eprintln!(
-            "partii-inval-sum: frames {} passes/frame {:.1} tile draws: {}",
-            frames, acc.passes as f64 / frames.max(1) as f64, v.join("; "),
+            "partii-inval-sum: frames {} passes/frame {:.1} filter cache hits {} fills {} tile draws: {}",
+            frames, acc.passes as f64 / frames.max(1) as f64, hits, fills, v.join("; "),
         );
         acc.since = Some(now);
         acc.frames = 0;

@@ -33,3 +33,13 @@ Patches on top of webrender 0.70.0:
   of the surface, clipped to the backdrop plus the blur's reach, is drawn under it when the surface
   is promoted (src/scene_building.rs, src/tile_cache/slice_builder.rs, src/tile_cache/mod.rs,
   src/prim_store/image.rs).
+- `PARTII_WR_FILTER_CACHE` (on by default; `=0` is upstream): a `drop-shadow()` picture (shadows
+  sharing one blur radius) drawn straight onto a picture cache keeps its content and blur in the
+  render task cache while its content hash (the per-primitive data tile invalidation compares)
+  is unchanged; a tile dirtied by something else composites the cached result instead of
+  re-running the picture and its downscale-and-blur chain (src/picture.rs,
+  src/picture_composite_mode.rs, src/render_task_cache.rs, src/resource_cache.rs, src/surface.rs,
+  src/tile_cache/mod.rs, src/invalidation/vert_buffer.rs, src/batch.rs).
+- `PARTII_WR_INVAL_LOG=<passes>` (off by default; measurement only): logs why picture-cache tiles are
+  redrawn (a summary every 2 s, and a dump of frames with at least <passes> render passes)
+  (src/invalidation/, src/picture.rs, src/frame_builder.rs).

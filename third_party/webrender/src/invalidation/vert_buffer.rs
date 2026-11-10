@@ -82,6 +82,16 @@ impl CornersCache {
         self.cached_node = None;
     }
 
+    /// Partii (gaps-4): hash the scratch corners (quantized as tiles store them) of the current primitive
+    /// (its rect, coverage rect and clips), for `picture_composite_mode::partii_filter_cache`.
+    pub fn partii_hash_scratch<H: std::hash::Hasher>(&self, h: &mut H) {
+        for p in &self.unquantized {
+            h.write_i32(quantize(p.x));
+            h.write_i32(quantize(p.y));
+        }
+        h.write_usize(self.unquantized.len());
+    }
+
     /// Clear the unquantized scratch. Call once before computing corners for a
     /// single primitive (before prim rect, coverage rect and all clips).
     pub fn clear_scratch(&mut self) {

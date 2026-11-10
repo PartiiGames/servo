@@ -1153,14 +1153,8 @@ impl BatchBuilder {
                                     // Gets the saved render task ID of the content, which is
                                     // deeper in the render task graph than the direct child.
                                     let secondary_id = picture_scratch.secondary_render_task_id.expect("no secondary!?");
-                                    let content_source = {
-                                        let secondary_task = &render_tasks[secondary_id];
-                                        let texture_id = secondary_task.get_target_texture();
-                                        TextureSource::TextureCache(
-                                            texture_id,
-                                            Swizzle::default(),
-                                        )
-                                    };
+                                    // Partii (gaps-4): the content may be a cached (read-only) task.
+                                    let content_source = render_tasks[secondary_id].get_texture_source();
 
                                     // Retrieve the UV rect addresses for shadow/content.
                                     let shadow_uv_rect_address = uv_rect_address;

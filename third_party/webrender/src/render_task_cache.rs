@@ -46,6 +46,9 @@ pub enum RenderTaskCacheKeyKind {
     LineDecoration(LineDecorationCacheKey),
     Snapshot(SnapshotImageKey),
     Quad(QuadCacheKey),
+    /// Partii (gaps-4): a filter picture's output (part 0: its content, 1: its blur), keyed by a hash of
+    /// its content (see `PARTII_WR_FILTER_CACHE`).
+    PartiiFilter(u64, u8),
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -86,6 +89,10 @@ pub struct RenderTaskCache {
     map: FastHashMap<RenderTaskCacheKey, FreeListHandle<RenderTaskCacheMarker>>,
     cache_entries: FreeList<RenderTaskCacheEntry, RenderTaskCacheMarker>,
     frame_id: u64,
+    /// Partii (gaps-4): filter-picture content hashes asked for, with the frame they were last asked
+    /// for in; a picture is cached from the second frame in a row its content is the same.
+    #[cfg_attr(any(feature = "capture", feature = "replay"), serde(skip))]
+    partii_seen: FastHashMap<u64, u64>,
 }
 
 pub type RenderTaskCacheEntryHandle = WeakFreeListHandle<RenderTaskCacheMarker>;
@@ -96,6 +103,7 @@ impl RenderTaskCache {
             map: FastHashMap::default(),
             cache_entries: FreeList::new(),
             frame_id: 0,
+            partii_seen: FastHashMap::default(),
         }
     }
 
@@ -110,6 +118,8 @@ impl RenderTaskCache {
     ) {
         self.frame_id += 1;
         profile_scope!("begin_frame");
+        let prev = self.frame_id - 1;
+        self.partii_seen.retain(|_, f| *f >= prev);
         // Drop any items from the cache that have been
         // evicted from the texture cache.
         //
@@ -339,6 +349,29 @@ impl RenderTaskCache {
         let render_task_id = rg_builder.add().init(task);
 
         (render_task_id, false)
+    }
+
+    /// Partii (gaps-4): true if `key`'s output is in the texture cache (a request would not draw it).
+    pub fn partii_is_cached(&self, key: &RenderTaskCacheKey, texture_cache: &TextureCache) -> bool {
+        self.map.get(key).map_or(false, |handle| {
+            texture_cache.is_allocated(&self.cache_entries.get(handle).handle)
+        })
+    }
+
+    /// Partii (gaps-4): drop `key`'s entry, so the next request draws it again.
+    pub fn partii_evict(&mut self, key: &RenderTaskCacheKey, texture_cache: &mut TextureCache) {
+        if let Some(handle) = self.map.remove(key) {
+            texture_cache.evict_handle(&self.cache_entries.get(&handle).handle);
+            self.cache_entries.free(handle);
+        }
+    }
+
+    /// Partii (gaps-4): records that filter content `hash` was asked for this frame; true if it was
+    /// also asked for in the previous frame (or earlier in this one).
+    pub fn partii_note_seen(&mut self, hash: u64) -> bool {
+        let frame_id = self.frame_id;
+        let prev = self.partii_seen.insert(hash, frame_id);
+        prev.map_or(false, |f| f + 1 >= frame_id)
     }
 
     pub fn get_cache_entry(
