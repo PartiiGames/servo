@@ -708,6 +708,9 @@ interface mixin WebGLRenderingContextOverloads
 [Exposed=(Window,Worker)]
 interface WebGLRenderingContext
 {
+    // drawingBufferFormat with alpha: false (WebGL 2 has it in WebGL2RenderingContextBase); as
+    // in Chromium, and what drawingbuffer-storage-test reads on a WebGL 1 context.
+    const GLenum RGB8 = 0x8051;
 };
 WebGLRenderingContext includes WebGLRenderingContextBase;
 WebGLRenderingContext includes WebGLRenderingContextOverloads;
