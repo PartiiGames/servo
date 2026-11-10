@@ -2195,7 +2195,8 @@ impl CanvasState {
                 },
                 SnapshotPixelFormat::RGBA,
             );
-            Some(snapshot.into())
+            let bytes: Vec<u8> = snapshot.into();
+            Some(place_clipped_rows(bytes, read_rect, origin, size))
         } else {
             None
         };
@@ -3207,4 +3208,32 @@ fn text_baseline_offset(font: &FontRef, text_baseline: CanvasTextBaseline) -> f6
         CanvasTextBaseline::Alphabetic => baseline.alphabetic_baseline as f64,
         CanvasTextBaseline::Bottom => -descent,
     }
+}
+
+/// Partii: getImageData() over a rectangle partly outside the canvas reads only the part inside
+/// (`read_rect`); put those rows where they belong in the requested `origin`/`size` rectangle,
+/// transparent black elsewhere (2d.imageData.get.source.outside). RGBA8 rows.
+fn place_clipped_rows(
+    bytes: Vec<u8>,
+    read_rect: Rect<u32>,
+    origin: Point2D<i32>,
+    size: Size2D<u32>,
+) -> Vec<u8> {
+    if read_rect.size == size {
+        return bytes;
+    }
+    let (width, height) = (size.width as usize, size.height as usize);
+    let offset_x = (i64::from(read_rect.origin.x) - i64::from(origin.x)).max(0) as usize;
+    let offset_y = (i64::from(read_rect.origin.y) - i64::from(origin.y)).max(0) as usize;
+    let row_bytes = read_rect.size.width as usize * 4;
+    let mut placed = vec![0u8; width * height * 4];
+    for row in 0..read_rect.size.height as usize {
+        let (y, src) = (offset_y + row, row * row_bytes);
+        if y >= height || src + row_bytes > bytes.len() || offset_x * 4 + row_bytes > width * 4 {
+            break;
+        }
+        let dst = (y * width + offset_x) * 4;
+        placed[dst..dst + row_bytes].copy_from_slice(&bytes[src..src + row_bytes]);
+    }
+    placed
 }
