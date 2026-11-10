@@ -2912,6 +2912,8 @@ impl GlobalScope {
     /// Only before the global's reflector (and realm) is created.
     pub(crate) fn set_cross_origin_isolated_capability(&self, value: bool) {
         self.cross_origin_isolated_capability.set(value);
+    }
+
     /// The agent cluster this global's agent is in, which decides where a `SharedArrayBuffer`
     /// it serializes may be deserialized
     /// (<https://html.spec.whatwg.org/multipage/#structureddeserialize>). Shared memory only
@@ -2938,8 +2940,6 @@ impl GlobalScope {
 
     pub(crate) fn set_agent_cluster(&self, key: AgentClusterKey) {
         *self.agent_cluster.borrow_mut() = Some(key);
-    }
-
     }
 
     pub(crate) fn is_secure_context(&self) -> bool {

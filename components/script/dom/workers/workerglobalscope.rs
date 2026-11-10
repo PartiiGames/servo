@@ -1124,8 +1124,7 @@ impl WorkerGlobalScopeMethods<crate::DomTypeHolder> for WorkerGlobalScope {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-crossoriginisolated>
     fn CrossOriginIsolated(&self) -> bool {
-        self.upcast::<GlobalScope>()
-            .cross_origin_isolated_capability()
+        self.upcast::<GlobalScope>().cross_origin_isolated_capability()
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-structuredclone>

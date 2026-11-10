@@ -36,7 +36,6 @@ use script_bindings::callback::{HasCallbackHolder, RootedCallback};
 use script_bindings::cell::DomRefCell;
 use script_bindings::interfaces::HasOrigin;
 use servo_base::id::PipelineId;
-use servo_constellation_traits::{AgentClusterKey, StructuredSerializedData};
 use servo_media::audio::audio_node::BlockInfo;
 use servo_media::audio::audio_worklet_node::AudioWorkletProcessorHandle;
 use servo_media::audio::block::{Block, FRAMES_PER_BLOCK_USIZE};
@@ -67,6 +66,7 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::structuredclone;
+use servo_constellation_traits::{AgentClusterKey, StructuredSerializedData};
 use crate::dom::bindings::trace::{HashMapTracedValues, RootedTraceableBox};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::messageport::MessagePort;
@@ -176,12 +176,10 @@ impl AudioWorkletGlobalScope {
         global
             .upcast::<GlobalScope>()
             .set_cross_origin_isolated_capability(cross_origin_isolated);
+        global.upcast::<GlobalScope>().set_agent_cluster(agent_cluster);
         let scope = AudioWorkletGlobalScopeBinding::Wrap::<crate::DomTypeHolder>(
             cx,
             &global.origin(),
-        global
-            .upcast::<GlobalScope>()
-            .set_agent_cluster(agent_cluster);
             cross_origin_isolated,
             global,
         );
@@ -864,6 +862,7 @@ struct HostInit {
     worklet_id: WorkletId,
     global_port: Option<StructuredSerializedData>,
     cross_origin_isolated: bool,
+    agent_cluster: AgentClusterKey,
 }
 
 #[expect(unsafe_code)]
@@ -891,6 +890,7 @@ fn ensure_host(init: HostInit) {
         init.sample_rate,
         init.context,
         init.cross_origin_isolated,
+        init.agent_cluster,
     );
     // AudioWorkletGlobalScope.port: the transferred end of AudioWorklet.port, in place before
     // any module runs.
@@ -900,7 +900,6 @@ fn ensure_host(init: HostInit) {
             if let Some(port) = ports.into_iter().next() {
                 global.port.set(Some(&port));
             }
-    agent_cluster: AgentClusterKey,
         }
     }
     let roots = RootedTraceableBox::new(HostRoots {
@@ -928,7 +927,6 @@ fn ensure_host(init: HostInit) {
     // after the render quantum (only if a processor ran, so idle contexts pay nothing).
     // Between quanta, currentFrame/currentTime are the context's (the next quantum's start).
     on_render_quantum_end(Box::new(|info| {
-        init.agent_cluster,
         let processed = PROCESSED_THIS_QUANTUM.with(|p| p.replace(false));
         with_host(|cx, global| {
             global.set_time(info);
@@ -1067,6 +1065,9 @@ pub(crate) struct AudioWorkletThreadPool {
     global_port: RefCell<Option<StructuredSerializedData>>,
     /// The window's cross-origin isolated capability, inherited by the worklet global.
     cross_origin_isolated: bool,
+    /// The window's agent cluster, which the worklet's agent joins.
+    #[no_trace]
+    agent_cluster: AgentClusterKey,
 }
 
 impl AudioWorkletThreadPool {
@@ -1107,9 +1108,6 @@ impl WorkletThreadPool for AudioWorkletThreadPool {
         inherited_secure_context: Option<bool>,
     ) {
         let host_init = HostInit {
-    /// The window's agent cluster, which the worklet's agent joins.
-    #[no_trace]
-    agent_cluster: AgentClusterKey,
             pipeline_id,
             base_url,
             inherited_secure_context,
@@ -1120,6 +1118,7 @@ impl WorkletThreadPool for AudioWorkletThreadPool {
             worklet_id,
             global_port: self.global_port.borrow_mut().take(),
             cross_origin_isolated: self.cross_origin_isolated,
+            agent_cluster: self.agent_cluster.clone(),
         };
         let promise = TrustedPromise::from(promise);
         let script_thread_sender = self.init.to_script_thread_sender.clone();
@@ -1159,7 +1158,6 @@ impl WorkletThreadPool for AudioWorkletThreadPool {
     ) {
         let _ = self.sender.send(Box::new(move || {
             run_task_in_host(|cx, global| worklet_task(cx, global.upcast()));
-            agent_cluster: self.agent_cluster.clone(),
         }));
     }
 }
