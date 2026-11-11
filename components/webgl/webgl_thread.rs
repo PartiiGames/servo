@@ -4112,27 +4112,44 @@ impl WebGLImpl {
             WebGLCommand::CopyTexSubImage3D(..) |
             WebGLCommand::BlitFrameBuffer(..) |
             WebGLCommand::GetFramebufferAttachmentParameter(..) => {
-                let (draw, read) = state.bound_framebuffers;
-                let mut names: Vec<u32> = state
-                    .unit_textures
-                    .iter()
-                    .copied()
-                    .filter(|name| state.pending_textures.contains_key(name))
-                    .collect();
-                for framebuffer in [draw, read] {
-                    if let Some(attached) = state.framebuffer_textures.get(&framebuffer) {
-                        names.extend(
-                            attached
-                                .iter()
-                                .filter(|name| state.pending_textures.contains_key(name)),
-                        );
-                    }
-                }
-                names
+                Self::pending_in_use(state)
             },
+            // getParameter(RED_BITS ... STENCIL_BITS) reads the bound framebuffer's attachment
+            // sizes from GL (framebuffer_bits), which a pending level doesn't have yet.
+            WebGLCommand::GetParameterInt(
+                webgl::ParameterInt::RedBits |
+                webgl::ParameterInt::GreenBits |
+                webgl::ParameterInt::BlueBits |
+                webgl::ParameterInt::AlphaBits |
+                webgl::ParameterInt::DepthBits |
+                webgl::ParameterInt::StencilBits,
+                _,
+            ) => Self::pending_in_use(state),
             _ => return,
         };
         Self::make_textures(gl, state, names);
+    }
+
+    /// Partii (gaps-5): pending textures bound to a unit or attached to the bound draw or read
+    /// framebuffer: the ones a draw, clear, read or attachment query can observe.
+    fn pending_in_use(state: &GLState) -> Vec<u32> {
+        let (draw, read) = state.bound_framebuffers;
+        let mut names: Vec<u32> = state
+            .unit_textures
+            .iter()
+            .copied()
+            .filter(|name| state.pending_textures.contains_key(name))
+            .collect();
+        for framebuffer in [draw, read] {
+            if let Some(attached) = state.framebuffer_textures.get(&framebuffer) {
+                names.extend(
+                    attached
+                        .iter()
+                        .filter(|name| state.pending_textures.contains_key(name)),
+                );
+            }
+        }
+        names
     }
 
     /// Partii (gaps-5): whether `texture`'s level 0 is pending and its base level is 0.
