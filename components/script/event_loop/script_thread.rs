@@ -1538,7 +1538,7 @@ impl ScriptThread {
     fn handle_msgs(&self, cx: &mut js::context::JSContext) -> bool {
         // Proritize rendering tasks and others, and gather all other events as `sequential`.
         let mut sequential: SmallVec<[MixedMessage; 10]> = SmallVec::new();
-        crate::partii_zombie::maybe_log();
+        crate::partii_zombie::maybe_log(cx);
 
         // <https://w3c.github.io/requestidlecallback/#start-an-idle-period-algorithm>: when
         // a page has idle callbacks and nothing is waiting to run, use the time until the next
@@ -5043,7 +5043,7 @@ fn frame_period() -> Duration {
 /// and its edges) to `PARTII_JS_HEAP_DUMP_FILE` (default `/tmp/partii-js-heap-<pid>.txt`), so the
 /// path from a discarded page's Window to whatever still roots it can be read off
 /// (`tools/bd/jsheap-paths.py` in the runtime repo).
-mod partii_js_heap_dump {
+pub(crate) mod partii_js_heap_dump {
     use std::cell::Cell;
 
     use js::jsapi::GCReason;
@@ -5063,7 +5063,7 @@ mod partii_js_heap_dump {
 
     thread_local!(static EXITS: Cell<u64> = const { Cell::new(0) });
 
-    #[expect(unsafe_code)]
+    // (no unsafe here: dump_now)
     pub(super) fn maybe_dump(cx: &mut js::context::JSContext) {
         let Some(at) = std::env::var("PARTII_JS_HEAP_DUMP_AT_EXIT")
             .ok()
@@ -5078,6 +5078,13 @@ mod partii_js_heap_dump {
         if n != at {
             return;
         }
+        dump_now(cx, &format!("exit {n}"));
+    }
+
+    /// The heap graph now (after a full GC), to `PARTII_JS_HEAP_DUMP_FILE` (mem-2: also when a
+    /// discarded window has outlived `PARTII_ZOMBIE_DUMP_AGE` seconds, partii_zombie.rs).
+    #[expect(unsafe_code)]
+    pub(crate) fn dump_now(cx: &mut js::context::JSContext, why: &str) {
         let path = std::env::var("PARTII_JS_HEAP_DUMP_FILE")
             .unwrap_or_else(|_| format!("/tmp/partii-js-heap-{}.txt", std::process::id()));
         let Ok(cpath) = std::ffi::CString::new(path.clone()) else {
@@ -5094,6 +5101,6 @@ mod partii_js_heap_dump {
             partii_js_dump_heap(cx.raw_cx(), fp, 0, None);
             libc::fclose(fp);
         }
-        eprintln!("partii-js-heap-dump: exit {n}: wrote {path}");
+        eprintln!("partii-js-heap-dump: {why}: wrote {path}");
     }
 }

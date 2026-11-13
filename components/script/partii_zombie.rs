@@ -74,7 +74,7 @@ pub(crate) fn cleared(global: &GlobalScope, note: &DropNote) {
 }
 
 #[expect(unsafe_code)]
-pub(crate) fn maybe_log() {
+pub(crate) fn maybe_log(cx: &mut js::context::JSContext) {
     let Some(secs) = every() else { return };
     let now = Instant::now();
     if NEXT.with(|n| n.get()).is_some_and(|t| now < t) {
@@ -134,6 +134,17 @@ pub(crate) fn maybe_log() {
                 .join(" "),
         )
     };
+    // PARTII_ZOMBIE_DUMP_AGE=<s>: once, when a discarded window is that old, the JS heap graph
+    // (tools/bd/jsheap-paths.py prints what roots each Window).
+    thread_local!(static DUMPED: Cell<bool> = const { Cell::new(false) });
+    let dump_age: Option<f64> = std::env::var("PARTII_ZOMBIE_DUMP_AGE").ok().and_then(|v| v.trim().parse().ok());
+    if let Some(age) = dump_age &&
+        !DUMPED.with(|d| d.get()) &&
+        zombies.values().any(|(_, t)| t.elapsed().as_secs_f64() >= age)
+    {
+        DUMPED.with(|d| d.set(true));
+        crate::event_loop::script_thread::partii_js_heap_dump::dump_now(cx, "zombie age");
+    }
     for (k, (p, t)) in &zombies {
         let (nt, st) = fmt(trusted.get(k));
         let (np, sp) = fmt(promises.get(k));
