@@ -206,3 +206,15 @@ unsafe impl<T: DomObject> crate::JSTraceable for Trusted<T> {
         // Do nothing
     }
 }
+
+/// Partii (mem-2, measurement): every live `Trusted` entry's DOM object pointer (a `Reflector` comes first).
+pub fn partii_live_trusted() -> Vec<*const libc::c_void> {
+    LIVE_DOM_REFERENCES.with(|live| {
+        live.reflectable_table
+            .borrow()
+            .iter()
+            .filter(|(_, w)| w.strong_count() > 0)
+            .map(|(k, _)| *k)
+            .collect()
+    })
+}

@@ -1538,6 +1538,7 @@ impl ScriptThread {
     fn handle_msgs(&self, cx: &mut js::context::JSContext) -> bool {
         // Proritize rendering tasks and others, and gather all other events as `sequential`.
         let mut sequential: SmallVec<[MixedMessage; 10]> = SmallVec::new();
+        crate::partii_zombie::maybe_log();
 
         // <https://w3c.github.io/requestidlecallback/#start-an-idle-period-algorithm>: when
         // a page has idle callbacks and nothing is waiting to run, use the time until the next
