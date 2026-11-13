@@ -1579,6 +1579,9 @@ impl WebGLImpl {
         // Ensure there are no pending GL errors from other parts of the pipeline.
         debug_assert_eq!(unsafe { gl.get_error() }, gl::NO_ERROR);
 
+        // Partii (measurement only): PARTII_WEBGL_DRAW_MS=<ms> logs each draw of <ms> or more with its state.
+        let mut draw_probe = frame_prof::DrawProbe::begin(&command);
+
         if state.draw_writes_nothing_under_query() &&
             matches!(
                 command,
@@ -1655,6 +1658,10 @@ impl WebGLImpl {
                     msaa.dirty = true;
                 }
             }
+        }
+
+        if let Some(probe) = draw_probe.as_mut() {
+            probe.prelude_done(gl);
         }
 
         match command {
@@ -3683,6 +3690,10 @@ impl WebGLImpl {
                     .collect();
                 unsafe { gl.draw_buffers(&buffers) }
             },
+        }
+
+        if let Some(probe) = draw_probe {
+            probe.end(gl, state);
         }
 
         // If debug asertions are enabled, then check the error state.
@@ -6237,6 +6248,186 @@ mod frame_prof {
             let wall = (d.as_micros() % 10_000_000_000) as f64 / 1000.0 - ms;
             eprintln!("partii-trace webgl {}:{kind} at={wall:.1} ms={ms:.1}", NAMES[class]);
         }
+    }
+
+    /// `PARTII_WEBGL_DRAW_MS=<ms>`: one draw split into the apply prelude (lazy renderbuffer and texture
+    /// storage made for it), an optional glFinish of the work queued before it (`PARTII_WEBGL_DRAW_FINISH=1`),
+    /// the draw call itself (llvmpipe runs the vertex stage, binning and any new shader variant's JIT here),
+    /// and the optional glFinish after it (its rasterization). Draws of <ms> or more are logged as
+    /// `partii-trace webgldraw` with the state that picks llvmpipe's shader variant and whether that state
+    /// was new on this context (measurement only, never ships).
+    pub(super) struct DrawProbe {
+        t0: Instant,
+        mode: u32,
+        count: i32,
+        prims: i32,
+        prelude: f64,
+        pre_finish: f64,
+        t_draw: Instant,
+    }
+
+    fn draw_min() -> Option<f64> {
+        static MIN: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+        *MIN.get_or_init(|| std::env::var("PARTII_WEBGL_DRAW_MS").ok().and_then(|v| v.parse().ok()))
+    }
+
+    fn draw_finish() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("PARTII_WEBGL_DRAW_FINISH").is_ok_and(|v| v == "1"))
+    }
+
+    fn wall_now() -> f64 {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        (d.as_micros() % 10_000_000_000) as f64 / 1000.0
+    }
+
+    fn ms(d: Duration) -> f64 {
+        d.as_secs_f64() * 1000.0
+    }
+
+    // Per context state keys seen (program, framebuffer, blend, depth, textures): a slow draw on a new key
+    // points at a shader variant compile; on a known one, at the work itself.
+    thread_local!(static SEEN: std::cell::RefCell<std::collections::HashMap<String, (u32, f64)>> =
+        std::cell::RefCell::default());
+
+    impl DrawProbe {
+        pub(super) fn begin(command: &C) -> Option<Self> {
+            draw_min()?;
+            let (mode, count, prims) = match *command {
+                C::DrawArrays { mode, count, .. } => (mode, count, 1),
+                C::DrawElements { mode, count, .. } => (mode, count, 1),
+                C::DrawArraysInstanced { mode, count, primcount, .. } => (mode, count, primcount),
+                C::DrawElementsInstanced { mode, count, primcount, .. } => (mode, count, primcount),
+                C::DrawArraysInstancedBaseInstance { mode, count, primcount, .. } => (mode, count, primcount),
+                C::DrawElementsInstancedBaseVertexBaseInstance { mode, count, primcount, .. } => {
+                    (mode, count, primcount)
+                },
+                _ => return None,
+            };
+            let now = Instant::now();
+            Some(Self { t0: now, mode, count, prims, prelude: 0.0, pre_finish: 0.0, t_draw: now })
+        }
+
+        pub(super) fn prelude_done(&mut self, gl: &glow::Context) {
+            use glow::HasContext;
+            self.prelude = ms(self.t0.elapsed());
+            if draw_finish() {
+                let t = Instant::now();
+                unsafe { gl.finish() };
+                self.pre_finish = ms(t.elapsed());
+            }
+            self.t_draw = Instant::now();
+        }
+
+        pub(super) fn end(self, gl: &glow::Context, state: &super::GLState) {
+            use glow::HasContext;
+            let draw = ms(self.t_draw.elapsed());
+            let mut post_finish = 0.0;
+            if draw_finish() {
+                let t = Instant::now();
+                unsafe { gl.finish() };
+                post_finish = ms(t.elapsed());
+            }
+            let total = ms(self.t0.elapsed());
+            let key = unsafe { state_key(gl) };
+            let wall = wall_now() - total;
+            let (new, uses, first_at) = SEEN.with_borrow_mut(|seen| match seen.get_mut(&key) {
+                Some(e) => {
+                    e.0 += 1;
+                    (false, e.0, e.1)
+                },
+                None => {
+                    seen.insert(key.clone(), (1, wall));
+                    (true, 1, wall)
+                },
+            });
+            if total < draw_min().unwrap_or(f64::MAX) {
+                return;
+            }
+            let (vp, fb) = unsafe {
+                let mut vp = [0i32; 4];
+                gl.get_parameter_i32_slice(glow::VIEWPORT, &mut vp);
+                (vp, gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING))
+            };
+            eprintln!(
+                "partii-trace webgldraw at={wall:.1} ms={total:.1} prelude={:.1} pre_finish={:.1} draw={draw:.1} \
+                 post_finish={post_finish:.1} mode={} count={} prims={} fb={fb} default_fb={} vp={}x{} \
+                 new_state={new} uses={uses} first_at={first_at:.1} states={} tex={} key={key}",
+                self.prelude,
+                self.pre_finish,
+                self.mode,
+                self.count,
+                self.prims,
+                state.drawing_to_default_framebuffer,
+                vp[2],
+                vp[3],
+                SEEN.with_borrow(|s| s.len()),
+                TEX.with_borrow(|t| t.clone()),
+            );
+        }
+    }
+
+    thread_local!(static TEX: std::cell::RefCell<String> = std::cell::RefCell::default());
+
+    /// The state llvmpipe's fragment shader variant depends on: program, draw framebuffer, blend, depth,
+    /// stencil, colour mask, cull, and each bound 2D texture's format, size and filters (units 0..8).
+    unsafe fn state_key(gl: &glow::Context) -> String {
+        use glow::HasContext;
+        let i = |p| unsafe { gl.get_parameter_i32(p) };
+        let on = |p| unsafe { gl.is_enabled(p) } as u8;
+        let mask: [bool; 4] = unsafe { gl.get_parameter_bool_array(glow::COLOR_WRITEMASK) };
+        let mut key = format!(
+            "prog{}/fb{}/blend{}:{:x},{:x},{:x},{:x},{:x}/depth{}:{:x},{}/stencil{}/cull{}/mask{}{}{}{}",
+            i(glow::CURRENT_PROGRAM),
+            i(glow::DRAW_FRAMEBUFFER_BINDING),
+            on(glow::BLEND),
+            i(glow::BLEND_SRC_RGB),
+            i(glow::BLEND_DST_RGB),
+            i(glow::BLEND_SRC_ALPHA),
+            i(glow::BLEND_DST_ALPHA),
+            i(glow::BLEND_EQUATION_RGB),
+            on(glow::DEPTH_TEST),
+            i(glow::DEPTH_FUNC),
+            unsafe { gl.get_parameter_bool(glow::DEPTH_WRITEMASK) } as u8,
+            on(glow::STENCIL_TEST),
+            on(glow::CULL_FACE),
+            mask[0] as u8,
+            mask[1] as u8,
+            mask[2] as u8,
+            mask[3] as u8,
+        );
+        TEX.with_borrow_mut(|t| t.clear());
+        let active = i(glow::ACTIVE_TEXTURE);
+        for unit in 0..8u32 {
+            unsafe { gl.active_texture(glow::TEXTURE0 + unit) };
+            let tex = i(glow::TEXTURE_BINDING_2D);
+            if tex == 0 {
+                continue;
+            }
+            unsafe {
+                TEX.with_borrow_mut(|t| {
+                    *t += &format!(
+                        "{}u{unit}:{tex}:{}x{}",
+                        if t.is_empty() { "" } else { "," },
+                        gl.get_tex_level_parameter_i32(glow::TEXTURE_2D, 0, glow::TEXTURE_WIDTH),
+                        gl.get_tex_level_parameter_i32(glow::TEXTURE_2D, 0, glow::TEXTURE_HEIGHT),
+                    )
+                });
+                // The texture name and size are logged in `tex=`, not keyed: llvmpipe's variant ignores them.
+                key += &format!(
+                    "/t{unit}:{:x}:{:x},{:x},{:x},{:x}",
+                    gl.get_tex_level_parameter_i32(glow::TEXTURE_2D, 0, glow::TEXTURE_INTERNAL_FORMAT),
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER),
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER),
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S),
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T),
+                );
+            }
+        }
+        unsafe { gl.active_texture(active as u32) };
+        key
     }
 
     pub(super) fn finish() -> bool {
