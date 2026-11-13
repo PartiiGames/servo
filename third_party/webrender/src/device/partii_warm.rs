@@ -218,6 +218,10 @@ pub(crate) struct Recorder {
     known: HashSet<String>,
     /// Entries read at start, for the replay.
     loaded: Vec<WarmEntry>,
+    /// Measurement (prof builds): the lines the file held at start, and the last draw's state with
+    /// where it came from (replayed / recorded this run / new / seen), for PARTII_WR_GL_LOG.
+    file_lines: HashSet<String>,
+    pub(crate) last: String,
 }
 
 impl Recorder {
@@ -239,7 +243,10 @@ impl Recorder {
                 }
             }
         }
+        let file_lines = known.clone();
         Box::new(Recorder {
+            file_lines,
+            last: String::new(),
             path,
             textures: FastHashMap::default(),
             unit_targets: [gl::TEXTURE_2D; 16],
@@ -322,6 +329,7 @@ impl Device {
                 r.seen_keys.clear();
             }
             if !r.seen_keys.insert(key) {
+                r.last = "seen".to_owned();
                 return;
             }
         }
@@ -391,7 +399,15 @@ impl Device {
         }
         self.gl.active_texture(gl::TEXTURE0);
         let line = WarmEntry { program, target, state, color_mask, units }.to_line();
-        self.partii_warm.as_mut().unwrap().append(line);
+        let r = self.partii_warm.as_mut().unwrap();
+        let how = if r.file_lines.contains(&line) { "replayed" } else if r.known.contains(&line) { "recorded" } else { "new" };
+        r.last = format!("{how} {line}");
+        r.append(line);
+    }
+
+    /// Measurement: the last noted draw's state (`partii_warm.last`), or "" when warm-up is off.
+    pub(crate) fn partii_warm_last(&self) -> &str {
+        self.partii_warm.as_ref().map_or("", |r| r.last.as_str())
     }
 
     /// The entries the file held at start (empty when warm-up is off).
