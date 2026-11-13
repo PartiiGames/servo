@@ -557,6 +557,11 @@ pub(crate) struct WebGLThread {
     webrender_swap_chains: SwapChains<WebGLContextId, Device>,
     /// The per-painter details of the underlying surfman connection.
     painter_surfman_details_map: PainterSurfmanDetailsMap,
+    /// Partii (stream gaps3): a GL context made ahead, while this thread was idle, for the next CreateContext
+    /// (see `SpareContext`).
+    spare: Option<SpareContext>,
+    /// What the last CreateContext asked for: the next spare is made like it.
+    spare_like: Option<(PainterId, ContextAttributes)>,
     /// A usage map used to delay the deletion of WebGL contexts until all WebRender
     /// rendering is finished, so that any existing `Surface`s can be properly released.
     busy_webgl_context_map: WebGLContextBusyMap,
@@ -608,6 +613,8 @@ impl WebGLThread {
             receiver: receiver.route_preserving_errors(),
             webrender_swap_chains,
             painter_surfman_details_map,
+            spare: None,
+            spare_like: None,
             busy_webgl_context_map,
             #[cfg(feature = "webxr")]
             webxr_bridge: Some(WebXRBridge::new(webxr_init)),
@@ -628,11 +635,86 @@ impl WebGLThread {
 
     fn process(&mut self) {
         let webgl_chan = WebGLChan(self.sender.clone());
-        while let Ok(Ok(msg)) = self.receiver.recv() {
+        loop {
+            // Partii (stream gaps3): once a page has made a context, the thread makes the next one's GL context
+            // when it has had nothing to do for SPARE_IDLE (between a frame's commands and the next frame's).
+            let msg = if self.spare.is_none() && self.spare_like.is_some() && spare_enabled() {
+                match self.receiver.recv_timeout(SPARE_IDLE) {
+                    Ok(msg) => msg,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        self.make_spare_context();
+                        continue;
+                    },
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match self.receiver.recv() {
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                }
+            };
+            let Ok(msg) = msg else {
+                break;
+            };
             let exit = self.handle_msg(msg, &webgl_chan);
             if exit {
                 break;
             }
+        }
+        self.drop_spare_context(None);
+    }
+
+    /// Partii (stream gaps3): makes the spare GL context for the next CreateContext, like the last one.
+    fn make_spare_context(&mut self) {
+        let Some((painter_id, attributes)) = self.spare_like else {
+            return;
+        };
+        let Ok(device) = self.get_or_create_device_for_painter(painter_id) else {
+            self.spare_like = None;
+            return;
+        };
+        let start = std::time::Instant::now();
+        let made = device
+            .create_context_descriptor(&attributes)
+            .and_then(|descriptor| device.create_context(&descriptor, None));
+        match made {
+            Ok(ctx) => {
+                if webgl_stats_enabled() {
+                    eprintln!(
+                        "partii-webgl-stats: spare context made in {:.2} ms",
+                        start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                self.spare = Some(SpareContext {
+                    painter_id,
+                    attributes,
+                    device,
+                    ctx,
+                });
+            },
+            Err(err) => {
+                warn!("spare WebGL context: {err:?}");
+                self.spare_like = None;
+            },
+        }
+        // eglCreateContext leaves the current context alone; make the next command make its own current anyway.
+        self.bound_context_id = None;
+    }
+
+    /// Partii (stream gaps3): destroys the spare context (of `painter_id`, or any) and stops making them.
+    fn drop_spare_context(&mut self, painter_id: Option<PainterId>) {
+        if let Some(mut spare) = self
+            .spare
+            .take_if(|s| painter_id.is_none_or(|p| p == s.painter_id))
+        {
+            let _ = spare.device.destroy_context(&mut spare.ctx);
+            self.bound_context_id = None;
+        }
+        if painter_id.is_none() ||
+            self.spare_like
+                .is_some_and(|(p, _)| Some(p) == painter_id)
+        {
+            self.spare_like = None;
         }
     }
 
@@ -720,12 +802,14 @@ impl WebGLThread {
                 self.handle_finished_rendering_to_context(context_id);
             },
             WebGLMsg::ClearPainterResources(painter_id, sender) => {
+                self.drop_spare_context(Some(painter_id));
                 self.device_map.remove(&painter_id);
                 if let Err(error) = sender.send(()) {
                     warn!("Failed to send response to WebGLMsg::ClearPainterResources ({error})");
                 }
             },
             WebGLMsg::Exit => {
+                self.drop_spare_context(None);
                 // Call remove_context functions in order to correctly delete WebRender image keys.
                 let context_ids: Vec<WebGLContextId> = self.contexts.keys().copied().collect();
                 for id in context_ids {
@@ -897,6 +981,13 @@ impl WebGLThread {
 
         let device = self.get_or_create_device_for_painter(painter_id)?;
         mark(&mut stats, "device");
+        // Partii (stream gaps3): the spare made while idle, when it was made like this one.
+        let spare = self.spare.take_if(|s| {
+            s.painter_id == painter_id &&
+                s.attributes == *context_attributes &&
+                Rc::ptr_eq(&s.device, &device)
+        });
+        self.spare_like = spare_enabled().then_some((painter_id, *context_attributes));
         let context_descriptor = device
             .create_context_descriptor(context_attributes)
             .map_err(|err| format!("Failed to create context descriptor: {:?}", err))?;
@@ -910,9 +1001,12 @@ impl WebGLThread {
         };
         let surface_access = self.surface_access();
 
-        let mut ctx = device
-            .create_context(&context_descriptor, None)
-            .map_err(|err| format!("Failed to create the GL context: {:?}", err))?;
+        let mut ctx = match spare {
+            Some(spare) => spare.ctx,
+            None => device
+                .create_context(&context_descriptor, None)
+                .map_err(|err| format!("Failed to create the GL context: {:?}", err))?,
+        };
         mark(&mut stats, "create_context");
         let surface = device
             .create_surface(&ctx, surface_access, surface_type)
@@ -6083,6 +6177,25 @@ fn tex_clear_enabled() -> bool {
 }
 
 /// Partii (perf stream): `PARTII_WEBGL_STATS` set logs WebGL context creation timing to stderr.
+/// Partii (stream gaps3): a surfman context made ahead for the next CreateContext of the same painter and attributes.
+/// Each CreateContext waits on the WebGL thread (the script thread blocks on its reply), and on llvmpipe making the GL
+/// context is most of it: 9-15 ms on a quiet node, 53-75 ms on a busy one (rocket-to-heaven's restarts: 100-124 ms
+/// frame gaps). The spare is made once the thread has been idle for SPARE_IDLE, after the page made its first context
+/// (a page that never uses WebGL never gets one), and holds no surface. PARTII_WEBGL_SPARE=0 turns it off.
+struct SpareContext {
+    painter_id: PainterId,
+    attributes: ContextAttributes,
+    device: Rc<Device>,
+    ctx: Context,
+}
+
+const SPARE_IDLE: std::time::Duration = std::time::Duration::from_millis(8);
+
+fn spare_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_SPARE").map_or(true, |v| v != "0"))
+}
+
 fn webgl_stats_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("PARTII_WEBGL_STATS").is_some())
