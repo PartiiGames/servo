@@ -175,6 +175,19 @@ mod partii_dropped_promises {
         }
     }
 
+    pub(super) fn site_of(key: usize) -> String {
+        SITES
+            .try_with(|s| {
+                s.borrow().get(&key).map(|l| {
+                    let f: Vec<_> = l.file().rsplit('/').take(2).collect();
+                    format!("{}/{}:{}", f.get(1).unwrap_or(&""), f[0], l.line())
+                })
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "?".into())
+    }
+
     pub(super) fn forget_site(key: usize) {
         if census() {
             let _ = SITES.try_with(|s| s.borrow_mut().remove(&key));
@@ -276,4 +289,22 @@ pub(crate) unsafe fn trace_refcounted_objects(tracer: *mut JSTracer) {
     unsafe {
         script_bindings::refcounted::trace_live_domreferences(tracer);
     }
+}
+
+/// Partii (mem-2, measurement): every live `TrustedPromise`'s promise object and, under
+/// PARTII_TRUSTED_CENSUS, where it was made.
+#[expect(unsafe_code)]
+pub(crate) fn partii_live_promises() -> Vec<(*mut js::jsapi::JSObject, String)> {
+    LIVE_PROMISE_REFERENCES.with(|live| {
+        let Ok(t) = live.promise_table.try_borrow() else {
+            return vec![];
+        };
+        t.keys()
+            .map(|k| {
+                let p = unsafe { &*k.0 };
+                let site = partii_dropped_promises::site_of(k.0 as usize);
+                (p.reflector().get_jsobject().get(), site)
+            })
+            .collect()
+    })
 }

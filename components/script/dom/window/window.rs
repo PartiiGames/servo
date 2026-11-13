@@ -411,6 +411,10 @@ pub(crate) struct Window {
     /// layout, they also add an etry to [`Self::pending_layout_images`].
     #[no_trace]
     pending_image_callbacks: DomRefCell<FxHashMap<PendingImageId, Vec<PendingImageCallback>>>,
+    /// Partii (mem-2, measurement): logs when this window is freed (PARTII_ZOMBIE_DIAG).
+    #[no_trace]
+    #[ignore_malloc_size_of = "measurement"]
+    partii_zombie_note: crate::partii_zombie::DropNote,
 
     /// All of the elements that have an outstanding image request that was
     /// initiated by layout during a reflow. They are stored in the [`ScriptThread`]
@@ -2605,6 +2609,8 @@ impl Window {
 
         // Partii: fetches still streaming hold the page through their listeners.
         self.upcast::<GlobalScope>().fetch_group_mut().release_listeners();
+
+        crate::partii_zombie::cleared(self.as_global_scope(), &self.partii_zombie_note);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>
@@ -4197,6 +4203,7 @@ impl Window {
             #[cfg(feature = "webxr")]
             webxr_registry,
             pending_image_callbacks: Default::default(),
+            partii_zombie_note: Default::default(),
             pending_layout_images: Default::default(),
             pending_images_for_rasterization: Default::default(),
             unminified_css_dir: DomRefCell::new(if unminify_css {

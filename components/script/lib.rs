@@ -43,6 +43,7 @@ pub(crate) mod messaging;
 pub(crate) mod mime;
 pub(crate) mod modules;
 mod navigation;
+mod partii_zombie;
 mod realms;
 mod routed_promise;
 pub mod test;
