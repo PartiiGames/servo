@@ -85,6 +85,9 @@ pub(crate) struct GLContextData {
     /// The context should be removed, but the [`WebGLThread`] is currently waiting on
     /// WebRender to finish rendering to the context in order to delete it.
     marked_for_deletion: bool,
+    /// Partii: the painter and version it was made for (its stand-in once lost uses the same).
+    painter_id: PainterId,
+    webgl_version: WebGLVersion,
 }
 
 #[derive(Debug)]
@@ -565,6 +568,10 @@ pub(crate) struct WebGLThread {
     /// A usage map used to delay the deletion of WebGL contexts until all WebRender
     /// rendering is finished, so that any existing `Surface`s can be properly released.
     busy_webgl_context_map: WebGLContextBusyMap,
+    /// Partii: contexts freed by `WebGLMsg::LoseContext`, each with the stand-in context its
+    /// commands now run on (one 1x1 context per painter and version, shared, never removed).
+    lost_contexts: FxHashMap<WebGLContextId, WebGLContextId>,
+    stand_in_contexts: FxHashMap<(PainterId, WebGLVersion), WebGLContextId>,
 
     #[cfg(feature = "webxr")]
     /// The bridge to WebXR
@@ -616,6 +623,8 @@ impl WebGLThread {
             spare: None,
             spare_like: None,
             busy_webgl_context_map,
+            lost_contexts: Default::default(),
+            stand_in_contexts: Default::default(),
             #[cfg(feature = "webxr")]
             webxr_bridge: Some(WebXRBridge::new(webxr_init)),
         }
@@ -817,23 +826,38 @@ impl WebGLThread {
             WebGLMsg::SetImageKey(ctx_id, image_key) => {
                 self.handle_set_image_key(ctx_id, image_key);
             },
+            WebGLMsg::ResizeContext(ctx_id, _, sender) if self.lost_contexts.contains_key(&ctx_id) => {
+                let _ = sender.send(Ok(()));
+            },
             WebGLMsg::ResizeContext(ctx_id, size, sender) => {
                 let _ = sender.send(self.resize_webgl_context(ctx_id, size));
+            },
+            WebGLMsg::DrawingBufferStorage(ctx_id, _, _, sender) if self.lost_contexts.contains_key(&ctx_id) => {
+                let _ = sender.send(Ok(()));
             },
             WebGLMsg::DrawingBufferStorage(ctx_id, format, size, sender) => {
                 let _ = sender.send(self.drawing_buffer_storage(ctx_id, format, size));
             },
             WebGLMsg::RemoveContext(ctx_id) => {
+                self.lost_contexts.remove(&ctx_id);
                 self.remove_webgl_context(ctx_id);
             },
+            WebGLMsg::LoseContext(ctx_id) => {
+                self.lose_webgl_context(ctx_id);
+            },
             WebGLMsg::WebGLCommand(ctx_id, command, backtrace) => {
+                let ctx_id = self.lost_contexts.get(&ctx_id).copied().unwrap_or(ctx_id);
                 self.handle_webgl_command(ctx_id, command, backtrace);
             },
             WebGLMsg::WebXRCommand(_command) => {
                 #[cfg(feature = "webxr")]
                 self.handle_webxr_command(_command);
             },
-            WebGLMsg::SwapBuffers(swap_ids, canvas_epoch, sent_time) => {
+            WebGLMsg::SwapBuffers(mut swap_ids, canvas_epoch, sent_time) => {
+                // A lost context has no surface left to show.
+                if !self.lost_contexts.is_empty() {
+                    swap_ids.retain(|id| !self.lost_contexts.contains_key(id));
+                }
                 self.handle_swap_buffers(canvas_epoch, swap_ids, sent_time);
             },
             WebGLMsg::FinishedRenderingToContext(context_id) => {
@@ -1231,6 +1255,8 @@ impl WebGLThread {
                 state,
                 attributes,
                 marked_for_deletion: false,
+                painter_id,
+                webgl_version,
             },
         );
 
@@ -1377,6 +1403,52 @@ impl WebGLThread {
         if marked_for_deletion {
             self.remove_webgl_context(context_id);
         }
+    }
+
+    /// Partii: frees a context's GL context (its textures, buffers, render targets: on a software
+    /// GL, tens of MB of the process's heap) without waiting for its DOM object to be collected,
+    /// as browsers do when a document goes away. The id is kept: its later commands run on a 1x1
+    /// stand-in context of the same painter and version, so a synchronous call still gets a reply
+    /// (and a swap skips it), until `RemoveContext`. If no stand-in can be made, the context stays.
+    fn lose_webgl_context(&mut self, context_id: WebGLContextId) {
+        if self.lost_contexts.contains_key(&context_id) ||
+            self.stand_in_contexts.values().any(|id| *id == context_id)
+        {
+            return;
+        }
+        let Some((painter_id, webgl_version)) = self
+            .contexts
+            .get(&context_id)
+            .filter(|data| !data.marked_for_deletion)
+            .map(|data| (data.painter_id, data.webgl_version))
+        else {
+            return;
+        };
+        let stand_in = match self.stand_in_contexts.get(&(painter_id, webgl_version)) {
+            Some(id) => *id,
+            None => {
+                let attributes = GLContextAttributes {
+                    alpha: true,
+                    depth: false,
+                    stencil: false,
+                    antialias: false,
+                    premultiplied_alpha: true,
+                    preserve_drawing_buffer: false,
+                };
+                match self.create_webgl_context(painter_id, webgl_version, Size2D::new(1, 1), attributes) {
+                    Ok((id, _)) => {
+                        self.stand_in_contexts.insert((painter_id, webgl_version), id);
+                        id
+                    },
+                    Err(error) => {
+                        warn!("No stand-in WebGL context ({error}): {context_id:?} is kept");
+                        return;
+                    },
+                }
+            },
+        };
+        self.lost_contexts.insert(context_id, stand_in);
+        self.remove_webgl_context(context_id);
     }
 
     /// Removes a WebGLContext and releases attached resources.

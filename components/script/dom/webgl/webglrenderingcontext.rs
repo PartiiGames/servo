@@ -25,6 +25,7 @@ use script_bindings::reflector::{
 };
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{GenericReceiver, GenericSharedMemory};
+use servo_base::id::PipelineId;
 use servo_base::{Epoch, generic_channel};
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{
@@ -189,6 +190,10 @@ pub(crate) enum Operation {
 struct DroppableWebGLRenderingContext {
     #[no_trace]
     webgl_sender: WebGLMsgSender,
+    /// Partii: alive while this context is (PIPELINE_CONTEXTS holds a weak handle).
+    #[no_trace]
+    #[ignore_malloc_size_of = "a token"]
+    alive: Rc<()>,
 }
 
 impl Drop for DroppableWebGLRenderingContext {
@@ -225,6 +230,52 @@ fn min_contexts_before_gc() -> usize {
 thread_local! {
     static LIVE_CONTEXTS: Cell<usize> = const { Cell::new(0) };
     static NEXT_GC_AT: Cell<usize> = Cell::new(min_contexts_before_gc());
+}
+
+thread_local! {
+    /// Partii: the contexts made on this thread, by the pipeline of the global that made them,
+    /// while their DOM objects live (see `lose_contexts_of_pipeline`).
+    static PIPELINE_CONTEXTS: std::cell::RefCell<Vec<(PipelineId, WebGLMsgSender, std::rc::Weak<()>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn register_pipeline_context(pipeline: PipelineId, sender: &WebGLMsgSender, alive: &Rc<()>) {
+    PIPELINE_CONTEXTS.with(|contexts| {
+        let mut contexts = contexts.borrow_mut();
+        if contexts.len() >= 64 && contexts.len().is_power_of_two() {
+            contexts.retain(|(_, _, alive)| alive.strong_count() > 0);
+        }
+        contexts.push((pipeline, sender.clone(), Rc::downgrade(alive)));
+    });
+}
+
+/// Partii: a discarded document's WebGL contexts give their GL contexts back now
+/// (`WebGLMsg::LoseContext`), as browsers do when a document goes away, instead of when the GC
+/// collects their DOM objects. A context's textures and render targets live outside the JS heap
+/// (on a software GL, tens of MB each in the process's own heap), so the GC neither sees them nor
+/// hurries: a game that reloads its page held its old pages' contexts for minutes (rocket-to-heaven
+/// lx soak, mem-2: +150-250 MB per discarded page still around). Called when the window's JS
+/// runtime is cleared at pipeline exit; nothing runs in that window afterwards, and anything sent
+/// to these contexts from elsewhere still gets an answer from the WebGL thread's stand-in.
+/// `PARTII_WEBGL_LOSE_ON_DISCARD=0` keeps them until the GC (upstream).
+pub(crate) fn lose_contexts_of_pipeline(pipeline: PipelineId) {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("PARTII_WEBGL_LOSE_ON_DISCARD").as_deref() != Ok("0"));
+    let lost: Vec<_> = PIPELINE_CONTEXTS.with(|contexts| {
+        let mut contexts = contexts.borrow_mut();
+        let (lost, kept) = std::mem::take(&mut *contexts)
+            .into_iter()
+            .filter(|(_, _, alive)| alive.strong_count() > 0)
+            .partition(|(p, _, _)| *p == pipeline);
+        *contexts = kept;
+        lost
+    });
+    if !*ON {
+        return;
+    }
+    for (_, sender, _) in lost {
+        let _ = sender.send_lose();
+    }
 }
 
 #[expect(unsafe_code)]
@@ -403,11 +454,14 @@ impl WebGLRenderingContext {
                 current_vao_webgl2: Default::default(),
                 textures: Textures::new(max_combined_texture_image_units),
                 api_type: ctx_data.api_type,
-                droppable: DroppableWebGLRenderingContext {
-                    webgl_sender: {
-                        LIVE_CONTEXTS.with(|live| live.set(live.get() + 1));
-                        ctx_data.sender
-                    },
+                droppable: {
+                    LIVE_CONTEXTS.with(|live| live.set(live.get() + 1));
+                    let alive = Rc::new(());
+                    register_pipeline_context(global.pipeline_id(), &ctx_data.sender, &alive);
+                    DroppableWebGLRenderingContext {
+                        webgl_sender: ctx_data.sender,
+                        alive,
+                    }
                 },
             }
         })

@@ -136,6 +136,11 @@ pub enum WebGLMsg {
     ),
     /// Drops a WebGLContext.
     RemoveContext(WebGLContextId),
+    /// Partii: frees a WebGLContext's GL context and everything made in it now, before its DOM
+    /// object is collected (its document was discarded). The id stays valid: later commands run
+    /// on a small stand-in context, so a call made through it still gets an answer, until
+    /// `RemoveContext`.
+    LoseContext(WebGLContextId),
     /// Runs a WebGLCommand in a specific WebGLContext.
     WebGLCommand(WebGLContextId, WebGLCommand, WebGLCommandBacktrace),
     /// Runs a WebXRCommand (WebXR layers need to be created in the WebGL
@@ -177,7 +182,7 @@ pub struct WebGLCreateContextResult {
 }
 
 /// Defines the WebGL version
-#[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, PartialOrd, Serialize)]
 pub enum WebGLVersion {
     /// <https://www.khronos.org/registry/webgl/specs/1.0.2/>
     /// Conforms closely to the OpenGL ES 2.0 API
@@ -260,6 +265,12 @@ impl WebGLMsgSender {
     #[inline]
     pub fn send_remove(&self) -> WebGLSendResult {
         self.sender.send(WebGLMsg::RemoveContext(self.ctx_id))
+    }
+
+    /// Partii: see `WebGLMsg::LoseContext`.
+    #[inline]
+    pub fn send_lose(&self) -> WebGLSendResult {
+        self.sender.send(WebGLMsg::LoseContext(self.ctx_id))
     }
 }
 

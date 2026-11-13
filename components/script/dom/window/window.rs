@@ -2605,6 +2605,9 @@ impl Window {
 
         // Partii: fetches still streaming hold the page through their listeners.
         self.upcast::<GlobalScope>().fetch_group_mut().release_listeners();
+
+        // Partii: the page's WebGL contexts free their GL memory now, not when the GC gets to them.
+        crate::dom::webgl::webglrenderingcontext::lose_contexts_of_pipeline(self.pipeline_id());
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>
