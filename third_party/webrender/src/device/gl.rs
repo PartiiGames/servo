@@ -3804,7 +3804,7 @@ impl Device {
             gl::UNSIGNED_SHORT,
             first_vertex as u32 * 2,
         );
-        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count}"), partii_t0);
+        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count} state={}", self.partii_warm_last()), partii_t0);
     }
 
     pub fn draw_triangles_u32(&mut self, first_vertex: i32, index_count: i32) {
@@ -3830,7 +3830,7 @@ impl Device {
             gl::UNSIGNED_INT,
             first_vertex as u32 * 4,
         );
-        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count}"), partii_t0);
+        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count} state={}", self.partii_warm_last()), partii_t0);
     }
 
     pub fn draw_nonindexed_points(&mut self, first_vertex: i32, vertex_count: i32) {
@@ -3851,7 +3851,7 @@ impl Device {
 
         let partii_t0 = partii_gl_t0();
         self.gl.draw_arrays(gl::POINTS, first_vertex, vertex_count);
-        partii_gl_log("draw", &self.bound_program_name, format_args!("verts={vertex_count}"), partii_t0);
+        partii_gl_log("draw", &self.bound_program_name, format_args!("verts={vertex_count} state={}", self.partii_warm_last()), partii_t0);
     }
 
     pub fn draw_nonindexed_lines(&mut self, first_vertex: i32, vertex_count: i32) {
@@ -3872,7 +3872,7 @@ impl Device {
 
         let partii_t0 = partii_gl_t0();
         self.gl.draw_arrays(gl::LINES, first_vertex, vertex_count);
-        partii_gl_log("draw", &self.bound_program_name, format_args!("verts={vertex_count}"), partii_t0);
+        partii_gl_log("draw", &self.bound_program_name, format_args!("verts={vertex_count} state={}", self.partii_warm_last()), partii_t0);
     }
 
     pub fn draw_indexed_triangles(&mut self, index_count: i32) {
@@ -3898,7 +3898,7 @@ impl Device {
             gl::UNSIGNED_SHORT,
             0,
         );
-        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count}"), partii_t0);
+        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count} state={}", self.partii_warm_last()), partii_t0);
     }
 
     pub fn draw_indexed_triangles_instanced_u16(&mut self, index_count: i32, instance_count: i32) {
@@ -3925,7 +3925,7 @@ impl Device {
             0,
             instance_count,
         );
-        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count} inst={instance_count}"), partii_t0);
+        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count} inst={instance_count} state={}", self.partii_warm_last()), partii_t0);
     }
 
     pub fn end_frame(&mut self) {
