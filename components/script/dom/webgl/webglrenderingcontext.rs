@@ -67,11 +67,13 @@ use crate::dom::bindings::codegen::UnionTypes::{
 use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomOnceCell, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
+use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::NodeTraits;
 #[cfg(feature = "webxr")]
@@ -363,6 +365,11 @@ pub(crate) struct WebGLRenderingContext {
     textures: Textures,
     #[no_trace]
     api_type: GlType,
+    /// Partii: lost through WEBGL_lose_context.loseContext() (IsContextLost; the WebGL thread
+    /// freed the GL context, see `lose_context`), and whether GetError still owes
+    /// CONTEXT_LOST_WEBGL.
+    lost: Cell<bool>,
+    lost_error_pending: Cell<bool>,
     droppable: DroppableWebGLRenderingContext,
 }
 
@@ -454,6 +461,8 @@ impl WebGLRenderingContext {
                 current_vao_webgl2: Default::default(),
                 textures: Textures::new(max_combined_texture_image_units),
                 api_type: ctx_data.api_type,
+                lost: Cell::new(false),
+                lost_error_pending: Cell::new(false),
                 droppable: {
                     LIVE_CONTEXTS.with(|live| live.set(live.get() + 1));
                     let alive = Rc::new(());
@@ -793,6 +802,50 @@ impl WebGLRenderingContext {
             pool.pending = Some(receiver);
         }
         Some(name)
+    }
+
+    /// Partii: <https://registry.khronos.org/webgl/extensions/WEBGL_lose_context/> loseContext().
+    /// The WebGL thread frees the GL context and everything made in it at once
+    /// (`WebGLMsg::LoseContext`), as browsers do: a page that throws a context away and calls
+    /// loseContext() (Phaser's and three.js's teardown) gets its textures' memory back without
+    /// waiting for a GC, which doesn't see that memory. IsContextLost() is true from now on and
+    /// GetError() reports CONTEXT_LOST_WEBGL once; a `webglcontextlost` event is queued on the
+    /// canvas. Calls made after the loss still run, on the WebGL thread's 1x1 stand-in context,
+    /// instead of returning the spec's null/default values; restoreContext() can't restore
+    /// (see WEBGLLoseContext).
+    pub(crate) fn lose_context(&self) {
+        if self.lost.replace(true) {
+            return;
+        }
+        self.lost_error_pending.set(true);
+        let _ = self.droppable.webgl_sender.send_lose();
+        let target: Trusted<EventTarget> = match &self.canvas {
+            HTMLCanvasElementOrOffscreenCanvas::HTMLCanvasElement(canvas) => {
+                Trusted::new(canvas.upcast::<EventTarget>())
+            },
+            HTMLCanvasElementOrOffscreenCanvas::OffscreenCanvas(canvas) => {
+                Trusted::new(canvas.upcast::<EventTarget>())
+            },
+        };
+        self.global()
+            .task_manager()
+            .dom_manipulation_task_source()
+            .queue(task!(webgl_context_lost: move |cx| {
+                let target = target.root();
+                let event = WebGLContextEvent::new(
+                    cx,
+                    &target.global(),
+                    stylo_atoms::Atom::from("webglcontextlost"),
+                    EventBubbles::DoesNotBubble,
+                    EventCancelable::Cancelable,
+                    DOMString::new(),
+                );
+                event.upcast::<Event>().fire(cx, &target);
+            }));
+    }
+
+    pub(crate) fn is_lost(&self) -> bool {
+        self.lost.get()
     }
 
     pub(crate) fn send_command(&self, command: WebGLCommand) {
@@ -3547,6 +3600,9 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3>
     fn GetError(&self) -> u32 {
+        if self.lost_error_pending.replace(false) {
+            return constants::CONTEXT_LOST_WEBGL;
+        }
         let error_code = if let Some(error) = self.last_error.get() {
             match error {
                 WebGLError::InvalidEnum => constants::INVALID_ENUM,
@@ -3594,7 +3650,7 @@ impl WebGLRenderingContextMethods<crate::DomTypeHolder> for WebGLRenderingContex
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.13>
     fn IsContextLost(&self) -> bool {
-        false
+        self.lost.get()
     }
 
     /// <https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.14>
