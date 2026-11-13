@@ -2188,6 +2188,23 @@ impl<'a> SceneBuilder<'a> {
             Some(c) => c,
             None => return false,
         };
+        // A backdrop that covers the whole surface (a full-window overlay over a game: hexii's
+        // GAME OVER, menu and level-up screens) hides every pixel of it under the blurred copy, so
+        // promoting the surface only adds a compositor layer and a full-size underlay copy of the
+        // canvas each frame: upstream's atomic slice is cheaper there (hexii GAME OVER on llvmpipe,
+        // k2n11 056cae13: render 33.6 ms with the underlay, 29.8 ms without). Only backdrops over
+        // part of the surface (HUD panels) take the underlay. `PARTII_WR_BACKDROP_UNDERLAY=2`
+        // takes it for covering backdrops too.
+        if backdrop_underlay_mode() == 1 {
+            let covers = candidate.info.rect.intersection(&candidate.info.clip_rect).map_or(false, |r| {
+                to_root(candidate.spatial_node_index).map_or(false, |t| {
+                    root_rect.inflate(0.5, 0.5).contains_box(&t.map_rect::<LayoutPixel, LayoutPixel>(&r))
+                })
+            });
+            if covers {
+                return false;
+            }
+        }
         // The underlay: the candidate image on its own node, clipped to the backdrop rect grown
         // by the filters' reach, a clip on the backdrop's node (so it follows the backdrop).
         let mut underlay_info = candidate.info;
@@ -5074,10 +5091,20 @@ struct PartiiSurfaceCandidate {
 }
 
 /// Partii: `PARTII_WR_BACKDROP_UNDERLAY=0` restores upstream (a backdrop-filter makes its
-/// slice atomic).
+/// slice atomic); `=2` also takes the underlay when the backdrop covers the whole surface.
 fn backdrop_underlay_enabled() -> bool {
-    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-        std::env::var("PARTII_WR_BACKDROP_UNDERLAY").map_or(true, |v| v != "0")
+    backdrop_underlay_mode() != 0
+}
+
+/// Partii: 0 = upstream (no underlay), 1 (default) = underlay for backdrops over part of a
+/// promotable surface, 2 = also for backdrops that cover all of it.
+fn backdrop_underlay_mode() -> u8 {
+    static MODE: std::sync::LazyLock<u8> = std::sync::LazyLock::new(|| {
+        match std::env::var("PARTII_WR_BACKDROP_UNDERLAY").as_deref() {
+            Ok("0") => 0,
+            Ok("2") => 2,
+            _ => 1,
+        }
     });
-    *ON
+    *MODE
 }
