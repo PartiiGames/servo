@@ -33,6 +33,13 @@ Patches on top of webrender 0.70.0:
   of the surface, clipped to the backdrop plus the blur's reach, is drawn under it when the surface
   is promoted (src/scene_building.rs, src/tile_cache/slice_builder.rs, src/tile_cache/mod.rs,
   src/prim_store/image.rs).
+- `PARTII_WR_BACKDROP_HALF_RES` (on by default; `=0` is upstream): a backdrop-filter that is one
+  `blur()` the blur chain would halve anyway (std deviation above `PARTII_WR_BACKDROP_BLUR_SIGMA`,
+  2 device px) runs at half resolution: its capture/blur picture and the intermediate surface
+  `BackdropRender` draws from get half the device pixel scale, so the resolve blit halves the
+  backdrop as it copies it and two full-size targets a frame (the full-size capture with its
+  scaling pass, and the full-size intermediate) become quarter-size ones
+  (src/picture.rs `partii_backdrop_half_res`, src/scene_building.rs `add_backdrop_filter`).
 - `PARTII_WR_FILTER_CACHE` (on by default; `=0` is upstream): a `drop-shadow()` picture (shadows
   sharing one blur radius) drawn straight onto a picture cache keeps its content and blur in the
   render task cache while its content hash (the per-primitive data tile invalidation compares)

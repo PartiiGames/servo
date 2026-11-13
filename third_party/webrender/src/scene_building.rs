@@ -3909,6 +3909,25 @@ impl<'a> SceneBuilder<'a> {
             LayoutVector2D::zero(),
         );
 
+        // Partii (hexii-fps): a chain that is one blur picture, the resolve target itself, may run
+        // at half resolution (`picture::partii_backdrop_half_res`); both its pictures carry the sigma.
+        let partii_sigma = match source.current {
+            PictureSource::WrappedPicture { ref instance } => {
+                let pic = &self.prim_store.pictures[instance.kind.as_pic().0];
+                match pic.composite_mode {
+                    Some(PictureCompositeMode::Filter(Filter::Blur { width, height, edge_mode: BlurEdgeMode::Mirror, .. }))
+                        if pic.flags.contains(PictureFlags::IS_RESOLVE_TARGET) => width.min(height).max(0.0),
+                    _ => 0.0,
+                }
+            }
+            PictureSource::PrimitiveList { .. } => 0.0,
+        };
+        if partii_sigma > 0.0 {
+            if let PictureSource::WrappedPicture { ref instance } = source.current {
+                self.prim_store.pictures[instance.kind.as_pic().0].partii_backdrop_sigma = partii_sigma;
+            }
+        }
+
         // If all the filters were no-ops (e.g. opacity(0)) then we don't get a picture here
         // and we can skip adding the backdrop-filter.
         if source.has_picture() {
@@ -3936,6 +3955,7 @@ impl<'a> SceneBuilder<'a> {
                 PrimitiveKind::Picture { pic_index, .. } => pic_index,
                 _ => panic!("bug: not a picture"),
             };
+            self.prim_store.pictures[output_pic_index.0].partii_backdrop_sigma = partii_sigma;
 
             // Find which stacking context (or root tile cache) to add the
             // backdrop-filter chain to

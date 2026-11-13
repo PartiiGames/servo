@@ -565,6 +565,24 @@ impl PictureScratch {
     }
 }
 
+/// Partii (hexii-fps): whether a backdrop-filter `blur()` of `sigma` (std deviation in device pixels
+/// at full resolution) runs at half resolution. Its two surfaces (the picture the backdrop is resolved
+/// into and blurred from, and the intermediate surface that `BackdropRender` draws from) then use half
+/// the device pixel scale: the resolve blit halves the backdrop as it copies it (linear filter, a 2x2
+/// average), the blur starts at half size, and the intermediate is a quarter of the pixels. Upstream
+/// resolves at full size, halves it in a separate scaling pass, blurs, and draws the result into a
+/// full-size intermediate surface: two full-size targets more each frame, the costly part of a
+/// full-window backdrop blur on a software GL (hexii's menu and GAME OVER screens: render ~37 ms a
+/// frame on llvmpipe). The blur chain already halves any backdrop blur above
+/// `max_blur_std_deviation(Mirror)` (2.0 device px, `PARTII_WR_BACKDROP_BLUR_SIGMA`) before blurring,
+/// so the result has nothing finer than half resolution holds either way (Chrome lowers backdrop
+/// filter resolution too). `PARTII_WR_BACKDROP_HALF_RES=0` is upstream.
+pub fn partii_backdrop_half_res(sigma: f32) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WR_BACKDROP_HALF_RES").map_or(true, |v| v != "0")) &&
+        sigma > crate::render_task::max_blur_std_deviation(crate::gpu_types::BlurEdgeMode::Mirror)
+}
+
 #[cfg_attr(feature = "capture", derive(Serialize))]
 pub struct PictureInstance {
     /// List of primitives, and associated info for this picture.
@@ -610,6 +628,11 @@ pub struct PictureInstance {
     /// If provided, cache the content of this picture into an image
     /// associated with the image key.
     pub snapshot: Option<SnapshotInfo>,
+
+    /// Partii (hexii-fps): on the two pictures of a backdrop-filter chain that is one `blur()`
+    /// (the capture/blur picture and its intermediate surface), the blur's std deviation in local
+    /// pixels; 0 elsewhere. See `partii_backdrop_half_res`.
+    pub partii_backdrop_sigma: f32,
 }
 
 impl PictureInstance {
@@ -696,6 +719,7 @@ impl PictureInstance {
             flags,
             clip_root: None,
             snapshot,
+            partii_backdrop_sigma: 0.0,
         }
     }
 
@@ -1414,6 +1438,21 @@ impl PictureInstance {
                             (device_pixel_scale, surface_spatial_node_index, (1.0, 1.0), world_scale_factors)
                         }
                     }
+                };
+
+                // Partii (hexii-fps): a backdrop blur that the blur chain would halve anyway is
+                // captured, blurred and kept at half resolution (`partii_backdrop_half_res`).
+                let device_pixel_scale = if self.partii_backdrop_sigma > 0.0 {
+                    let sigma = self.partii_backdrop_sigma *
+                        local_scale.0.min(local_scale.1) *
+                        device_pixel_scale.0;
+                    if partii_backdrop_half_res(sigma) {
+                        Scale::new(device_pixel_scale.0 * 0.5)
+                    } else {
+                        device_pixel_scale
+                    }
+                } else {
+                    device_pixel_scale
                 };
 
                 let surface = SurfaceInfo::new(
