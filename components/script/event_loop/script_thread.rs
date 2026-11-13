@@ -1086,6 +1086,40 @@ impl ScriptThread {
         document.event_handler().handle_pending_input_events(cx);
     }
 
+    /// Partii: whether to update the rendering before the next task of a batch: a page wants
+    /// frames (a frame tick or rendering timer came in, or rAF callbacks are waiting) and a
+    /// whole frame has passed since its animation frame callbacks last ran.
+    /// `PARTII_RENDER_BETWEEN_TASKS=0` keeps upstream's one update after the whole batch.
+    fn rendering_due_between_tasks(&self) -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| {
+            !matches!(
+                std::env::var("PARTII_RENDER_BETWEEN_TASKS").as_deref(),
+                Ok("0")
+            )
+        }) {
+            return false;
+        }
+        if self.closing.load(Ordering::SeqCst) {
+            return false;
+        }
+        let now = Instant::now();
+        let overdue = |t: Option<Instant>| {
+            t.is_some_and(|last| now.saturating_duration_since(last) >= frame_period())
+        };
+        if !overdue(self.last_animation_frame_callbacks_time.get()) ||
+            !overdue(self.last_render_opportunity_time.get())
+        {
+            return false;
+        }
+        self.needs_rendering_update.load(Ordering::Relaxed) ||
+            self.documents.borrow().iter().any(|(_, document)| {
+                document.is_fully_active() &&
+                    !document.window().throttled() &&
+                    document.has_active_request_animation_frame_callbacks()
+            })
+    }
+
     fn cancel_scheduled_update_the_rendering(&self) {
         if let Some(timer_id) = self.scheduled_update_the_rendering.borrow_mut().take() {
             self.timer_scheduler.borrow_mut().cancel_timer(timer_id);
@@ -1591,7 +1625,14 @@ impl ScriptThread {
 
         // Process the gathered events.
         debug!("Processing events.");
-        for msg in sequential.drain(..) {
+        for (index, msg) in sequential.drain(..).enumerate() {
+            // Partii: a rendering opportunity between tasks (HTML's event loop: one task, then
+            // update the rendering when a frame is due). Upstream runs every gathered task
+            // first, so two long tasks that arrived together (a game's image load handler and
+            // the timer after it at a round start) made one frame gap of both.
+            if index > 0 && self.rendering_due_between_tasks() {
+                self.update_the_rendering(cx);
+            }
             debug!("Processing event {:?}.", msg);
             let category = self.categorize_msg(&msg);
             let pipeline_id = msg.pipeline_id();
