@@ -193,7 +193,6 @@ struct DroppableWebGLRenderingContext {
     #[no_trace]
     webgl_sender: WebGLMsgSender,
     /// Partii: alive while this context is (PIPELINE_CONTEXTS holds a weak handle).
-    #[no_trace]
     #[ignore_malloc_size_of = "a token"]
     alive: Rc<()>,
 }
