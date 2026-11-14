@@ -3597,8 +3597,30 @@ impl Window {
         // Resume timer events.
         self.as_global_scope().resume();
 
+        // Partii (mem-3): the window this one takes the proxy from is no longer its navigable's
+        // active document. The constellation says so in a SetDocumentActivity of its own, and when
+        // that came after this one the old document stayed fully active for a moment while
+        // `window` already meant this Window: its animation frame callbacks ran, and a
+        // `window.requestAnimationFrame(cb)` in them (Phaser's loop, the soak probe's wrapper) put
+        // the old page's callback on this document. It re-armed there every frame and held the old
+        // Window, its WebGL context and its JS heap (300+ MB in rocket's lx soaks) until the next
+        // navigation, 50-540 s later. So it goes inactive here; the constellation's message then
+        // finds it so. PARTII_ACTIVE_HANDOVER=0: before.
+        static HANDOVER: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            !std::env::var("PARTII_ACTIVE_HANDOVER").is_ok_and(|v| v.trim() == "0")
+        });
+        let proxy = self.window_proxy();
+        if *HANDOVER &&
+            let Some(previous) = proxy.currently_active() &&
+            previous != self.pipeline_id() &&
+            let Some(old) = ScriptThread::find_document(previous) &&
+            old.browsing_context().is_some_and(|bc| bc == proxy)
+        {
+            old.set_activity(cx, script_traits::DocumentActivity::Inactive);
+        }
+
         // Set the window proxy to be this object.
-        self.window_proxy().set_currently_active(cx, self);
+        proxy.set_currently_active(cx, self);
 
         // Push the document title to `Paint` since we are
         // activating this document due to a navigation.
