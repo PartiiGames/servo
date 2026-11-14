@@ -1435,7 +1435,11 @@ impl WebGLThread {
                     premultiplied_alpha: true,
                     preserve_drawing_buffer: false,
                 };
-                match self.create_webgl_context(painter_id, webgl_version, Size2D::new(1, 1), attributes) {
+                // The stand-in neither takes the idle spare nor becomes what the next spare is made like.
+                let (spare, spare_like) = (self.spare.take(), self.spare_like);
+                let made = self.create_webgl_context(painter_id, webgl_version, Size2D::new(1, 1), attributes);
+                (self.spare, self.spare_like) = (spare, spare_like);
+                match made {
                     Ok((id, _)) => {
                         self.stand_in_contexts.insert((painter_id, webgl_version), id);
                         id
