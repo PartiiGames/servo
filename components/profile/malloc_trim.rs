@@ -21,8 +21,18 @@
 //! 49/87/88 vs 45/30/37 with trim off) and left 1-3 gaps over 100 ms in every rep; every 30 s is level
 //! with off on gaps (42/37/36, p99 33-34 ms) and still holds RSS ~200 MB under it.
 //!
+//! RSS growth alone latches: a trim taken while the live heap is at a peak gives back little and
+//! sets the baseline at that peak's RSS. When the peak's memory is freed a moment later it stays
+//! resident in the arenas, RSS sits just under baseline + 48 MB, and no trim comes again. In the
+//! rocket lx soak of 2026-11-14 (job 5a1f8be2) RSS stepped 780 -> 980 MB at minute 7 (live heap
+//! 653 MB at that sample, 330-540 after) and stayed at 980-1010 MB to the end with no sawtooth:
+//! play-median growth +25.1%. So the thread also watches the bytes in use inside the arenas
+//! (mallinfo2 `uordblks`, every `PARTII_MALLOC_TRIM_PROBE_SECS` (6) s) and trims when
+//! `PARTII_MALLOC_TRIM_FREED_MB` (48) of them have been freed since the highest point after the
+//! last trim, at the same 30-s pace. `PARTII_MALLOC_TRIM_FREED_MB=0` is the RSS trigger alone.
+//!
 //! `PARTII_MALLOC_TRIM=0` turns it off; `PARTII_MALLOC_TRIM_LOG=1` prints each trim (RSS before
-//! and after, how long it took) to stderr.
+//! and after, how long it took, which trigger) to stderr.
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[expect(unsafe_code)]
@@ -32,6 +42,28 @@ mod imp {
 
     unsafe extern "C" {
         fn malloc_trim(pad: libc::size_t) -> libc::c_int;
+        fn mallinfo2() -> Mallinfo2;
+    }
+
+    /// glibc's `struct mallinfo2` (2.33+), as in system_reporter.rs.
+    #[repr(C)]
+    struct Mallinfo2 {
+        _arena: usize,
+        _ordblks: usize,
+        _smblks: usize,
+        _hblks: usize,
+        _hblkhd: usize,
+        _usmblks: usize,
+        _fsmblks: usize,
+        uordblks: usize,
+        _fordblks: usize,
+        _keepcost: usize,
+    }
+
+    /// Bytes in use inside the malloc arenas (not the mmapped big blocks: those go back to the
+    /// OS when freed). Locks each arena in turn while it counts its free lists.
+    fn arena_in_use() -> u64 {
+        unsafe { mallinfo2() }.uordblks as u64
     }
 
     fn env_u64(name: &str, default: u64) -> u64 {
@@ -56,6 +88,8 @@ mod imp {
         let grow = env_u64("PARTII_MALLOC_TRIM_MB", 48) << 20;
         let min_interval = Duration::from_secs(env_u64("PARTII_MALLOC_TRIM_SECS", 30));
         let log = std::env::var("PARTII_MALLOC_TRIM_LOG").is_ok_and(|v| v.trim() == "1");
+        let freed_trigger = env_u64("PARTII_MALLOC_TRIM_FREED_MB", 48) << 20;
+        let probe_every = env_u64("PARTII_MALLOC_TRIM_PROBE_SECS", 6).max(2) / 2;
         let _ = thread::Builder::new()
             .name("MallocTrim".to_owned())
             .spawn(move || {
@@ -63,8 +97,12 @@ mod imp {
                     return;
                 };
                 let mut last = Instant::now();
+                // The most bytes in use in the arenas seen since the last trim (0 = not probed).
+                let mut in_use_peak = 0u64;
+                let mut tick = 0u64;
                 loop {
                     thread::sleep(Duration::from_secs(2));
+                    tick += 1;
                     let Some(rss) = rss_bytes() else {
                         return;
                     };
@@ -72,9 +110,16 @@ mod imp {
                     // growth is measured from there.
                     if rss < baseline {
                         baseline = rss;
-                        continue;
                     }
-                    if rss - baseline < grow || last.elapsed() < min_interval {
+                    let mut freed = 0;
+                    if freed_trigger > 0 && tick % probe_every == 0 {
+                        let in_use = arena_in_use();
+                        in_use_peak = in_use_peak.max(in_use);
+                        freed = in_use_peak - in_use;
+                    }
+                    let grew = rss - baseline >= grow;
+                    let by_freed = freed_trigger > 0 && freed >= freed_trigger;
+                    if !(grew || by_freed) || last.elapsed() < min_interval {
                         continue;
                     }
                     let t = Instant::now();
@@ -82,12 +127,15 @@ mod imp {
                     let took = t.elapsed();
                     last = Instant::now();
                     baseline = rss_bytes().unwrap_or(rss);
+                    in_use_peak = if freed_trigger > 0 { arena_in_use() } else { 0 };
                     if log {
                         eprintln!(
-                            "malloc-trim: rss {} -> {} MB in {:.1} ms",
+                            "malloc-trim: rss {} -> {} MB in {:.1} ms ({}, {} MB freed in the arenas)",
                             rss >> 20,
                             baseline >> 20,
-                            took.as_secs_f64() * 1000.0
+                            took.as_secs_f64() * 1000.0,
+                            if grew { "rss grew" } else { "freed" },
+                            freed >> 20
                         );
                     }
                 }
