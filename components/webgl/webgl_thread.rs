@@ -561,7 +561,7 @@ pub(crate) struct WebGLThread {
     /// (see `SpareContext`).
     spare: Option<SpareContext>,
     /// What the last CreateContext asked for: the next spare is made like it.
-    spare_like: Option<(PainterId, ContextAttributes)>,
+    spare_like: Option<SpareKey>,
     /// A usage map used to delay the deletion of WebGL contexts until all WebRender
     /// rendering is finished, so that any existing `Surface`s can be properly released.
     busy_webgl_context_map: WebGLContextBusyMap,
@@ -666,17 +666,60 @@ impl WebGLThread {
 
     /// Partii (stream gaps3): makes the spare GL context for the next CreateContext, like the last one.
     fn make_spare_context(&mut self) {
-        let Some((painter_id, attributes)) = self.spare_like else {
+        let Some(key) = self.spare_like else {
             return;
         };
+        let SpareKey { painter_id, attributes, size, alpha } = key;
         let Ok(device) = self.get_or_create_device_for_painter(painter_id) else {
             self.spare_like = None;
             return;
         };
         let start = std::time::Instant::now();
+        let surface_access = self.surface_access();
+        // The context with its first surface bound and cleared as create_webgl_context clears it (so a spare taken at
+        // the same size skips the surface and the clear: 3 + 4-5 ms of llvmpipe at 1280x720).
         let made = device
             .create_context_descriptor(&attributes)
-            .and_then(|descriptor| device.create_context(&descriptor, None));
+            .and_then(|descriptor| device.create_context(&descriptor, None))
+            .and_then(|mut ctx| {
+                let bound = device
+                    .create_surface(&ctx, surface_access, SurfaceType::Generic { size })
+                    .and_then(|surface| {
+                        device
+                            .bind_surface_to_context(&mut ctx, surface)
+                            .map_err(|(err, mut surface)| {
+                                let _ = device.destroy_surface(&mut ctx, &mut surface);
+                                err
+                            })
+                    })
+                    .and_then(|_| device.make_context_current(&ctx));
+                match bound {
+                    Ok(()) => Ok(ctx),
+                    Err(err) => {
+                        let _ = device.destroy_context(&mut ctx);
+                        Err(err)
+                    },
+                }
+            });
+        let made = made.map(|ctx| {
+            let gl = unsafe { glow::Context::from_loader_function(|name| device.get_proc_address(&ctx, name)) };
+            let framebuffer = device
+                .context_surface_info(&ctx)
+                .ok()
+                .flatten()
+                .and_then(|info| info.framebuffer_object);
+            unsafe {
+                gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer);
+                gl.viewport(0, 0, size.width, size.height);
+                gl.scissor(0, 0, size.width, size.height);
+                gl.clear_color(0., 0., 0., !alpha as u32 as f32);
+                gl.clear_depth(1.);
+                gl.clear_stencil(0);
+                gl.clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
+                gl.finish();
+            }
+            ctx
+        });
         match made {
             Ok(ctx) => {
                 if webgl_stats_enabled() {
@@ -685,12 +728,7 @@ impl WebGLThread {
                         start.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                self.spare = Some(SpareContext {
-                    painter_id,
-                    attributes,
-                    device,
-                    ctx,
-                });
+                self.spare = Some(SpareContext { key, device, ctx });
             },
             Err(err) => {
                 warn!("spare WebGL context: {err:?}");
@@ -705,14 +743,14 @@ impl WebGLThread {
     fn drop_spare_context(&mut self, painter_id: Option<PainterId>) {
         if let Some(mut spare) = self
             .spare
-            .take_if(|s| painter_id.is_none_or(|p| p == s.painter_id))
+            .take_if(|s| painter_id.is_none_or(|p| p == s.key.painter_id))
         {
             let _ = spare.device.destroy_context(&mut spare.ctx);
             self.bound_context_id = None;
         }
         if painter_id.is_none() ||
             self.spare_like
-                .is_some_and(|(p, _)| Some(p) == painter_id)
+                .is_some_and(|k| Some(k.painter_id) == painter_id)
         {
             self.spare_like = None;
         }
@@ -981,13 +1019,6 @@ impl WebGLThread {
 
         let device = self.get_or_create_device_for_painter(painter_id)?;
         mark(&mut stats, "device");
-        // Partii (stream gaps3): the spare made while idle, when it was made like this one.
-        let spare = self.spare.take_if(|s| {
-            s.painter_id == painter_id &&
-                s.attributes == *context_attributes &&
-                Rc::ptr_eq(&s.device, &device)
-        });
-        self.spare_like = spare_enabled().then_some((painter_id, *context_attributes));
         let context_descriptor = device
             .create_context_descriptor(context_attributes)
             .map_err(|err| format!("Failed to create context descriptor: {:?}", err))?;
@@ -1001,6 +1032,19 @@ impl WebGLThread {
         };
         let surface_access = self.surface_access();
 
+        // Partii (stream gaps3): the spare made while idle, when it was made like this one: its context, with a
+        // surface of this size bound and cleared.
+        let key = SpareKey {
+            painter_id,
+            attributes: *context_attributes,
+            size: safe_size.to_i32(),
+            alpha: requested_flags.contains(ContextAttributeFlags::ALPHA),
+        };
+        let spare = self
+            .spare
+            .take_if(|s| s.key == key && Rc::ptr_eq(&s.device, &device));
+        let from_spare = spare.is_some();
+        self.spare_like = spare_enabled().then_some(key);
         let mut ctx = match spare {
             Some(spare) => spare.ctx,
             None => device
@@ -1008,12 +1052,14 @@ impl WebGLThread {
                 .map_err(|err| format!("Failed to create the GL context: {:?}", err))?,
         };
         mark(&mut stats, "create_context");
-        let surface = device
-            .create_surface(&ctx, surface_access, surface_type)
-            .map_err(|err| format!("Failed to create the initial surface: {:?}", err))?;
-        device
-            .bind_surface_to_context(&mut ctx, surface)
-            .map_err(|err| format!("Failed to bind initial surface: {:?}", err))?;
+        if !from_spare {
+            let surface = device
+                .create_surface(&ctx, surface_access, surface_type)
+                .map_err(|err| format!("Failed to create the initial surface: {:?}", err))?;
+            device
+                .bind_surface_to_context(&mut ctx, surface)
+                .map_err(|err| format!("Failed to bind initial surface: {:?}", err))?;
+        }
         // https://github.com/pcwalton/surfman/issues/7
         device
             .make_context_current(&ctx)
@@ -1085,7 +1131,10 @@ impl WebGLThread {
             gl.clear_color(0., 0., 0., !has_alpha as u32 as f32);
             gl.clear_depth(1.);
             gl.clear_stencil(0);
-            gl.clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
+            // A spare's surface was cleared to the same values when it was made, and no resize replaced it.
+            if !(from_spare && safe_size == size) {
+                gl.clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
+            }
             gl.clear_color(0., 0., 0., 0.);
             debug_assert_eq!(gl.get_error(), gl::NO_ERROR);
         }
@@ -6181,12 +6230,22 @@ fn tex_clear_enabled() -> bool {
 /// Each CreateContext waits on the WebGL thread (the script thread blocks on its reply), and on llvmpipe making the GL
 /// context is most of it: 9-15 ms on a quiet node, 53-75 ms on a busy one (rocket-to-heaven's restarts: 100-124 ms
 /// frame gaps). The spare is made once the thread has been idle for SPARE_IDLE, after the page made its first context
-/// (a page that never uses WebGL never gets one), and holds no surface. PARTII_WEBGL_SPARE=0 turns it off.
+/// (a page that never uses WebGL never gets one), with its first surface bound and cleared at the last size.
+/// PARTII_WEBGL_SPARE=0 turns it off.
 struct SpareContext {
-    painter_id: PainterId,
-    attributes: ContextAttributes,
+    key: SpareKey,
     device: Rc<Device>,
     ctx: Context,
+}
+
+/// What a spare is made like: the last CreateContext's painter, GL attributes, first surface size and alpha (the
+/// colour the surface is cleared to).
+#[derive(Clone, Copy, PartialEq)]
+struct SpareKey {
+    painter_id: PainterId,
+    attributes: ContextAttributes,
+    size: euclid::default::Size2D<i32>,
+    alpha: bool,
 }
 
 const SPARE_IDLE: std::time::Duration = std::time::Duration::from_millis(8);
