@@ -1074,13 +1074,24 @@ impl WebGLThread {
             size: safe_size.to_i32(),
             alpha: requested_flags.contains(ContextAttributeFlags::ALPHA),
         };
-        let spare = self
-            .spare
-            .take_if(|s| s.key == key && Rc::ptr_eq(&s.device, &device));
-        let from_spare = spare.is_some();
+        // The context is taken when it was made with these attributes; its surface too when also of this size and
+        // alpha, else that surface is replaced (rocket's restarts make 1x1, 1280x720, 1280x720 contexts in turn).
+        let spare = self.spare.take_if(|s| {
+            s.key.painter_id == painter_id &&
+                s.key.attributes == *context_attributes &&
+                Rc::ptr_eq(&s.device, &device)
+        });
+        let from_spare = spare.as_ref().is_some_and(|s| s.key == key);
         self.spare_like = spare_enabled().then_some(key);
         let mut ctx = match spare {
-            Some(spare) => spare.ctx,
+            Some(mut spare) => {
+                if !from_spare {
+                    if let Ok(Some(mut surface)) = device.unbind_surface_from_context(&mut spare.ctx) {
+                        let _ = device.destroy_surface(&mut spare.ctx, &mut surface);
+                    }
+                }
+                spare.ctx
+            },
             None => device
                 .create_context(&context_descriptor, None)
                 .map_err(|err| format!("Failed to create the GL context: {:?}", err))?,
