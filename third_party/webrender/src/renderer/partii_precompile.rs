@@ -230,9 +230,16 @@ fn compile(
     let mut scratch = WarmScratch::default();
     let mut drawn = 0;
     for entry in &entries {
+        let t_entry = Instant::now();
         if let Some(kind) = shaders.partii_bind(&entry.program, &mut device) {
             device.partii_warm_draw(entry, &vaos[kind], &mut scratch);
             drawn += 1;
+        }
+        if let Some(min) = log_ms() {
+            let ms = t_entry.elapsed().as_secs_f64() * 1000.0;
+            if ms >= min {
+                eprintln!("partii-wr-precompile: background {ms:.1} ms: {}", entry.to_line());
+            }
         }
     }
     device.partii_warm_finish(scratch);
@@ -241,6 +248,11 @@ fn compile(
         entries.len(),
         t0.elapsed().as_secs_f64() * 1000.0,
     );
+    // Measurement (gaps-7): PARTII_WR_PRECOMPILE_SETTLE_MS keeps the context (and Mesa's disk-cache
+    // writer) alive that long before the renderer replays, to tell late cache writes from misses.
+    if let Some(ms) = std::env::var("PARTII_WR_PRECOMPILE_SETTLE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
     vaos.deinit(&mut device);
     shaders.deinit(&mut device);
     device.end_frame();
