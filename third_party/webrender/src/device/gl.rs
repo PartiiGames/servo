@@ -42,7 +42,7 @@ use malloc_size_of::MallocSizeOfOps;
 // Partii (gaps-6): draw-state warm-up for software GL (PARTII_WR_WARMUP).
 #[path = "partii_warm.rs"]
 mod partii_warm;
-pub(crate) use self::partii_warm::WarmScratch;
+pub(crate) use self::partii_warm::{WarmEntry, WarmScratch};
 
 /// Sequence number for frames, as tracked by the device layer.
 #[derive(Debug, Copy, Clone, PartialEq, Ord, Eq, PartialOrd)]

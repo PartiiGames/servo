@@ -206,6 +206,9 @@ pub struct WebRenderOptions {
     /// If true, open a debug socket to listen for remote debugger.
     /// Relies on `debugger` cargo feature being enabled.
     pub enable_debugger: bool,
+    /// Partii (gaps-7): makes a GL context on a background thread, for compiling software-GL
+    /// shader variants off the frame path (renderer/partii_precompile.rs). None: no precompile.
+    pub partii_precompile_context: Option<crate::renderer::partii_precompile::PartiiPrecompileContext>,
 }
 
 impl WebRenderOptions {
@@ -279,6 +282,7 @@ impl Default for WebRenderOptions {
             low_quality_pinch_zoom: false,
             max_shared_surface_size: 2048,
             enable_debugger: true,
+            partii_precompile_context: None,
         }
     }
 }
@@ -510,6 +514,7 @@ pub fn create_webrender_instance(
     // Partii (gaps-6): on a software GL, replay the draw states earlier runs recorded, so the GL
     // builds those shader variants now rather than inside a frame (device/partii_warm.rs;
     // PARTII_WR_WARMUP=0 off, PARTII_WR_WARMUP_MS caps it).
+    let mut partii_rest = Vec::new();
     {
         let entries = device.partii_warm_entries();
         if !entries.is_empty() {
@@ -522,8 +527,10 @@ pub fn create_webrender_instance(
             let mut drawn = 0;
             {
                 let mut shaders = shaders.borrow_mut();
-                for entry in &entries {
+                for (i, entry) in entries.iter().enumerate() {
                     if t0.elapsed().as_millis() >= budget_ms {
+                        // Partii (gaps-7): the rest goes to the off-frame-path precompile.
+                        partii_rest = entries[i ..].to_vec();
                         break;
                     }
                     if let Some(kind) = shaders.partii_bind(&entry.program, &mut device) {
@@ -540,6 +547,34 @@ pub fn create_webrender_instance(
             );
         }
     }
+
+    // Partii (gaps-7): on a software GL, the seed's states this machine hasn't recorded and what the
+    // start-up budget left are compiled on a background context, then replayed a few ms per frame
+    // (renderer/partii_precompile.rs; PARTII_WR_PRECOMPILE=0 off).
+    let partii_precompile = match options.partii_precompile_context.take() {
+        Some(make_context) if is_software_gl_name(&device.get_capabilities().renderer_name) &&
+            crate::renderer::partii_precompile::enabled() => {
+            let mut entries = device.partii_warm_seed_new();
+            entries.extend(partii_rest);
+            let indexed_quads = if options.enable_instancing { None } else { NonZeroUsize::new(max_primitive_instance_count) };
+            crate::renderer::partii_precompile::PartiiPrecompile::start(
+                entries,
+                make_context,
+                crate::renderer::partii_precompile::PrecompileConfig {
+                    resource_override_path: options.resource_override_path.clone(),
+                    use_optimized_shaders: options.use_optimized_shaders,
+                    allow_texture_storage_support: options.allow_texture_storage_support,
+                    allow_texture_swizzling: options.allow_texture_swizzling,
+                    surface_origin_is_top_left: options.surface_origin_is_top_left,
+                    allow_dual_source_blending: options.allow_dual_source_blending,
+                    allow_advanced_blend_equation: options.allow_advanced_blend_equation,
+                    enable_dithering: options.enable_dithering,
+                    indexed_quads,
+                },
+            )
+        },
+        _ => None,
+    };
 
     device.end_frame();
 
@@ -841,6 +876,7 @@ pub fn create_webrender_instance(
         consecutive_oom_frames: 0,
         target_frame_publish_id: None,
         partii_update_frames: 0,
+        partii_precompile,
         partii_update_offscreen: 0,
         pending_result_msg: None,
         layer_compositor_frame_state_in_prev_frame: None,
@@ -874,4 +910,10 @@ pub fn create_webrender_instance(
     }
 
     Ok((renderer, sender))
+}
+
+/// Partii (gaps-7): a software GL by its renderer string (llvmpipe, softpipe, swrast).
+fn is_software_gl_name(renderer: &str) -> bool {
+    let r = renderer.to_ascii_lowercase();
+    r.contains("llvmpipe") || r.contains("softpipe") || r.contains("swrast")
 }

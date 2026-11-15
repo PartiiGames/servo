@@ -122,7 +122,7 @@ fn fmt_parse(s: &str) -> Option<ImageFormat> {
 
 impl WarmEntry {
     /// `prog|tgt|s0,s1,..|cmask|unit:target:fmt:pw:ph:min:mag:r,g,b,a;...`
-    fn to_line(&self) -> String {
+    pub(crate) fn to_line(&self) -> String {
         let tgt = match self.target {
             None => "default".to_owned(),
             Some((f, d)) => format!("{}{}", fmt_name(f), if d { "+d" } else { "" }),
@@ -152,7 +152,7 @@ impl WarmEntry {
         format!("{}|{}|{}|{}|{}", self.program, tgt, st.join(","), cm, units.join(";"))
     }
 
-    fn from_line(line: &str) -> Option<Self> {
+    pub(crate) fn from_line(line: &str) -> Option<Self> {
         let mut parts = line.split('|');
         let program = parts.next()?.to_owned();
         let tgt = parts.next()?;
@@ -260,6 +260,18 @@ impl Recorder {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{line}");
         }
+    }
+}
+
+/// Partii (gaps-7): the draw states the farm's games draw on a machine's first run (fork tools:
+/// runtime tools/chrome/warm-seed.sh, 211 states from 2d, 3d, ecs, glitterfall, hexii, rocket and
+/// blur pages). `PARTII_WR_SEED_FILE` replaces it (an empty file: no seed).
+const SEED: &str = include_str!("partii_warm_seed.txt");
+
+fn seed_text() -> String {
+    match std::env::var_os("PARTII_WR_SEED_FILE") {
+        Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
+        None => SEED.to_owned(),
     }
 }
 
@@ -394,6 +406,18 @@ impl Device {
         self.partii_warm.as_mut().unwrap().append(line);
     }
 
+    /// Partii (gaps-7): the seed's states this machine hasn't recorded (empty when warm-up is off).
+    pub(crate) fn partii_warm_seed_new(&self) -> Vec<WarmEntry> {
+        let Some(r) = self.partii_warm.as_ref() else { return Vec::new() };
+        let text = seed_text();
+        let mut seen = HashSet::new();
+        text
+            .lines()
+            .filter(|l| !r.known.contains(*l) && seen.insert(*l))
+            .filter_map(WarmEntry::from_line)
+            .collect()
+    }
+
     /// The entries the file held at start (empty when warm-up is off).
     pub(crate) fn partii_warm_entries(&mut self) -> Vec<WarmEntry> {
         self.partii_warm.as_mut().map_or(Vec::new(), |r| std::mem::take(&mut r.loaded))
@@ -462,6 +486,15 @@ impl Device {
         } else {
             self.gl.draw_elements_instanced(gl::TRIANGLES, 6, gl::UNSIGNED_SHORT, 0, 1);
         }
+    }
+
+    /// Back to WebRender's default state after some replayed draws (the scratch is kept).
+    pub(crate) fn partii_warm_restore(&mut self) {
+        self.gl.disable(gl::BLEND);
+        self.gl.disable(gl::DEPTH_TEST);
+        self.gl.depth_mask(true);
+        self.gl.color_mask(true, true, true, true);
+        self.reset_state();
     }
 
     /// Back to WebRender's default state after a replay.
