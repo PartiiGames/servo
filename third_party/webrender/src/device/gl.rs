@@ -642,6 +642,30 @@ impl Drop for Texture {
     }
 }
 
+
+/// Partii (gaps-6, measurement builds only): PARTII_WR_GL_LOG=<ms> logs every WebRender GL draw,
+/// texture allocation or blit whose call takes <ms> or more on the calling thread (a software GL
+/// compiling a shader variant at draw time shows here), with the bound program, on the trace clock.
+fn partii_gl_log_ms() -> Option<f64> {
+    static MS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| std::env::var("PARTII_WR_GL_LOG").ok().and_then(|v| v.parse().ok()))
+}
+fn partii_gl_log(what: &str, prog: &std::ffi::CStr, extra: std::fmt::Arguments, t0: Option<std::time::Instant>) {
+    let (Some(t0), Some(min)) = (t0, partii_gl_log_ms()) else { return };
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    if ms >= min {
+        let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        eprintln!(
+            "partii-trace wrgl {what} at={:.1} ms={ms:.2} prog={} {extra}",
+            (d.as_micros() % 10_000_000_000) as f64 / 1000.0 - ms,
+            prog.to_string_lossy(),
+        );
+    }
+}
+fn partii_gl_t0() -> Option<std::time::Instant> {
+    partii_gl_log_ms().map(|_| std::time::Instant::now())
+}
+
 pub struct Program {
     id: gl::GLuint,
     u_transform: gl::GLint,
@@ -2763,6 +2787,7 @@ impl Device {
             TexStorageUsage::Never => false,
         };
         if use_texture_storage {
+            let partii_t0 = partii_gl_t0();
             self.gl.tex_storage_2d(
                 texture.target,
                 mipmap_levels,
@@ -2770,7 +2795,9 @@ impl Device {
                 texture.size.width as gl::GLint,
                 texture.size.height as gl::GLint,
             );
+            partii_gl_log("alloc", &self.bound_program_name, format_args!("{width}x{height}"), partii_t0);
         } else {
+            let partii_t0 = partii_gl_t0();
             self.gl.tex_image_2d(
                 texture.target,
                 0,
@@ -2782,6 +2809,7 @@ impl Device {
                 desc.pixel_type,
                 None,
             );
+            partii_gl_log("alloc", &self.bound_program_name, format_args!("{width}x{height}"), partii_t0);
         }
 
         // Set up FBOs, if required.
@@ -3049,6 +3077,7 @@ impl Device {
         let src_x0 = src_rect.min.x + self.bound_read_fbo.1.x;
         let src_y0 = src_rect.min.y + self.bound_read_fbo.1.y;
 
+        let partii_t0 = partii_gl_t0();
         self.gl.blit_framebuffer(
             src_x0,
             src_y0,
@@ -3061,6 +3090,7 @@ impl Device {
             gl::COLOR_BUFFER_BIT,
             filter,
         );
+        partii_gl_log("blit", &self.bound_program_name, format_args!(""), partii_t0);
     }
 
     /// Perform a blit between src_target and dest_target.
@@ -3767,12 +3797,14 @@ impl Device {
             None
         };
 
+        let partii_t0 = partii_gl_t0();
         self.gl.draw_elements(
             gl::TRIANGLES,
             index_count,
             gl::UNSIGNED_SHORT,
             first_vertex as u32 * 2,
         );
+        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count}"), partii_t0);
     }
 
     pub fn draw_triangles_u32(&mut self, first_vertex: i32, index_count: i32) {
@@ -3791,12 +3823,14 @@ impl Device {
             None
         };
 
+        let partii_t0 = partii_gl_t0();
         self.gl.draw_elements(
             gl::TRIANGLES,
             index_count,
             gl::UNSIGNED_INT,
             first_vertex as u32 * 4,
         );
+        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count}"), partii_t0);
     }
 
     pub fn draw_nonindexed_points(&mut self, first_vertex: i32, vertex_count: i32) {
@@ -3815,7 +3849,9 @@ impl Device {
             None
         };
 
+        let partii_t0 = partii_gl_t0();
         self.gl.draw_arrays(gl::POINTS, first_vertex, vertex_count);
+        partii_gl_log("draw", &self.bound_program_name, format_args!("verts={vertex_count}"), partii_t0);
     }
 
     pub fn draw_nonindexed_lines(&mut self, first_vertex: i32, vertex_count: i32) {
@@ -3834,7 +3870,9 @@ impl Device {
             None
         };
 
+        let partii_t0 = partii_gl_t0();
         self.gl.draw_arrays(gl::LINES, first_vertex, vertex_count);
+        partii_gl_log("draw", &self.bound_program_name, format_args!("verts={vertex_count}"), partii_t0);
     }
 
     pub fn draw_indexed_triangles(&mut self, index_count: i32) {
@@ -3853,12 +3891,14 @@ impl Device {
             None
         };
 
+        let partii_t0 = partii_gl_t0();
         self.gl.draw_elements(
             gl::TRIANGLES,
             index_count,
             gl::UNSIGNED_SHORT,
             0,
         );
+        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count}"), partii_t0);
     }
 
     pub fn draw_indexed_triangles_instanced_u16(&mut self, index_count: i32, instance_count: i32) {
@@ -3877,6 +3917,7 @@ impl Device {
             None
         };
 
+        let partii_t0 = partii_gl_t0();
         self.gl.draw_elements_instanced(
             gl::TRIANGLES,
             index_count,
@@ -3884,6 +3925,7 @@ impl Device {
             0,
             instance_count,
         );
+        partii_gl_log("draw", &self.bound_program_name, format_args!("idx={index_count} inst={instance_count}"), partii_t0);
     }
 
     pub fn end_frame(&mut self) {
