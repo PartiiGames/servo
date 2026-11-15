@@ -291,6 +291,21 @@ impl Painter {
                     Some(webrender_api::units::DeviceIntSize::new(w.parse().ok()?, h.parse().ok()?))
                 }),
                 max_shared_surface_size,
+                // Partii (gaps-7): on a software GL, WebRender compiles shader variants on a
+                // background context of its own (webrender renderer/partii_precompile.rs).
+                partii_precompile_context: if software_gl {
+                    Some(Box::new(|| {
+                        let context = paint_api::rendering_context::SoftwareRenderingContext::new(
+                            PhysicalSize::new(64, 64),
+                        )
+                        .ok()?;
+                        context.make_current().ok()?;
+                        let gl = context.gleam_gl_api();
+                        Some((gl, Box::new(context) as Box<dyn std::any::Any>))
+                    }))
+                } else {
+                    None
+                },
                 ..Default::default()
             },
             None,

@@ -121,6 +121,7 @@ mod shade;
 mod vertex;
 mod upload;
 pub(crate) mod init;
+pub(crate) mod partii_precompile;
 
 use composite::LayerCompositorFrameState;
 
@@ -757,6 +758,8 @@ pub struct Renderer {
     /// had to draw off-screen (a replaced frame with picture-cache or texture-cache work) before the
     /// newest. More than one frame per update means the renderer is behind the backend.
     pub partii_update_frames: usize,
+    /// Partii (gaps-7): the off-frame-path precompile's pending replay (software GL only).
+    pub(crate) partii_precompile: Option<partii_precompile::PartiiPrecompile>,
     pub partii_update_offscreen: usize,
     result_rx: Receiver<ResultMsg>,
     api_tx: Sender<ApiMsg>,
@@ -1631,6 +1634,15 @@ impl Renderer {
             let _gm = self.gpu_profiler.start_marker("begin frame");
             let frame_id = self.device.begin_frame();
             self.gpu_profiler.begin_frame(frame_id);
+
+            // Partii (gaps-7): states compiled on the background context, replayed here a few ms
+            // per frame (renderer/partii_precompile.rs).
+            if let Some(mut pre) = self.partii_precompile.take() {
+                let more = pre.on_frame(&mut self.device, &mut self.shaders.borrow_mut(), &self.vaos);
+                if more {
+                    self.partii_precompile = Some(pre);
+                }
+            }
 
             self.device.disable_scissor();
             self.device.disable_depth();
