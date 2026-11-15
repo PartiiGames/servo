@@ -46,6 +46,28 @@ fn log_ms() -> Option<f64> {
     *MS.get_or_init(|| std::env::var("PARTII_WR_PRECOMPILE_LOG").ok().and_then(|v| v.parse().ok()))
 }
 
+/// Measurement: what a context is (version, profile, flags, a few limits), to compare the renderer's with ours.
+pub(crate) fn describe(gl: &dyn gleam::gl::Gl) -> String {
+    let mut v = [0i32; 1];
+    let mut get = |e: gleam::gl::GLenum| {
+        v[0] = -1;
+        unsafe { gl.get_integer_v(e, &mut v) };
+        v[0]
+    };
+    format!(
+        "version={:?} glsl={:?} profile_mask={} flags={} samples={} sample_buffers={} max_tex_units={} max_vert_uniforms={} ext={}",
+        gl.get_string(gleam::gl::VERSION),
+        gl.get_string(gleam::gl::SHADING_LANGUAGE_VERSION),
+        get(0x9126 /* CONTEXT_PROFILE_MASK */),
+        get(0x821E /* CONTEXT_FLAGS */),
+        get(gleam::gl::SAMPLES),
+        get(gleam::gl::SAMPLE_BUFFERS),
+        get(gleam::gl::MAX_COMBINED_TEXTURE_IMAGE_UNITS),
+        get(gleam::gl::MAX_VERTEX_UNIFORM_COMPONENTS),
+        get(0x821D /* NUM_EXTENSIONS */),
+    )
+}
+
 pub(crate) fn enabled() -> bool {
     std::env::var("PARTII_WR_PRECOMPILE").as_deref() != Ok("0")
 }
@@ -193,6 +215,9 @@ fn compile(
         return false;
     };
     let gl_type = gl.get_type();
+    if log_ms().is_some() {
+        eprintln!("partii-wr-precompile: background context {:?} {}", gl_type, describe(&*gl));
+    }
     let mut device = Device::new(
         gl,
         None,

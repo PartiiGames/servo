@@ -551,6 +551,10 @@ pub fn create_webrender_instance(
     // Partii (gaps-7): on a software GL, the seed's states this machine hasn't recorded and what the
     // start-up budget left are compiled on a background context, then replayed a few ms per frame
     // (renderer/partii_precompile.rs; PARTII_WR_PRECOMPILE=0 off).
+    if std::env::var_os("PARTII_WR_PRECOMPILE_LOG").is_some() {
+        eprintln!("partii-wr-precompile: renderer context {:?} {}", gl_type,
+            crate::renderer::partii_precompile::describe(device.gl()));
+    }
     let partii_precompile = match options.partii_precompile_context.take() {
         Some(make_context) if is_software_gl_name(&device.get_capabilities().renderer_name) &&
             crate::renderer::partii_precompile::enabled() => {
