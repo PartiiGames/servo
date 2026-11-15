@@ -2577,6 +2577,7 @@ impl Device {
         );
 
         assert!(!program.is_initialized());
+        let partii_t0 = partii_gl_t0();
         let mut build_program = true;
         let info = &program.source_info;
 
@@ -2698,6 +2699,7 @@ impl Device {
             }
         }
 
+        partii_gl_log("link", &program.source_info.full_name_cstr, format_args!("built={build_program}"), partii_t0);
         // If we get here, the link succeeded, so get the uniforms.
         program.is_initialized = true;
         program.u_transform = self.gl.get_uniform_location(program.id, "uTransform");
