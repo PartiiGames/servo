@@ -41,6 +41,11 @@ const RUNNING: u8 = 0;
 const DONE: u8 = 1;
 const FAILED: u8 = 2;
 
+fn log_ms() -> Option<f64> {
+    static MS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| std::env::var("PARTII_WR_PRECOMPILE_LOG").ok().and_then(|v| v.parse().ok()))
+}
+
 pub(crate) fn enabled() -> bool {
     std::env::var("PARTII_WR_PRECOMPILE").as_deref() != Ok("0")
 }
@@ -135,11 +140,25 @@ impl PartiiPrecompile {
                 break;
             }
             let entry = self.pending.pop_front().unwrap();
+            let t_entry = Instant::now();
+            let mut bind_ms = 0.0;
             if let Some(kind) = shaders.partii_bind(&entry.program, device) {
+                bind_ms = t_entry.elapsed().as_secs_f64() * 1000.0;
                 device.partii_warm_draw(&entry, &vaos[kind], &mut scratch);
                 self.replayed += 1;
             }
             drawn = true;
+            // Measurement: PARTII_WR_PRECOMPILE_LOG=<ms> logs each in-renderer replay of <ms> or more.
+            if let Some(min) = log_ms() {
+                let ms = t_entry.elapsed().as_secs_f64() * 1000.0;
+                if ms >= min {
+                    eprintln!(
+                        "partii-wr-precompile: slow replay {ms:.1} ms (bind {bind_ms:.1}) at {:.0} ms: {}",
+                        self.started.elapsed().as_secs_f64() * 1000.0,
+                        entry.to_line(),
+                    );
+                }
+            }
         }
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.frames += 1;
