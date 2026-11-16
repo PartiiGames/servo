@@ -121,11 +121,17 @@ fn fmt_parse(s: &str) -> Option<ImageFormat> {
 }
 
 impl WarmEntry {
-    /// The same state with another colour mask: another fragment variant of the same program
-    /// (precompile's second pass draws it first when the seed has one state of a program).
+    /// The same state with other sampler state (every unit's power-of-two flags flipped) and
+    /// another colour mask: another vertex and fragment variant of the same program (the
+    /// precompile's second pass draws it first, so that the program's NIR has been through a
+    /// variant build before its real state is compiled).
     pub(crate) fn partii_primer(&self) -> WarmEntry {
         let mut e = self.clone();
         e.color_mask = if e.color_mask == [true; 4] { [true, true, true, false] } else { [true; 4] };
+        for u in &mut e.units {
+            u.pot_w = !u.pot_w;
+            u.pot_h = !u.pot_h;
+        }
         e
     }
 
