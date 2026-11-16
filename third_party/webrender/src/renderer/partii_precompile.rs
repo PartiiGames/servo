@@ -19,6 +19,12 @@
 //!
 //! `PARTII_WR_PRECOMPILE=0` turns it off; `PARTII_WR_PRECOMPILE_FRAME_MS` is the per-frame
 //! budget of the in-renderer replay (default 4; one state at least per frame).
+//!
+//! At shutdown a thread still compiling is stopped and waited for (`PartiiPrecompile::stop`, from
+//! `Renderer::deinit` and on drop): it checks a flag between draws, releases its programs and drops
+//! its context. Left running, it was still inside Mesa when the app tore GL down and exited, and
+//! the first (cold) launch of the farm's play test exited 127 instead of 0 (gaps-7: brawlii-versus
+//! and classic-3d, runs 2026-11-16T0504Z / 0837Z, once the second pass made a cold compile 14-26 s).
 
 use crate::device::{Device, UploadMethod, WarmEntry, WarmScratch};
 use crate::renderer::{shade::Shaders, vertex};
@@ -27,7 +33,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,6 +46,10 @@ pub type PartiiPrecompileContext =
 const RUNNING: u8 = 0;
 const DONE: u8 = 1;
 const FAILED: u8 = 2;
+/// Stopped at shutdown before it finished: nothing to replay.
+const STOPPED: u8 = 3;
+/// How long shutdown waits for the thread to see the stop flag (one draw: a variant compile).
+const STOP_WAIT: Duration = Duration::from_secs(3);
 
 pub(crate) fn enabled() -> bool {
     std::env::var("PARTII_WR_PRECOMPILE").as_deref() != Ok("0")
@@ -62,6 +72,8 @@ pub(crate) struct PrecompileConfig {
 /// The renderer's side: the states to replay once the background thread is done.
 pub(crate) struct PartiiPrecompile {
     state: Arc<AtomicU8>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
     pending: VecDeque<WarmEntry>,
     scratch: Option<WarmScratch>,
     budget: Duration,
@@ -83,23 +95,34 @@ impl PartiiPrecompile {
             return None;
         }
         let state = Arc::new(AtomicU8::new(RUNNING));
+        let stop = Arc::new(AtomicBool::new(false));
         let thread_state = state.clone();
+        let thread_stop = stop.clone();
         let thread_entries = entries.clone();
         let spawned = std::thread::Builder::new()
             .name("WRPrecompile".to_owned())
             .spawn(move || {
-                let ok = compile(thread_entries, make_context, config);
-                thread_state.store(if ok { DONE } else { FAILED }, Ordering::Release);
+                let ok = compile(thread_entries, make_context, config, &thread_stop);
+                let end = if thread_stop.load(Ordering::Acquire) {
+                    STOPPED
+                } else if ok {
+                    DONE
+                } else {
+                    FAILED
+                };
+                thread_state.store(end, Ordering::Release);
             });
-        if spawned.is_err() {
+        let Ok(thread) = spawned else {
             return None;
-        }
+        };
         let budget_ms: u64 = std::env::var("PARTII_WR_PRECOMPILE_FRAME_MS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
         Some(PartiiPrecompile {
             state,
+            stop,
+            thread: Some(thread),
             total: entries.len(),
             pending: entries.into(),
             scratch: Some(WarmScratch::default()),
@@ -121,6 +144,7 @@ impl PartiiPrecompile {
     ) -> bool {
         match self.state.load(Ordering::Acquire) {
             RUNNING => return true,
+            STOPPED => return false,
             FAILED => {
                 eprintln!("partii-wr-precompile: the background context failed; nothing replayed");
                 return false;
@@ -162,12 +186,50 @@ impl PartiiPrecompile {
     }
 }
 
+impl PartiiPrecompile {
+    /// Shutdown: tells a thread still compiling to stop after its current draw and waits (at most
+    /// `STOP_WAIT`) for it to release its programs and context, so it is out of GL before the
+    /// renderer and the embedder tear GL down. Idempotent; a finished thread is just joined.
+    pub(crate) fn stop(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        self.stop.store(true, Ordering::Release);
+        let t0 = Instant::now();
+        while self.state.load(Ordering::Acquire) == RUNNING && t0.elapsed() < STOP_WAIT {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if self.state.load(Ordering::Acquire) == RUNNING {
+            eprintln!(
+                "partii-wr-precompile: still compiling {:.0} ms after the stop; not waiting",
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+            return;
+        }
+        let _ = thread.join();
+        if self.state.load(Ordering::Acquire) == STOPPED {
+            eprintln!(
+                "partii-wr-precompile: stopped at shutdown ({:.0} ms after start, waited {:.0} ms)",
+                self.started.elapsed().as_secs_f64() * 1000.0,
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+}
+
+impl Drop for PartiiPrecompile {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// The background thread: a device and WebRender's programs on its own context, every entry drawn
-/// once so Mesa compiles (and caches on disk) its variants.
+/// once so Mesa compiles (and caches on disk) its variants. `stop` (shutdown) ends it between draws.
 fn compile(
     entries: Vec<WarmEntry>,
     make_context: PartiiPrecompileContext,
     config: PrecompileConfig,
+    stop: &AtomicBool,
 ) -> bool {
     let t0 = Instant::now();
     let Some((gl, keep)) = make_context() else {
@@ -211,12 +273,17 @@ fn compile(
     let mut scratch = WarmScratch::default();
     let mut drawn = 0;
     for entry in &entries {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         if let Some(kind) = shaders.partii_bind(&entry.program, &mut device) {
             device.partii_warm_draw(entry, &vaos[kind], &mut scratch);
             drawn += 1;
         }
     }
-    second_pass(&mut device, gl_type, &options, &entries, &vaos, &mut scratch);
+    if !stop.load(Ordering::Acquire) {
+        second_pass(&mut device, gl_type, &options, &entries, &vaos, &mut scratch, stop);
+    }
     device.partii_warm_finish(scratch);
     eprintln!(
         "partii-wr-precompile: {drawn} of {} states compiled on a background context in {:.0} ms",
@@ -251,6 +318,7 @@ fn second_pass(
     entries: &[WarmEntry],
     vaos: &vertex::RendererVAOs,
     scratch: &mut WarmScratch,
+    stop: &AtomicBool,
 ) {
     if std::env::var("PARTII_WR_PRECOMPILE_SECOND").as_deref() == Ok("0") {
         return;
@@ -271,6 +339,9 @@ fn second_pass(
     };
     let mut drawn = 0;
     for &first in &firsts {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         let Some(kind) = shaders.partii_bind(&first.program, device) else {
             continue;
         };

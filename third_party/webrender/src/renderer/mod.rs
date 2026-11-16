@@ -4507,6 +4507,11 @@ impl Renderer {
 
     // De-initialize the Renderer safely, assuming the GL is still alive and active.
     pub fn deinit(mut self) {
+        // Partii (gaps-7): a precompile thread still compiling leaves GL before this one is torn
+        // down (renderer/partii_precompile.rs).
+        if let Some(mut pre) = self.partii_precompile.take() {
+            pre.stop();
+        }
         //Note: this is a fake frame, only needed because texture deletion is require to happen inside a frame
         self.device.begin_frame();
         // If we are using a native compositor, ensure that any remaining native
