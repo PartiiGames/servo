@@ -287,15 +287,18 @@ fn compile(
     true
 }
 
-/// Mesa's llvmpipe keys its disk cache on the shader's NIR, and building a variant runs gallivm's
-/// prepasses on that NIR in place (out of SSA, locals to registers: lp_build_nir_soa). So in each
-/// context a program's first variant is keyed on the NIR as linked and every later variant on the
-/// rewritten NIR, and a state misses the cache across two contexts when it was its program's first
-/// draw in one and not in the other. The loop above compiles each program's first seed state as a
-/// first variant; the renderer, which has usually drawn that program already, looks it up as a
-/// later one (gaps-7: 8-9 of the ~10 slow replays of a cold run were programs' first states). So,
-/// on a second set of program objects (programs link lazily): one other state of the program first
-/// (its first-variant key, which the renderer can need too), then the first state again.
+/// Mesa's llvmpipe keys its disk cache on the variant key plus the shader's NIR, and building a
+/// variant runs gallivm's prepasses on that NIR in place (out of SSA, locals to registers:
+/// lp_build_nir_soa, for the draw module's vertex shaders as for fragment shaders). So in each
+/// context a program's first variant is keyed on the NIR as linked and every later one on the
+/// rewritten NIR. The renderer has usually drawn a program with its real textures (one vertex
+/// variant) before it replays the program's first seed state with the scratch textures (another
+/// vertex key), which it then builds on rewritten NIR; the loop above built that key as the
+/// program's first variant, on the NIR as linked, so the renderer missed: a 70-100 ms vertex
+/// compile per program (gaps-7: 8-9 of the ~10 slow replays of a cold run, GALLIVM_DEBUG=perf).
+/// Later states of a program share its vertex key and hit. So, on a second set of program objects
+/// (programs link lazily): each program's first state with other sampler state first (another
+/// vertex and fragment key, which rewrites the NIR), then the first state itself.
 /// `PARTII_WR_PRECOMPILE_SECOND=0` skips it.
 fn second_pass(
     device: &mut Device,
@@ -309,14 +312,10 @@ fn second_pass(
         return;
     }
     let t0 = Instant::now();
-    let mut firsts: Vec<(&WarmEntry, Option<&WarmEntry>)> = Vec::new();
+    let mut firsts: Vec<&WarmEntry> = Vec::new();
     for e in entries {
-        if let Some(slot) = firsts.iter_mut().find(|slot| slot.0.program == e.program) {
-            if slot.1.is_none() {
-                slot.1 = Some(e);
-            }
-        } else {
-            firsts.push((e, None));
+        if !firsts.iter().any(|f| f.program == e.program) {
+            firsts.push(e);
         }
     }
     let mut shaders = match Shaders::new(device, gl_type, options) {
@@ -327,15 +326,11 @@ fn second_pass(
         },
     };
     let mut drawn = 0;
-    for &(first, second) in &firsts {
+    for &first in &firsts {
         let Some(kind) = shaders.partii_bind(&first.program, device) else {
             continue;
         };
-        let primer = match second {
-            Some(s) => s.clone(),
-            None => first.partii_primer(),
-        };
-        device.partii_warm_draw(&primer, &vaos[kind], scratch);
+        device.partii_warm_draw(&first.partii_primer(), &vaos[kind], scratch);
         device.partii_warm_draw(first, &vaos[kind], scratch);
         drawn += 1;
     }
