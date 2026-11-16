@@ -216,6 +216,7 @@ fn compile(
             drawn += 1;
         }
     }
+    second_pass(&mut device, gl_type, &options, &entries, &vaos, &mut scratch);
     device.partii_warm_finish(scratch);
     eprintln!(
         "partii-wr-precompile: {drawn} of {} states compiled on a background context in {:.0} ms",
@@ -228,4 +229,64 @@ fn compile(
     drop(device);
     drop(keep);
     true
+}
+
+/// Mesa's llvmpipe keys its disk cache on the shader's NIR, and building a variant runs gallivm's
+/// prepasses on that NIR in place (out of SSA, locals to registers: lp_build_nir_soa). So in each
+/// context a program's first variant is keyed on the NIR as linked and every later variant on the
+/// rewritten NIR, and a state misses the cache across two contexts when it was its program's first
+/// draw in one and not in the other. The loop above compiles each program's first seed state as a
+/// first variant; the renderer, which has usually drawn that program already, looks it up as a
+/// later one (gaps-7: 8-9 of the ~10 slow replays of a cold run were programs' first states). So,
+/// on a second set of program objects (programs link lazily): one other state of the program first
+/// (its first-variant key, which the renderer can need too), then the first state again.
+/// `PARTII_WR_PRECOMPILE_SECOND=0` skips it.
+fn second_pass(
+    device: &mut Device,
+    gl_type: gleam::gl::GlType,
+    options: &WebRenderOptions,
+    entries: &[WarmEntry],
+    vaos: &vertex::RendererVAOs,
+    scratch: &mut WarmScratch,
+) {
+    if std::env::var("PARTII_WR_PRECOMPILE_SECOND").as_deref() == Ok("0") {
+        return;
+    }
+    let t0 = Instant::now();
+    let mut firsts: Vec<(&WarmEntry, Option<&WarmEntry>)> = Vec::new();
+    for e in entries {
+        if let Some(slot) = firsts.iter_mut().find(|slot| slot.0.program == e.program) {
+            if slot.1.is_none() {
+                slot.1 = Some(e);
+            }
+        } else {
+            firsts.push((e, None));
+        }
+    }
+    let mut shaders = match Shaders::new(device, gl_type, options) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("partii-wr-precompile: second program set failed: {e:?}");
+            return;
+        },
+    };
+    let mut drawn = 0;
+    for &(first, second) in &firsts {
+        let Some(kind) = shaders.partii_bind(&first.program, device) else {
+            continue;
+        };
+        let primer = match second {
+            Some(s) => s.clone(),
+            None => first.partii_primer(),
+        };
+        device.partii_warm_draw(&primer, &vaos[kind], scratch);
+        device.partii_warm_draw(first, &vaos[kind], scratch);
+        drawn += 1;
+    }
+    shaders.deinit(device);
+    eprintln!(
+        "partii-wr-precompile: second pass: {drawn} of {} programs' first states as later variants in {:.0} ms",
+        firsts.len(),
+        t0.elapsed().as_secs_f64() * 1000.0,
+    )
 }
