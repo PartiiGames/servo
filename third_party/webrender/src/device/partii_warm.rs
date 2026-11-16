@@ -121,6 +121,14 @@ fn fmt_parse(s: &str) -> Option<ImageFormat> {
 }
 
 impl WarmEntry {
+    /// The same state with another colour mask: another fragment variant of the same program
+    /// (precompile's second pass draws it first when the seed has one state of a program).
+    pub(crate) fn partii_primer(&self) -> WarmEntry {
+        let mut e = self.clone();
+        e.color_mask = if e.color_mask == [true; 4] { [true, true, true, false] } else { [true; 4] };
+        e
+    }
+
     /// `prog|tgt|s0,s1,..|cmask|unit:target:fmt:pw:ph:min:mag:r,g,b,a;...`
     pub(crate) fn to_line(&self) -> String {
         let tgt = match self.target {
