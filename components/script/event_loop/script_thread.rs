@@ -1725,8 +1725,8 @@ impl ScriptThread {
                 .perform_a_dom_garbage_collection_checkpoint();
         }
 
-        let built_any_display_lists =
-            self.needs_rendering_update.load(Ordering::Relaxed) && self.update_the_rendering(cx);
+        let rendering = self.needs_rendering_update.load(Ordering::Relaxed);
+        let built_any_display_lists = rendering && self.update_the_rendering(cx);
 
         self.maybe_fulfill_font_ready_promises(cx);
         self.maybe_resolve_pending_screenshot_readiness_requests(cx);
@@ -1737,7 +1737,12 @@ impl ScriptThread {
             built_any_display_lists,
         );
 
-        // A periodic GC, if one is due, right after the frame (runtime/gc_scheduler.rs).
+        // A periodic GC, if one is due, right after the frame (runtime/gc_scheduler.rs), in the
+        // time left before the next frame or timer when its slices are frame-aligned.
+        gc_scheduler::note_turn(gc_scheduler::Turn {
+            rendered: rendering,
+            deadline: self.idle_deadline_limit_now(),
+        });
         gc_scheduler::after_tasks(cx, gc_scheduler::Kind::Window);
 
         true

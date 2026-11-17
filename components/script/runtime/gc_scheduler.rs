@@ -60,6 +60,23 @@
 //! slice that starts sweeping keeps its budget, so sweeping is sliced too and script runs while
 //! zones are being swept. The expose barrier and the per-sweep-group remark stay on (later sweep
 //! groups still mark), and `WeakRef` treats a dead object that isn't finalized yet as gone.
+//!
+//! **Short slices** (gc-fast): `PARTII_GC_SLICE_US` sets the slice budget in microseconds (it wins
+//! over `PARTII_GC_SLICE_MS`; SpiderMonkey's own slices get it rounded to whole ms, at least 1).
+//!
+//! **Frame-aligned slices** (`PARTII_GC_FRAME_ALIGN=1`, window only): while the page animates (or a
+//! timer is due), our slices, the split nursery collection and the start of a periodic GC run only
+//! in the time left before the next frame or timer (`ScriptThread::idle_deadline_limit`, less a
+//! 1 ms margin), as Blink gives V8 the idle time between frames. A slice gets the smaller of that
+//! time and the slice budget, and waits for a later turn when less than `PARTII_GC_SLICE_MIN_US`
+//! (default 1000) is left; after a rendering update it needn't wait out `PARTII_GC_SLICE_GAP_MS`.
+//! A GC whose last slice is 100 ms old takes a minimum slice anyway, so a page that never leaves
+//! room still finishes its GCs. `PARTII_GC_IDLE_NURSERY=1` also lets SpiderMonkey empty the nursery
+//! after a frame when it is past its eager threshold (`JS::MaybeRunNurseryCollection`) and at least
+//! 4 ms are left, so the next frame's script doesn't hit a full nursery.
+//!
+//! `PARTII_GC_PARAMS` (measurement) also takes the nursery and parallel marking parameters (see
+//! `init_runtime`); `PARTII_GC_PARAMS_LOG=1` prints a runtime's GC parameters once, after them.
 
 #![allow(unsafe_code)]
 
@@ -101,6 +118,12 @@ struct Config {
     incremental: bool,
     /// Target length of a marking slice.
     slice: Duration,
+    /// Frame-aligned slices: the shortest slice worth running in the time left before a frame.
+    slice_min: Duration,
+    /// Window slices run in the time left before the next frame or timer (gc-fast).
+    frame_align: bool,
+    /// After a frame, let SpiderMonkey empty the nursery if it is past its eager threshold.
+    idle_nursery: bool,
     /// Least time between two marking slices.
     slice_gap: Duration,
     /// An incremental GC still running after this long is finished in one go.
@@ -138,6 +161,75 @@ fn env_ms(name: &str, default: u64) -> Duration {
     )
 }
 
+fn env_us(name: &str) -> Option<Duration> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_micros)
+}
+
+/// `name=1` on, `name=0` off, anything else `default`.
+fn env_switch(name: &str, default: bool) -> bool {
+    match std::env::var(name).as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => default,
+    }
+}
+
+/// Whether window slices are frame-aligned unless `PARTII_GC_FRAME_ALIGN` says otherwise.
+const FRAME_ALIGN_DEFAULT: bool = false;
+
+/// What the script thread's last turn did, for frame-aligned slices: whether it ran a rendering
+/// update, and the next frame or timer (`None`: nothing limits the turn).
+#[derive(Clone, Copy)]
+pub(crate) struct Turn {
+    pub(crate) rendered: bool,
+    pub(crate) deadline: Option<Instant>,
+}
+
+thread_local! {
+    static TURN: Cell<Turn> = const { Cell::new(Turn { rendered: false, deadline: None }) };
+}
+
+/// Called by the script thread right before `after_tasks`.
+pub(crate) fn note_turn(turn: Turn) {
+    TURN.with(|t| t.set(turn));
+}
+
+/// Kept free before the next frame or timer.
+const FRAME_MARGIN: Duration = Duration::from_millis(1);
+/// A frame-aligned GC whose last slice is this old takes a minimum slice on any turn.
+const FRAME_ALIGN_STARVED: Duration = Duration::from_millis(100);
+
+/// Time left on this turn before the next frame or timer, less the margin, when window slices are
+/// frame-aligned and something limits the turn; `None` otherwise (no limit).
+fn frame_room(kind: Kind, now: Instant) -> Option<Duration> {
+    if kind != Kind::Window || !config().frame_align {
+        return None;
+    }
+    TURN.with(Cell::get).deadline.map(|d| {
+        d.saturating_duration_since(now)
+            .saturating_sub(FRAME_MARGIN)
+    })
+}
+
+/// The budget of a slice of ours on this turn, or `None` to wait for a later turn.
+fn slice_now(kind: Kind, now: Instant, last_slice: Instant) -> Option<Duration> {
+    let config = config();
+    let since = now.saturating_duration_since(last_slice);
+    let Some(room) = frame_room(kind, now) else {
+        return (since >= config.slice_gap).then_some(config.slice);
+    };
+    if since >= FRAME_ALIGN_STARVED {
+        return Some(config.slice_min.min(config.slice));
+    }
+    if !TURN.with(Cell::get).rendered && since < config.slice_gap {
+        return None;
+    }
+    (room >= config.slice_min).then(|| room.min(config.slice))
+}
+
 fn config() -> &'static Config {
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(|| Config {
@@ -165,7 +257,10 @@ fn config() -> &'static Config {
                 Ok("0") => false,
                 _ => incremental_gc::black_remark_available(),
             },
-        slice: env_ms("PARTII_GC_SLICE_MS", 5),
+        slice: env_us("PARTII_GC_SLICE_US").unwrap_or_else(|| env_ms("PARTII_GC_SLICE_MS", 5)),
+        slice_min: env_us("PARTII_GC_SLICE_MIN_US").unwrap_or(Duration::from_millis(1)),
+        frame_align: env_switch("PARTII_GC_FRAME_ALIGN", FRAME_ALIGN_DEFAULT),
+        idle_nursery: env_switch("PARTII_GC_IDLE_NURSERY", false),
         slice_gap: env_ms("PARTII_GC_SLICE_GAP_MS", 10),
         incremental_max: env_ms("PARTII_GC_INCREMENTAL_MAX_MS", 2000),
         sm_slices: !matches!(std::env::var("PARTII_GC_SM_SLICES").as_deref(), Ok("0")),
@@ -439,6 +534,17 @@ pub(crate) fn after_tasks(cx: &mut JSContext, kind: Kind) {
         if config.incremental && incremental_step(cx, state, kind, now) {
             return;
         }
+        if config.idle_nursery
+            && TURN.with(Cell::get).rendered
+            && frame_room(kind, now).is_some_and(|room| room >= Duration::from_millis(4))
+        {
+            unsafe {
+                js::jsapi::JS::MaybeRunNurseryCollection(
+                    JS_GetRuntime(cx),
+                    GCReason::EAGER_NURSERY_COLLECTION,
+                );
+            }
+        }
         if !state.tuned.replace(true) {
             if config.finalize_stats {
                 script_bindings::set_finalize_stats(true);
@@ -467,6 +573,13 @@ pub(crate) fn after_tasks(cx: &mut JSContext, kind: Kind) {
         if bytes < state.bytes_after.get().saturating_add(MIN_GROWTH_BYTES) {
             // Too little garbage since the last GC to be worth one, asked for or not.
             REQUESTED.with(|r| r.set(false));
+            return;
+        }
+        // Frame-aligned: a nursery collection or a first slice only where a minimum slice fits
+        // (unless the GC is three periods late: then on any turn).
+        if frame_room(kind, now).is_some_and(|room| room < config.slice_min)
+            && now - state.last_major.get() < period * 3
+        {
             return;
         }
         if config.split_nursery {
@@ -715,6 +828,23 @@ pub(crate) unsafe fn init_runtime(
                     "HELPER_THREAD_RATIO" => JSGCParamKey::JSGC_HELPER_THREAD_RATIO,
                     "MAX_HELPER_THREADS" => JSGCParamKey::JSGC_MAX_HELPER_THREADS,
                     "URGENT_THRESHOLD_MB" => JSGCParamKey::JSGC_URGENT_THRESHOLD_MB,
+                    "PARALLEL_MARKING_THRESHOLD_MB" => {
+                        JSGCParamKey::JSGC_PARALLEL_MARKING_THRESHOLD_MB
+                    },
+                    "MAX_MARKING_THREADS" => JSGCParamKey::JSGC_MAX_MARKING_THREADS,
+                    "MIN_NURSERY_BYTES" => JSGCParamKey::JSGC_MIN_NURSERY_BYTES,
+                    "MAX_NURSERY_BYTES" => JSGCParamKey::JSGC_MAX_NURSERY_BYTES,
+                    "NURSERY_MAX_TIME_GOAL_MS" => JSGCParamKey::JSGC_NURSERY_MAX_TIME_GOAL_MS,
+                    "NURSERY_EAGER_COLLECTION_THRESHOLD_KB" => {
+                        JSGCParamKey::JSGC_NURSERY_EAGER_COLLECTION_THRESHOLD_KB
+                    },
+                    "NURSERY_EAGER_COLLECTION_THRESHOLD_PERCENT" => {
+                        JSGCParamKey::JSGC_NURSERY_EAGER_COLLECTION_THRESHOLD_PERCENT
+                    },
+                    "NURSERY_EAGER_COLLECTION_TIMEOUT_MS" => {
+                        JSGCParamKey::JSGC_NURSERY_EAGER_COLLECTION_TIMEOUT_MS
+                    },
+                    "SEMISPACE_NURSERY_ENABLED" => JSGCParamKey::JSGC_SEMISPACE_NURSERY_ENABLED,
                     _ => {
                         eprintln!("[gc-sched] PARTII_GC_PARAMS: unknown {name}");
                         continue;
@@ -725,6 +855,65 @@ pub(crate) unsafe fn init_runtime(
                     Err(_) => eprintln!("[gc-sched] PARTII_GC_PARAMS: {kv} is not NAME=number"),
                 }
             }
+        }
+        if matches!(std::env::var("PARTII_GC_PARAMS_LOG").as_deref(), Ok("1")) {
+            let keys = [
+                (
+                    "SLICE_TIME_BUDGET_MS",
+                    JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS,
+                ),
+                (
+                    "INCREMENTAL_GC_ENABLED",
+                    JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED,
+                ),
+                (
+                    "PER_ZONE_GC_ENABLED",
+                    JSGCParamKey::JSGC_PER_ZONE_GC_ENABLED,
+                ),
+                ("COMPACTING_ENABLED", JSGCParamKey::JSGC_COMPACTING_ENABLED),
+                (
+                    "PARALLEL_MARKING_ENABLED",
+                    JSGCParamKey::JSGC_PARALLEL_MARKING_ENABLED,
+                ),
+                (
+                    "PARALLEL_MARKING_THRESHOLD_MB",
+                    JSGCParamKey::JSGC_PARALLEL_MARKING_THRESHOLD_MB,
+                ),
+                (
+                    "MARKING_THREAD_COUNT",
+                    JSGCParamKey::JSGC_MARKING_THREAD_COUNT,
+                ),
+                (
+                    "HELPER_THREAD_COUNT",
+                    JSGCParamKey::JSGC_HELPER_THREAD_COUNT,
+                ),
+                ("MIN_NURSERY_BYTES", JSGCParamKey::JSGC_MIN_NURSERY_BYTES),
+                ("MAX_NURSERY_BYTES", JSGCParamKey::JSGC_MAX_NURSERY_BYTES),
+                ("NURSERY_BYTES", JSGCParamKey::JSGC_NURSERY_BYTES),
+                (
+                    "NURSERY_MAX_TIME_GOAL_MS",
+                    JSGCParamKey::JSGC_NURSERY_MAX_TIME_GOAL_MS,
+                ),
+                (
+                    "SEMISPACE_NURSERY_ENABLED",
+                    JSGCParamKey::JSGC_SEMISPACE_NURSERY_ENABLED,
+                ),
+                (
+                    "HIGH_FREQUENCY_TIME_LIMIT",
+                    JSGCParamKey::JSGC_HIGH_FREQUENCY_TIME_LIMIT,
+                ),
+            ];
+            let line: Vec<String> = keys
+                .iter()
+                .map(|(name, key)| format!("{name}={}", param(cx, *key)))
+                .collect();
+            eprintln!(
+                "[gc-sched] params: {} slice={}us frame_align={} idle_nursery={}",
+                line.join(" "),
+                config.slice.as_micros(),
+                config.frame_align,
+                config.idle_nursery
+            );
         }
         let raw = cx.raw_cx();
         SetGrayGCRootsTracer(raw, Some(gray_roots), roots_data);
@@ -931,7 +1120,11 @@ fn start_incremental(cx: &mut JSContext, state: &State, kind: Kind) {
     let started = Instant::now();
     SM_SLICES.with(|s| s.set(Default::default()));
     BLACK_REMARKS.with(|b| b.set(Default::default()));
-    let budget = time_budget(config().slice);
+    let first = frame_room(kind, started).map_or(config().slice, |room| {
+        room.min(config().slice)
+            .max(config().slice_min.min(config().slice))
+    });
+    let budget = time_budget(first);
     our_slice(|| unsafe {
         PrepareForFullGC(cx);
         StartIncrementalGC(cx, GCOptions::Normal, GCReason::FULL_GC_TIMER, &budget);
@@ -973,9 +1166,9 @@ fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant)
         finish_log(cx, state, kind, gc, "finished by SpiderMonkey");
         return false;
     }
-    if now - gc.last_slice < config().slice_gap {
+    let Some(slice) = slice_now(kind, now, gc.last_slice) else {
         return true;
-    }
+    };
     let started = Instant::now();
     black_remark_before_slice(unsafe { cx.raw_cx() });
     if started - gc.started > config().incremental_max {
@@ -988,7 +1181,7 @@ fn incremental_step(cx: &mut JSContext, state: &State, kind: Kind, now: Instant)
         finish_log(cx, state, kind, gc, "over its time limit, finished");
         return true;
     }
-    let budget = time_budget(config().slice);
+    let budget = time_budget(slice);
     our_slice(|| unsafe { IncrementalGCSlice(cx, GCReason::FULL_GC_TIMER, &budget) });
     after_slice(cx, state, kind, gc, started);
     true
