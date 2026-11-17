@@ -816,11 +816,11 @@ pub(crate) unsafe fn init_runtime(
             0
         };
         JS_SetGCParameter(cx, JSGCParamKey::JSGC_SLICE_TIME_BUDGET_MS, sm_budget);
-        // PARTII_GC_PARAMS="NAME=N,..." (measurement): SpiderMonkey's GC helper-thread parameters, e.g.
+        // PARTII_GC_PARAMS="NAME=N,..." (or "+" between them, for env lists split at commas; measurement): SpiderMonkey's GC helper-thread parameters, e.g.
         // PARALLEL_MARKING_ENABLED=0 or MARKING_THREAD_COUNT=1, to see whether a slice waits on helper
         // threads that a busy node (llvmpipe's rasterizer threads) starves.
         if let Ok(spec) = std::env::var("PARTII_GC_PARAMS") {
-            for kv in spec.split(',').filter(|kv| !kv.is_empty()) {
+            for kv in spec.split([',', '+']).filter(|kv| !kv.is_empty()) {
                 let (name, value) = kv.split_once('=').unwrap_or((kv, ""));
                 let key = match name {
                     "PARALLEL_MARKING_ENABLED" => JSGCParamKey::JSGC_PARALLEL_MARKING_ENABLED,

@@ -43,6 +43,9 @@ struct DroppableWebGLProgram {
     vertex_shader: Option<WeakRef<WebGLShader>>,
     marked_for_deletion: bool,
     is_in_use: bool,
+    /// Set by `Drop`: commands go out fallibly. Drop runs inside a GC slice, where a WebGL thread
+    /// that is already gone (page teardown) must not panic the script thread (gc-fast-2 audit).
+    dropping: bool,
 }
 
 impl DroppableWebGLProgram {
@@ -54,6 +57,7 @@ impl DroppableWebGLProgram {
             vertex_shader: None,
             marked_for_deletion: Default::default(),
             is_in_use: Default::default(),
+            dropping: false,
         }
     }
 }
@@ -136,7 +140,12 @@ impl DroppableWebGLProgram {
     }
 
     fn send_command(&self, command: WebGLCommand) {
-        self.send_with_fallibility(command, Operation::Infallible);
+        let fallibility = if self.dropping {
+            Operation::Fallible
+        } else {
+            Operation::Infallible
+        };
+        self.send_with_fallibility(command, fallibility);
     }
 
     fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
@@ -172,6 +181,7 @@ impl DroppableWebGLProgram {
 
 impl Drop for DroppableWebGLProgram {
     fn drop(&mut self) {
+        self.dropping = true;
         self.in_use(false);
         self.mark_for_deletion(Operation::Fallible);
     }
