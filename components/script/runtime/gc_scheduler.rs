@@ -40,7 +40,7 @@
 //! **Incremental marking** (`PARTII_GC_INCREMENTAL`; not on Windows; by default on exactly when
 //! sweeping can be sliced as well, i.e. the barrier tracer shim is built, see below; `=0` turns it
 //! off, `=1` forces it on without the shim): a periodic GC
-//! marks in slices of `PARTII_GC_SLICE_MS` (default 5) at most every `PARTII_GC_SLICE_GAP_MS`
+//! marks in slices of `PARTII_GC_SLICE_MS` (default 2) at most every `PARTII_GC_SLICE_GAP_MS`
 //! (default 10), from the event loops, and sweeps in one pause: as soon as sweeping starts the GC is
 //! finished before any script runs again. The DOM's Rust edges have no write barriers, so `script_bindings::
 //! incremental_gc` shades every reflector Rust hands out while marking, and re-traces the Rust roots
@@ -64,14 +64,14 @@
 //! **Short slices** (gc-fast): `PARTII_GC_SLICE_US` sets the slice budget in microseconds (it wins
 //! over `PARTII_GC_SLICE_MS`; SpiderMonkey's own slices get it rounded to whole ms, at least 1).
 //!
-//! **Frame-aligned slices** (`PARTII_GC_FRAME_ALIGN=1`, window only): while the page animates (or a
+//! **Frame-aligned slices** (`PARTII_GC_FRAME_ALIGN`, on by default since gc-fast-2, `=0` off; window only): while the page animates (or a
 //! timer is due), our slices, the split nursery collection and the start of a periodic GC run only
 //! in the time left before the next frame or timer (`ScriptThread::idle_deadline_limit`, less a
 //! 1 ms margin), as Blink gives V8 the idle time between frames. A slice gets the smaller of that
 //! time and the slice budget, and waits for a later turn when less than `PARTII_GC_SLICE_MIN_US`
 //! (default 1000) is left; after a rendering update it needn't wait out `PARTII_GC_SLICE_GAP_MS`.
 //! A GC whose last slice is 100 ms old takes a minimum slice anyway, so a page that never leaves
-//! room still finishes its GCs. `PARTII_GC_IDLE_NURSERY=1` also lets SpiderMonkey empty the nursery
+//! room still finishes its GCs. `PARTII_GC_IDLE_NURSERY` (on by default since gc-fast-2; `=0` off) also lets SpiderMonkey empty the nursery
 //! after a frame when it is past its eager threshold (`JS::MaybeRunNurseryCollection`) and at least
 //! 4 ms are left, so the next frame's script doesn't hit a full nursery.
 //!
@@ -178,7 +178,15 @@ fn env_switch(name: &str, default: bool) -> bool {
 }
 
 /// Whether window slices are frame-aligned unless `PARTII_GC_FRAME_ALIGN` says otherwise.
-const FRAME_ALIGN_DEFAULT: bool = false;
+const FRAME_ALIGN_DEFAULT: bool = true;
+/// Defaults from gc-fast (frames A/B 397aaae8, 9e93e105, 915bb056 on ohanarestore; GC p99 like for like): 2 ms slices,
+/// frame-aligned window slices, the idle nursery collection, parallel marking and a 4 MB nursery cap. Each has its
+/// switch: PARTII_GC_SLICE_MS / _US, PARTII_GC_FRAME_ALIGN=0, PARTII_GC_IDLE_NURSERY=0, and PARTII_GC_PARAMS
+/// (PARALLEL_MARKING_ENABLED=0, MAX_NURSERY_BYTES=67108864 = SpiderMonkey's own) overrides the two parameters.
+const SLICE_MS_DEFAULT: u64 = 2;
+const IDLE_NURSERY_DEFAULT: bool = true;
+const PARALLEL_MARKING_DEFAULT: u32 = 1;
+const MAX_NURSERY_BYTES_DEFAULT: u32 = 4 * 1024 * 1024;
 
 /// What the script thread's last turn did, for frame-aligned slices: whether it ran a rendering
 /// update, and the next frame or timer (`None`: nothing limits the turn).
@@ -257,10 +265,11 @@ fn config() -> &'static Config {
                 Ok("0") => false,
                 _ => incremental_gc::black_remark_available(),
             },
-        slice: env_us("PARTII_GC_SLICE_US").unwrap_or_else(|| env_ms("PARTII_GC_SLICE_MS", 5)),
+        slice: env_us("PARTII_GC_SLICE_US")
+            .unwrap_or_else(|| env_ms("PARTII_GC_SLICE_MS", SLICE_MS_DEFAULT)),
         slice_min: env_us("PARTII_GC_SLICE_MIN_US").unwrap_or(Duration::from_millis(1)),
         frame_align: env_switch("PARTII_GC_FRAME_ALIGN", FRAME_ALIGN_DEFAULT),
-        idle_nursery: env_switch("PARTII_GC_IDLE_NURSERY", false),
+        idle_nursery: env_switch("PARTII_GC_IDLE_NURSERY", IDLE_NURSERY_DEFAULT),
         slice_gap: env_ms("PARTII_GC_SLICE_GAP_MS", 10),
         incremental_max: env_ms("PARTII_GC_INCREMENTAL_MAX_MS", 2000),
         sm_slices: !matches!(std::env::var("PARTII_GC_SM_SLICES").as_deref(), Ok("0")),
@@ -819,6 +828,16 @@ pub(crate) unsafe fn init_runtime(
         // PARTII_GC_PARAMS="NAME=N,..." (or "+" between them, for env lists split at commas; measurement): SpiderMonkey's GC helper-thread parameters, e.g.
         // PARALLEL_MARKING_ENABLED=0 or MARKING_THREAD_COUNT=1, to see whether a slice waits on helper
         // threads that a busy node (llvmpipe's rasterizer threads) starves.
+        JS_SetGCParameter(
+            cx,
+            JSGCParamKey::JSGC_PARALLEL_MARKING_ENABLED,
+            PARALLEL_MARKING_DEFAULT,
+        );
+        JS_SetGCParameter(
+            cx,
+            JSGCParamKey::JSGC_MAX_NURSERY_BYTES,
+            MAX_NURSERY_BYTES_DEFAULT,
+        );
         if let Ok(spec) = std::env::var("PARTII_GC_PARAMS") {
             for kv in spec.split([',', '+']).filter(|kv| !kv.is_empty()) {
                 let (name, value) = kv.split_once('=').unwrap_or((kv, ""));
