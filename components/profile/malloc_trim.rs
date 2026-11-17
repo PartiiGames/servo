@@ -54,6 +54,35 @@ mod imp {
         fn malloc_trim(pad: libc::size_t) -> libc::c_int;
         fn mallinfo2() -> Mallinfo2;
         fn mallopt(param: libc::c_int, value: libc::c_int) -> libc::c_int;
+        fn malloc_info(options: libc::c_int, stream: *mut libc::FILE) -> libc::c_int;
+    }
+
+    /// Measurement (stream mem-rth-2): `PARTII_MALLOC_INFO=1` writes glibc's malloc_info() XML (per arena: heaps,
+    /// free chunks by size, system bytes) every 60 s to `<dir of PARTII_RUNTIME_MEMREPORT>/malloc-info.<n>.xml`
+    /// (or `PARTII_MALLOC_INFO_DIR`), just before the trim thread's checks: which arenas hold the free pages.
+    fn malloc_info_dir() -> Option<std::path::PathBuf> {
+        if std::env::var("PARTII_MALLOC_INFO").ok()?.trim() != "1" {
+            return None;
+        }
+        if let Some(d) = std::env::var_os("PARTII_MALLOC_INFO_DIR") {
+            return Some(d.into());
+        }
+        let rep = std::path::PathBuf::from(std::env::var_os("PARTII_RUNTIME_MEMREPORT")?);
+        rep.parent().map(|p| p.to_path_buf())
+    }
+
+    fn dump_malloc_info(dir: &std::path::Path, n: u64) {
+        let path = dir.join(format!("malloc-info.{n:03}.xml"));
+        let Ok(c) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else {
+            return;
+        };
+        unsafe {
+            let f = libc::fopen(c.as_ptr(), c"w".as_ptr());
+            if !f.is_null() {
+                malloc_info(0, f);
+                libc::fclose(f);
+            }
+        }
     }
 
     /// glibc's M_MMAP_THRESHOLD.
@@ -124,9 +153,15 @@ mod imp {
                 // The most bytes in use in the arenas seen since the last trim (0 = not probed).
                 let mut in_use_peak = 0u64;
                 let mut tick = 0u64;
+                let info_dir = malloc_info_dir();
                 loop {
                     thread::sleep(Duration::from_secs(2));
                     tick += 1;
+                    if let Some(d) = &info_dir {
+                        if tick % 30 == 0 {
+                            dump_malloc_info(d, tick / 30);
+                        }
+                    }
                     let Some(rss) = rss_bytes() else {
                         return;
                     };
