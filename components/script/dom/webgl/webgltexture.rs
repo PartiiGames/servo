@@ -72,6 +72,15 @@ impl DroppableWebGLTexture {
     }
 
     fn delete(&self, operation_fallibility: Operation) {
+        self.delete_with(operation_fallibility, true);
+    }
+
+    /// `detach`: whether to detach it from the bound framebuffers first. Not from `Drop`: that runs
+    /// as the GC finalizes the texture, inside a GC slice, which can come from an allocation in the
+    /// middle of a framebuffer method holding a borrow of its attachments ("RefCell already
+    /// borrowed", gc-fast 397aaae8 with 1 ms slices). A finalized texture is unreachable, so no live
+    /// framebuffer still holds it; a framebuffer finalized in the same GC must not be touched.
+    fn delete_with(&self, operation_fallibility: Operation, detach: bool) {
         if !self.is_deleted.get() {
             self.is_deleted.set(true);
 
@@ -83,7 +92,7 @@ impl DroppableWebGLTexture {
             all attachment points in a currently bound framebuffer.
             - GLES 3.0, 4.4.2.3, "Attaching Texture Images to a Framebuffer"
             */
-            if let Some(context) = self.context.root() {
+            if let Some(context) = self.context.root().filter(|_| detach) {
                 if let Some(fb) = context.get_draw_framebuffer_slot().get() {
                     let _ = fb.detach_texture(self.id);
                 }
@@ -105,7 +114,7 @@ impl DroppableWebGLTexture {
 
 impl Drop for DroppableWebGLTexture {
     fn drop(&mut self) {
-        self.delete(Operation::Fallible);
+        self.delete_with(Operation::Fallible, false);
     }
 }
 
