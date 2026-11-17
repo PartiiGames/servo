@@ -31,6 +31,16 @@
 //! `PARTII_MALLOC_TRIM_FREED_MB` (48) of them have been freed since the highest point after the
 //! last trim, at the same 30-s pace. `PARTII_MALLOC_TRIM_FREED_MB=0` is the RSS trigger alone.
 //!
+//! Fixed mmap threshold (stream mem-rth, 2026-11-17). glibc serves an allocation of 128 KiB or more
+//! with its own mmap, given back whole on free, but the first time such a block is freed it raises
+//! that threshold to the block's size (up to 32 MiB) and from then on serves blocks that size from
+//! the arenas. Rocket frees and remakes its image decodes and GL textures (several MiB each) on
+//! every death, so after the first rounds they land in the arenas, which grow (system-heap-reserved
+//! +90 MB in 15 min, k2n11 e35b101e) and fragment; a trim can only give back whole free pages, and
+//! the RSS between rounds crept ~60 MB in minutes 3-12 with the live heap flat. `mallopt(
+//! M_MMAP_THRESHOLD)` fixes the threshold (and turns the dynamic one off) at
+//! `PARTII_MALLOC_MMAP_KB` (256); 0 leaves glibc's dynamic threshold.
+//!
 //! `PARTII_MALLOC_TRIM=0` turns it off; `PARTII_MALLOC_TRIM_LOG=1` prints each trim (RSS before
 //! and after, how long it took, which trigger) to stderr.
 
@@ -43,7 +53,11 @@ mod imp {
     unsafe extern "C" {
         fn malloc_trim(pad: libc::size_t) -> libc::c_int;
         fn mallinfo2() -> Mallinfo2;
+        fn mallopt(param: libc::c_int, value: libc::c_int) -> libc::c_int;
     }
+
+    /// glibc's M_MMAP_THRESHOLD.
+    const M_MMAP_THRESHOLD: libc::c_int = -3;
 
     /// glibc's `struct mallinfo2` (2.33+), as in system_reporter.rs.
     #[repr(C)]
@@ -82,6 +96,16 @@ mod imp {
     }
 
     pub fn start() {
+        // Fixed mmap threshold (stream mem-rth): see the module docs. 0 = glibc's dynamic one.
+        let mmap_kb = env_u64("PARTII_MALLOC_MMAP_KB", 256);
+        if mmap_kb > 0 {
+            unsafe {
+                mallopt(
+                    M_MMAP_THRESHOLD,
+                    (mmap_kb << 10).min(i32::MAX as u64) as libc::c_int,
+                )
+            };
+        }
         if std::env::var("PARTII_MALLOC_TRIM").is_ok_and(|v| v.trim() == "0") {
             return;
         }
