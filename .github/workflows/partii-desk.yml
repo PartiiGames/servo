@@ -1,0 +1,144 @@
+# Partii desk-1: build this fork's servoshell on GitHub-hosted macOS (arm64, x86_64) and Windows (x64) runners and run
+# the desk checks (etc/partii-desk/desk_check.py) headless on each. Runs only on pushes to partii/desk-* branches of
+# PartiiGames/servo (never upstream's workflows, never a PR). No secrets: the fork is public and so are these logs.
+name: partii-desk
+on:
+  push:
+    branches: ["partii/desk-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: partii-desk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_VERSION: 1
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  CCACHE: "sccache"
+
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, runner: macos-15 }
+          - { arch: x86_64, runner: macos-15-intel }
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 350
+    env:
+      SHELL: /bin/bash
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1, persist-credentials: false }
+      - uses: ./.github/actions/setup-python
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Bootstrap
+        run: ./mach bootstrap --yes --skip-lints --skip-nextest
+      - name: Build (release)
+        run: |
+          df -h . | tail -1; sysctl -n hw.ncpu hw.memsize
+          start=$(date +%s)
+          ./mach build --release --locked
+          echo "build_seconds=$(( $(date +%s) - start ))" | tee -a "$GITHUB_STEP_SUMMARY"
+          df -h . | tail -1
+      - name: Smoketest
+        run: ./mach smoketest --release
+      - name: Desk checks
+        if: ${{ !cancelled() }}
+        run: |
+          python3 etc/partii-desk/desk_check.py --bin target/release/servoshell --out desk-out || echo "desk check exit $?"
+          cat desk-out/desk-check.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Package
+        if: ${{ !cancelled() }}
+        run: tar -czf servoshell-macos-${{ matrix.arch }}.tar.gz target/release/servoshell resources
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: servoshell-macos-${{ matrix.arch }}
+          path: servoshell-macos-${{ matrix.arch }}.tar.gz
+          retention-days: 14
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: desk-check-macos-${{ matrix.arch }}
+          path: desk-out
+          retention-days: 14
+          if-no-files-found: warn
+
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 350
+    env:
+      SHELL: /bin/bash
+      CARGO_TARGET_DIR: C:\\a\\servo\\servo\\target
+      RUSTUP_WINDOWS_PATH_ADD_BIN: 1
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1, persist-credentials: false }
+      - uses: ./.github/actions/setup-python
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "20.1"
+          directory: ${{ runner.temp }}/llvm
+      - name: Set LIBCLANG_PATH
+        run: |
+          $llvm_bin = Join-Path $env:LLVM_PATH "bin"
+          echo "LIBCLANG_PATH=$llvm_bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Bootstrap
+        run: |
+          .\mach fetch
+          .\mach bootstrap-gstreamer
+      - name: Build (release)
+        run: |
+          Get-PSDrive C,D | Format-Table -AutoSize
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          .\mach build --release --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "build_seconds=$([int]$sw.Elapsed.TotalSeconds)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          Get-PSDrive C,D | Format-Table -AutoSize
+      - name: Copy resources
+        if: ${{ startsWith(github.workspace, 'D:\') }}
+        run: cp D:\a\servo\servo\resources C:\a\servo\servo -Recurse -Force
+      - name: Smoketest
+        run: .\mach smoketest --release
+      - name: Desk checks
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python etc/partii-desk/desk_check.py --bin 'C:\a\servo\servo\target\release\servoshell.exe' --out desk-out || echo "desk check exit $?"
+          cat desk-out/desk-check.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Package
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          Copy-Item C:\a\servo\servo\target\release\servoshell.exe pkg\
+          Copy-Item C:\a\servo\servo\target\release\*.dll pkg\ -ErrorAction SilentlyContinue
+          Copy-Item resources pkg\resources -Recurse
+          Compress-Archive -Path pkg\* -DestinationPath servoshell-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: servoshell-windows-x64
+          path: servoshell-windows-x64.zip
+          retention-days: 14
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: desk-check-windows-x64
+          path: desk-out
+          retention-days: 14
+          if-no-files-found: warn
