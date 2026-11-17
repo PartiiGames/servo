@@ -21,11 +21,9 @@ use js::jsapi::{
     CollectDelazificationsResult, DelazificationOption, EagerBaselineOption, InstantiateOptions,
     JSObject, ReadOnlyCompileOptions, Stencil, StencilRelease,
 };
-use js::rust::transform_str_to_source_text;
-use js::rust::wrappers2::{
-    CompileModuleScriptToStencil, InstantiateModuleStencil, StartCollectingDelazifications1,
-};
 use js::realm::CurrentRealm;
+use js::rust::transform_str_to_source_text;
+use js::rust::wrappers2::{InstantiateModuleStencil, StartCollectingDelazifications1};
 
 /// At most this many modules, and this much source text, per script thread (least recently used out first).
 const MAX_ENTRIES: usize = 32;
@@ -50,8 +48,47 @@ impl Drop for Entry {
 thread_local!(static CACHE: RefCell<Vec<Entry>> = const { RefCell::new(Vec::new()) });
 
 pub(crate) fn enabled() -> bool {
+    // Windows ARM64: MSVC returns `already_AddRefed<Stencil>` through a hidden pointer in x8, which a Rust
+    // declaration can't express (see compile_to_stencil); no cache there until that call is done in asm or C++.
+    if cfg!(all(windows, not(target_arch = "x86_64"))) {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PARTII_STENCIL_CACHE").map_or(true, |v| v != "0"))
+}
+
+/// `JS::CompileModuleScriptToStencil`: the stencil (owned), or null with the error pending on `cx`.
+///
+/// It returns `already_AddRefed<Stencil>` by value. mfbt makes that class trivial on Unix so it comes back in a
+/// register, which is what the bindgen declaration assumes. MSVC returns it through a hidden pointer instead (the
+/// class has user-declared constructors and a private member), passed in RCX ahead of the arguments, so through the
+/// bindgen declaration every argument lands one register off: the function read the compile options as the
+/// JSContext and crashed (0xC0000005 in JSContext::stackLimitForCurrentPrincipal on every module worker, desk-1).
+/// On Windows x64 it's called with the hidden pointer spelled out.
+#[expect(unsafe_code)]
+unsafe fn compile_to_stencil(
+    cx: &mut CurrentRealm,
+    options: *const ReadOnlyCompileOptions,
+    text: &mut js::jsapi::SourceText<js::jsapi::mozilla::Utf8Unit>,
+) -> *mut Stencil {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        type Msvc = unsafe extern "C" fn(
+            *mut *mut Stencil,
+            *mut js::jsapi::JSContext,
+            *const ReadOnlyCompileOptions,
+            *mut js::jsapi::SourceText<js::jsapi::mozilla::Utf8Unit>,
+        ) -> *mut *mut Stencil;
+        let f: Msvc =
+            unsafe { std::mem::transmute(js::jsapi::CompileModuleScriptToStencil as *const ()) };
+        let mut out: *mut Stencil = ptr::null_mut();
+        unsafe { f(&mut out, cx.raw_cx(), options, text) };
+        out
+    }
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    {
+        unsafe { js::rust::wrappers2::CompileModuleScriptToStencil(cx, options, text) }.mRawPtr
+    }
 }
 
 fn instantiate_options() -> InstantiateOptions {
@@ -90,7 +127,7 @@ pub(crate) unsafe fn compile_module(
         Some(s) => (s, false),
         None => {
             let mut text = transform_str_to_source_text(source);
-            let s = unsafe { CompileModuleScriptToStencil(cx, options, &mut text) }.mRawPtr;
+            let s = unsafe { compile_to_stencil(cx, options, &mut text) };
             if s.is_null() {
                 return ptr::null_mut();
             }
