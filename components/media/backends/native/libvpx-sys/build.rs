@@ -35,7 +35,8 @@ fn main() {
         match (arch.as_str(), os.as_str()) {
             ("x86_64", "linux") if native && (has("nasm") || has("yasm")) => "x86_64-linux-gcc".into(),
             ("aarch64", "linux") if native => "arm64-linux-gcc".into(),
-            ("aarch64", "macos") if native => "arm64-darwin-gcc".into(),
+            // arm64-darwin-gcc is libvpx's iOS target (iPhoneOS SDK); macOS 11+ is arm64-darwin20-gcc.
+            ("aarch64", "macos") if native => "arm64-darwin20-gcc".into(),
             _ => "generic-gnu".into(),
         }
     });
