@@ -2,10 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::RefCell;
 
 use dom_struct::dom_struct;
 use js::context::{JSContext, NoGC};
+use script_bindings::cell::DomRefCell;
 use script_bindings::dom::UnrootedDom;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use stylo_atoms::Atom;
@@ -180,14 +180,14 @@ impl NodeList {
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) struct ChildrenList {
     node: Dom<Node>,
-    cached_children: RefCell<Option<Vec<Dom<Node>>>>,
+    cached_children: DomRefCell<Option<Vec<Dom<Node>>>>,
 }
 
 impl ChildrenList {
     pub(crate) fn new(node: &Node) -> ChildrenList {
         ChildrenList {
             node: Dom::from_ref(node),
-            cached_children: RefCell::new(None),
+            cached_children: DomRefCell::new(None),
         }
     }
 

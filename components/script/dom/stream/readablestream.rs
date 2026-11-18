@@ -913,7 +913,7 @@ pub(crate) struct ReadableStream {
     /// <https://streams.spec.whatwg.org/#readablestream-controller>
     /// Note: the inner `MutNullableDom` should really be an `Option<Dom>`,
     /// because it is never unset once set.
-    controller: RefCell<Option<ControllerType>>,
+    controller: DomRefCell<Option<ControllerType>>,
 
     /// <https://streams.spec.whatwg.org/#readablestream-storederror>
     #[ignore_malloc_size_of = "mozjs"]
@@ -923,7 +923,7 @@ pub(crate) struct ReadableStream {
     disturbed: Cell<bool>,
 
     /// <https://streams.spec.whatwg.org/#readablestream-reader>
-    reader: RefCell<Option<ReaderType>>,
+    reader: DomRefCell<Option<ReaderType>>,
 
     /// <https://streams.spec.whatwg.org/#readablestream-state>
     state: Cell<ReadableStreamState>,
@@ -934,10 +934,10 @@ impl ReadableStream {
     fn new_inherited() -> ReadableStream {
         ReadableStream {
             reflector_: Reflector::new(),
-            controller: RefCell::new(None),
+            controller: DomRefCell::new(None),
             stored_error: Heap::default(),
             disturbed: Default::default(),
-            reader: RefCell::new(None),
+            reader: DomRefCell::new(None),
             state: Cell::new(Default::default()),
         }
     }

@@ -1,7 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-use std::cell::RefCell;
 
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Namespace, QualName, local_name, ns};
@@ -9,6 +8,7 @@ use js::context::JSContext;
 use js::conversions::ToJSValConvertible;
 use js::jsval::NullValue;
 use js::rust::HandleValue;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::conversions::Convert;
@@ -39,7 +39,7 @@ pub struct TrustedTypePolicyFactory {
     reflector_: Reflector,
 
     default_policy: MutNullableDom<TrustedTypePolicy>,
-    policy_names: RefCell<Vec<String>>,
+    policy_names: DomRefCell<Vec<String>>,
 }
 
 pub(crate) static DEFAULT_SCRIPT_SINK_GROUP: &str = "'script'";
@@ -64,7 +64,7 @@ impl TrustedTypePolicyFactory {
         Self {
             reflector_: Reflector::new(),
             default_policy: Default::default(),
-            policy_names: RefCell::new(vec![]),
+            policy_names: DomRefCell::new(vec![]),
         }
     }
 

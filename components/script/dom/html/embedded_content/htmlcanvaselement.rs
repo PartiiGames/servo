@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
@@ -86,7 +86,7 @@ pub(crate) struct HTMLCanvasElement {
     callback_id: Cell<u32>,
 
     /// This hashmap along with [`Self::callback_id`] are used to keep track of ongoing toBlob() calls.
-    blob_callbacks: RefCell<FxHashMap<u32, TracedCallback<BlobCallback>>>,
+    blob_callbacks: DomRefCell<FxHashMap<u32, TracedCallback<BlobCallback>>>,
 
     /// The [`ImageKey`] used to render this [`HTMLCanvasElement`] to the WebRender scene, if it
     /// has a `RenderingContext`, otherwise `None`. Note that this key is owned by the `RenderingContext`
@@ -115,7 +115,7 @@ impl HTMLCanvasElement {
             htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             context_mode: DomRefCell::new(None),
             callback_id: Cell::new(0),
-            blob_callbacks: RefCell::new(FxHashMap::default()),
+            blob_callbacks: DomRefCell::new(FxHashMap::default()),
             image_key: Default::default(),
             placeholder_image_key: Default::default(),
             pending_placeholder_frame: Default::default(),

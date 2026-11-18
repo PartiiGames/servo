@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::RefCell;
 
 use dom_struct::dom_struct;
 use itertools::izip;
@@ -54,7 +53,7 @@ pub(crate) struct CSSRuleList {
     created_by_rule: Option<Dom<CSSGroupingRule>>,
     parent_stylesheet: Dom<CSSStyleSheet>,
     #[ignore_malloc_size_of = "Stylo"]
-    rules: RefCell<RulesSource>,
+    rules: DomRefCell<RulesSource>,
     dom_rules: DomRefCell<Vec<MutNullableDom<CSSRule>>>,
 }
 
@@ -90,7 +89,7 @@ impl CSSRuleList {
             reflector_: Reflector::new(),
             created_by_rule: created_by_rule.map(Dom::from_ref),
             parent_stylesheet: Dom::from_ref(parent_stylesheet),
-            rules: RefCell::new(rules),
+            rules: DomRefCell::new(rules),
             dom_rules: DomRefCell::new(dom_rules),
         }
     }

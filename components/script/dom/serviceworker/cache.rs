@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use script_bindings::root::DomRoot;
 use servo_base::generic_channel::{GenericCallback, GenericSend};
@@ -38,7 +39,7 @@ pub(crate) struct Cache {
     callback: RefCell<Option<GenericCallback<CacheStorageThreadResponse>>>,
 
     // Dequeue of pending promises for backend operations.
-    pending_promises: RefCell<VecDeque<TracedPromise>>,
+    pending_promises: DomRefCell<VecDeque<TracedPromise>>,
 }
 
 impl Cache {

@@ -613,7 +613,7 @@ pub(crate) struct HTMLMediaElement {
     #[ignore_malloc_size_of = "Defined in std::time"]
     next_timeupdate_event: Cell<Instant>,
     /// Latest fetch request context.
-    current_fetch_context: RefCell<Option<HTMLMediaElementFetchContext>>,
+    current_fetch_context: DomRefCell<Option<HTMLMediaElementFetchContext>>,
     /// Media controls id.
     /// In order to workaround the lack of privileged JS context, we secure the
     /// the access to the "privileged" document.servoGetMediaControls(id) API by
@@ -720,7 +720,7 @@ impl HTMLMediaElement {
             video_tracks_list: Default::default(),
             text_tracks_list: Default::default(),
             next_timeupdate_event: Cell::new(Instant::now() + Duration::from_millis(250)),
-            current_fetch_context: RefCell::new(None),
+            current_fetch_context: DomRefCell::new(None),
             media_controls_id: DomRefCell::new(None),
             did_perform_automatic_track_selection: Default::default(),
             position_when_time_marches_on_ran: Default::default(),

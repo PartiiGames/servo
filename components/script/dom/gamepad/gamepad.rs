@@ -2,12 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 use dom_struct::dom_struct;
 use embedder_traits::{GamepadSupportedHapticEffects, GamepadUpdateType};
 use js::context::JSContext;
 use js::rust::MutableHandleValue;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 
 use super::gamepadbutton::GamepadButton;
@@ -46,7 +47,7 @@ pub(crate) struct Gamepad {
     buttons: Vec<Dom<GamepadButton>>,
     #[ignore_malloc_size_of = "mozjs"]
     frozen_axes: CachedFrozenArray,
-    axes: RefCell<Vec<f64>>,
+    axes: DomRefCell<Vec<f64>>,
     pose: Option<Dom<GamepadPose>>,
     #[ignore_malloc_size_of = "Defined in rust-webvr"]
     hand: GamepadHand,
@@ -86,7 +87,7 @@ impl Gamepad {
                 .map(|button| Dom::from_ref(*button))
                 .collect(),
             frozen_axes: CachedFrozenArray::new(),
-            axes: RefCell::new(Vec::new()),
+            axes: DomRefCell::new(Vec::new()),
             pose: pose.map(Dom::from_ref),
             hand,
             axis_bounds,

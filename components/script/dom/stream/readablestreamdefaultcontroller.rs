@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ptr;
 
@@ -15,6 +15,7 @@ use js::realm::CurrentRealm;
 use js::rust::wrappers2::JS_GetPendingException;
 use js::rust::{HandleObject, HandleValue as SafeHandleValue, HandleValue, MutableHandleValue};
 use js::typedarray::Uint8;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 
 use crate::dom::bindings::buffer_source::create_buffer_source;
@@ -194,7 +195,7 @@ fn is_non_negative_number(value: &EnqueuedValue) -> bool {
 #[derive(Default, JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) struct QueueWithSizes {
-    queue: RefCell<VecDeque<EnqueuedValue>>,
+    queue: DomRefCell<VecDeque<EnqueuedValue>>,
     /// <https://streams.spec.whatwg.org/#readablestreamdefaultcontroller-queuetotalsize>
     pub(crate) total_size: Cell<f64>,
 }
@@ -313,7 +314,7 @@ pub(crate) struct ReadableStreamDefaultController {
 
     /// <https://streams.spec.whatwg.org/#readablestreamdefaultcontroller-strategysizealgorithm>
     #[ignore_malloc_size_of = "mozjs"]
-    strategy_size: RefCell<Option<TracedCallback<QueuingStrategySize>>>,
+    strategy_size: DomRefCell<Option<TracedCallback<QueuingStrategySize>>>,
 
     /// <https://streams.spec.whatwg.org/#readablestreamdefaultcontroller-closerequested>
     close_requested: Cell<bool>,
@@ -340,7 +341,7 @@ impl ReadableStreamDefaultController {
             stream: MutNullableDom::new(None),
             underlying_source: MutNullableDom::new(Some(underlying_source)),
             strategy_hwm,
-            strategy_size: RefCell::new(Some(strategy_size.to_traced())),
+            strategy_size: DomRefCell::new(Some(strategy_size.to_traced())),
             close_requested: Default::default(),
             started: Default::default(),
             pulling: Default::default(),

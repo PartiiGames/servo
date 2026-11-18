@@ -25,6 +25,7 @@ use rustc_hash::FxHashMap;
 use servo_url::ServoUrl;
 use style::context::QuirksMode as ServoQuirksMode;
 
+use script_bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HTMLTemplateElementBinding::HTMLTemplateElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -213,7 +214,7 @@ pub(crate) struct Tokenizer {
     /// Sender from the main thread to the parser thread.
     #[no_trace]
     to_parser_thread_sender: Sender<ToParserThreadMsg>,
-    nodes: RefCell<FxHashMap<ParseNodeId, Dom<Node>>>,
+    nodes: DomRefCell<FxHashMap<ParseNodeId, Dom<Node>>>,
     #[no_trace]
     url: ServoUrl,
     parsing_algorithm: ParsingAlgorithm,
@@ -244,7 +245,7 @@ impl Tokenizer {
             document: Dom::from_ref(document),
             from_parser_thread_receiver,
             to_parser_thread_sender,
-            nodes: RefCell::new(FxHashMap::default()),
+            nodes: DomRefCell::new(FxHashMap::default()),
             url,
             parsing_algorithm: algorithm,
             custom_element_reaction_stack,

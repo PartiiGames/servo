@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use encoding_rs::{Decoder, DecoderResult, Encoding};
 use js::context::NoGC;
 
+use script_bindings::cell::DomRefCell;
 use crate::dom::bindings::buffer_source::get_buffer_source_slice;
 use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
 use crate::dom::bindings::error::{Error, Fallible};
@@ -38,7 +39,7 @@ pub(crate) struct TextDecoderCommon {
     decoder: RefCell<Decoder>,
 
     /// <https://encoding.spec.whatwg.org/#textdecodercommon-i-o-queue>
-    io_queue: RefCell<Vec<u8>>,
+    io_queue: DomRefCell<Vec<u8>>,
 }
 
 #[expect(non_snake_case)]
@@ -59,7 +60,7 @@ impl TextDecoderCommon {
             fatal,
             ignoreBOM,
             decoder: RefCell::new(decoder),
-            io_queue: RefCell::new(Vec::new()),
+            io_queue: DomRefCell::new(Vec::new()),
         }
     }
 
@@ -74,7 +75,7 @@ impl TextDecoderCommon {
     }
 
     /// <https://encoding.spec.whatwg.org/#textdecodercommon-i-o-queue>
-    pub(crate) fn io_queue(&self) -> &RefCell<Vec<u8>> {
+    pub(crate) fn io_queue(&self) -> &DomRefCell<Vec<u8>> {
         &self.io_queue
     }
 

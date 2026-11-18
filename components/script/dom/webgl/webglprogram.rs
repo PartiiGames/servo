@@ -219,7 +219,7 @@ pub(crate) struct WebGLProgram {
     pending_link: RefCell<Option<GenericReceiver<ProgramLinkInfo>>>,
     /// Partii (gaps-5): the LINK_CACHE key of the pending link (None: not cacheable).
     #[ignore_malloc_size_of = "Rc"]
-    pending_link_key: RefCell<Option<LinkKey>>,
+    pending_link_key: DomRefCell<Option<LinkKey>>,
     /// Partii (gaps-5): transformFeedbackVaryings was called (such links aren't cached).
     transform_feedback_varyings_set: Cell<bool>,
     /// Texture units set on sampler uniforms (uniform location -> unit), for the WebGL 2
@@ -241,7 +241,7 @@ pub(crate) struct WebGLProgram {
     emulated_builtins: Cell<EmulatedBuiltinUniforms>,
     /// Driver indices of uniforms hidden from content (sorted), see `ProgramLinkInfo`.
     hidden_uniform_indices: DomRefCell<Box<[u32]>>,
-    droppable: RefCell<DroppableWebGLProgram>,
+    droppable: DomRefCell<DroppableWebGLProgram>,
 }
 
 impl WebGLProgram {
@@ -262,7 +262,7 @@ impl WebGLProgram {
             transform_feedback_mode: Default::default(),
             transform_feedback_varying_bytes: DomRefCell::new(vec![].into()),
             pending_link: RefCell::new(None),
-            pending_link_key: RefCell::new(None),
+            pending_link_key: DomRefCell::new(None),
             transform_feedback_varyings_set: Cell::new(false),
             sampler_units: Default::default(),
             attrib_bindings: Default::default(),
@@ -271,7 +271,7 @@ impl WebGLProgram {
             fragment_outputs: Default::default(),
             emulated_builtins: Default::default(),
             hidden_uniform_indices: DomRefCell::new(vec![].into()),
-            droppable: RefCell::new(DroppableWebGLProgram::new(id, context)),
+            droppable: DomRefCell::new(DroppableWebGLProgram::new(id, context)),
         }
     }
 

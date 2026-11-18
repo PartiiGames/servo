@@ -2,13 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::RefCell;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::jsval::UndefinedValue;
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject as SafeHandleObject, HandleValue as SafeHandleValue};
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 
 use crate::dom::bindings::codegen::Bindings::WritableStreamDefaultWriterBinding::WritableStreamDefaultWriterMethods;
@@ -24,10 +24,10 @@ use crate::dom::stream::writablestream::WritableStream;
 pub struct WritableStreamDefaultWriter {
     reflector_: Reflector,
 
-    ready_promise: RefCell<TracedPromise>,
+    ready_promise: DomRefCell<TracedPromise>,
 
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultwriter-closedpromise>
-    closed_promise: RefCell<TracedPromise>,
+    closed_promise: DomRefCell<TracedPromise>,
 
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultwriter-stream>
     stream: MutNullableDom<WritableStream>,
@@ -43,8 +43,8 @@ impl WritableStreamDefaultWriter {
         WritableStreamDefaultWriter {
             reflector_: Reflector::new(),
             stream: Default::default(),
-            closed_promise: RefCell::new(closed_promise.to_traced()),
-            ready_promise: RefCell::new(ready_promise.to_traced()),
+            closed_promise: DomRefCell::new(closed_promise.to_traced()),
+            ready_promise: DomRefCell::new(ready_promise.to_traced()),
         }
     }
 

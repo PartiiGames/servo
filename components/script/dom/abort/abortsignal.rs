@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -75,7 +75,7 @@ pub(crate) struct AbortSignal {
     abort_reason: Heap<JSVal>,
 
     /// <https://dom.spec.whatwg.org/#abortsignal-abort-algorithms>
-    abort_algorithms: RefCell<Vec<AbortAlgorithm>>,
+    abort_algorithms: DomRefCell<Vec<AbortAlgorithm>>,
 
     /// <https://dom.spec.whatwg.org/#abortsignal-dependent>
     dependent: Cell<bool>,

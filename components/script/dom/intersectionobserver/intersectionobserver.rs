@@ -123,7 +123,7 @@ pub(crate) struct IntersectionObserver {
     scroll_margin: RefCell<IntersectionObserverMargin>,
 
     /// <https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-thresholds-slot>
-    thresholds: RefCell<Vec<Finite<f64>>>,
+    thresholds: DomRefCell<Vec<Finite<f64>>>,
 
     /// <https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-delay-slot>
     delay: Cell<i32>,

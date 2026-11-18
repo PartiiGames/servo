@@ -458,7 +458,8 @@ impl AttributeStorage {
 #[expect(unsafe_code)]
 unsafe impl crate::dom::bindings::trace::JSTraceable for AttributeStorage {
     unsafe fn trace(&self, trc: *mut js::jsapi::JSTracer) {
-        for entry in self.0.borrow().iter() {
+        // Never writes the borrow flag: traces can run on GC helper threads (cell.rs, borrow_for_gc_trace).
+        for entry in unsafe { self.0.borrow_for_gc_trace() }.iter() {
             if let AttributeEntry::Dom(attr) = entry {
                 unsafe { js::rust::Trace::trace(attr, trc) };
             }

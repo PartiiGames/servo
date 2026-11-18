@@ -272,6 +272,42 @@ impl<T> DomRefCell<T> {
     }
 }
 
+impl<T> From<T> for DomRefCell<T> {
+    fn from(value: T) -> Self {
+        DomRefCell::new(value)
+    }
+}
+
+impl<T> DomRefCell<T> {
+    /// Replaces the wrapped value, returning the old one (`RefCell::replace`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is currently borrowed.
+    #[track_caller]
+    pub fn replace(&self, value: T) -> T {
+        assert_in_script();
+        self.value.replace(value)
+    }
+
+    /// Swaps the wrapped values of two cells (`RefCell::swap`).
+    #[track_caller]
+    pub fn swap(&self, other: &Self) {
+        assert_in_script();
+        self.value.swap(&other.value)
+    }
+
+    /// The wrapped value (`RefCell::into_inner`).
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+
+    /// A mutable reference to the wrapped value (`RefCell::get_mut`): no borrow check needed.
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+}
+
 impl<T: Default> DomRefCell<T> {
     /// Takes the wrapped value, leaving `Default::default()` in its place.
     ///

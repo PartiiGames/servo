@@ -1,11 +1,12 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use rustc_hash::FxHashSet;
+use script_bindings::cell::DomRefCell;
 use script_bindings::callback::{ExceptionHandling, OwnerWindow, RootedCallback};
 use script_bindings::codegen::GenericBindings::GeolocationBinding::Geolocation_Binding::GeolocationMethods;
 use script_bindings::codegen::GenericBindings::GeolocationBinding::{
@@ -26,7 +27,7 @@ use crate::dom::globalscope::GlobalScope;
 pub struct Geolocation {
     reflector_: Reflector,
     /// <https://www.w3.org/TR/geolocation/#dfn-watchids>
-    watch_ids: RefCell<FxHashSet<u32>>,
+    watch_ids: DomRefCell<FxHashSet<u32>>,
     next_watch_id: Cell<u32>,
 }
 
@@ -34,7 +35,7 @@ impl Geolocation {
     fn new_inherited() -> Self {
         Geolocation {
             reflector_: Reflector::new(),
-            watch_ids: RefCell::new(FxHashSet::default()),
+            watch_ids: DomRefCell::new(FxHashSet::default()),
             next_watch_id: Cell::new(1),
         }
     }

@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{RefCell, RefMut};
+use std::cell::RefMut;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::default::Default;
 use std::ffi::CString;
@@ -140,7 +140,7 @@ impl js::gc::Rootable for InlineEventListener {}
 /// <https://html.spec.whatwg.org/multipage/#getting-the-current-value-of-the-event-handler>
 fn get_compiled_handler(
     cx: &mut JSContext,
-    inline_listener: &RefCell<InlineEventListener>,
+    inline_listener: &DomRefCell<InlineEventListener>,
     owner: &EventTarget,
     ty: &Atom,
 ) -> Option<CommonEventHandler> {
@@ -165,7 +165,7 @@ fn get_compiled_handler(
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 enum EventListenerType {
     Additive(TracedCallback<EventListener>),
-    Inline(RefCell<InlineEventListener>),
+    Inline(DomRefCell<InlineEventListener>),
 }
 
 impl js::gc::Rootable for EventListenerType {}
@@ -390,20 +390,20 @@ impl std::cmp::PartialEq for EventListenerEntry {
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 /// A mix of potentially uncompiled and compiled event listeners of the same type.
 pub(crate) struct EventListeners(
-    #[conditional_malloc_size_of] Vec<Rc<RefCell<EventListenerEntry>>>,
+    #[conditional_malloc_size_of] Vec<Rc<DomRefCell<EventListenerEntry>>>,
 );
 
 impl js::gc::Rootable for EventListeners {}
 
 impl Deref for EventListeners {
-    type Target = Vec<Rc<RefCell<EventListenerEntry>>>;
-    fn deref(&self) -> &Vec<Rc<RefCell<EventListenerEntry>>> {
+    type Target = Vec<Rc<DomRefCell<EventListenerEntry>>>;
+    fn deref(&self) -> &Vec<Rc<DomRefCell<EventListenerEntry>>> {
         &self.0
     }
 }
 
 impl DerefMut for EventListeners {
-    fn deref_mut(&mut self) -> &mut Vec<Rc<RefCell<EventListenerEntry>>> {
+    fn deref_mut(&mut self) -> &mut Vec<Rc<DomRefCell<EventListenerEntry>>> {
         &mut self.0
     }
 }
@@ -587,7 +587,7 @@ impl EventTarget {
             },
             None => {
                 if listener.is_some() {
-                    entries.push(Rc::new(RefCell::new(EventListenerEntry {
+                    entries.push(Rc::new(DomRefCell::new(EventListenerEntry {
                         phase: ListenerPhase::Bubbling,
                         listener: EventListenerType::Inline(
                             listener.take().expect("Guaranteed above").into(),
@@ -602,7 +602,7 @@ impl EventTarget {
         }
     }
 
-    pub(crate) fn remove_listener(&self, ty: &Atom, entry: &Rc<RefCell<EventListenerEntry>>) {
+    pub(crate) fn remove_listener(&self, ty: &Atom, entry: &Rc<DomRefCell<EventListenerEntry>>) {
         let mut handlers = self.handlers.borrow_mut();
 
         if let Some(handlers) = handlers.as_mut() &&
@@ -615,7 +615,7 @@ impl EventTarget {
     }
 
     /// Determines the `passive` attribute of an associated event listener
-    pub(crate) fn is_passive(&self, listener: &Rc<RefCell<EventListenerEntry>>) -> bool {
+    pub(crate) fn is_passive(&self, listener: &Rc<DomRefCell<EventListenerEntry>>) -> bool {
         listener.borrow().passive
     }
 
@@ -976,7 +976,7 @@ impl EventTarget {
             .iter()
             .all(|entry| !entry.borrow().matches_additive(phase, &listener))
         {
-            entries.push(Rc::new(RefCell::new(EventListenerEntry {
+            entries.push(Rc::new(DomRefCell::new(EventListenerEntry {
                 phase,
                 listener: EventListenerType::Additive(listener.to_traced()),
                 once: options.once,

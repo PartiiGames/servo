@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::ptr;
 use std::rc::Rc;
 
@@ -274,15 +274,15 @@ pub enum UnderlyingSinkType {
     /// Algorithms are provided by Js callbacks.
     Js {
         /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-abortalgorithm>
-        abort: RefCell<Option<TracedCallback<UnderlyingSinkAbortCallback>>>,
+        abort: DomRefCell<Option<TracedCallback<UnderlyingSinkAbortCallback>>>,
 
-        start: RefCell<Option<TracedCallback<UnderlyingSinkStartCallback>>>,
+        start: DomRefCell<Option<TracedCallback<UnderlyingSinkStartCallback>>>,
 
         /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-closealgorithm>
-        close: RefCell<Option<TracedCallback<UnderlyingSinkCloseCallback>>>,
+        close: DomRefCell<Option<TracedCallback<UnderlyingSinkCloseCallback>>>,
 
         /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-writealgorithm>
-        write: RefCell<Option<TracedCallback<UnderlyingSinkWriteCallback>>>,
+        write: DomRefCell<Option<TracedCallback<UnderlyingSinkWriteCallback>>>,
     },
     /// Algorithms supporting streams transfer are implemented in Rust.
     /// The promise and port used in those algorithms are stored here.
@@ -302,10 +302,10 @@ impl UnderlyingSinkType {
         write: Option<&TracedCallback<UnderlyingSinkWriteCallback>>,
     ) -> Self {
         UnderlyingSinkType::Js {
-            abort: RefCell::new(abort.cloned()),
-            start: RefCell::new(start.cloned()),
-            close: RefCell::new(close.cloned()),
-            write: RefCell::new(write.cloned()),
+            abort: DomRefCell::new(abort.cloned()),
+            start: DomRefCell::new(start.cloned()),
+            close: DomRefCell::new(close.cloned()),
+            write: DomRefCell::new(write.cloned()),
         }
     }
 }
@@ -335,7 +335,7 @@ pub struct WritableStreamDefaultController {
 
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-strategysizealgorithm>
     #[ignore_malloc_size_of = "QueuingStrategySize"]
-    strategy_size: RefCell<Option<TracedCallback<QueuingStrategySize>>>,
+    strategy_size: DomRefCell<Option<TracedCallback<QueuingStrategySize>>>,
 
     /// <https://streams.spec.whatwg.org/#writablestreamdefaultcontroller-stream>
     stream: MutNullableDom<WritableStream>,
@@ -361,7 +361,7 @@ impl WritableStreamDefaultController {
             stream: Default::default(),
             underlying_sink_obj: Default::default(),
             strategy_hwm,
-            strategy_size: RefCell::new(Some(strategy_size.to_traced())),
+            strategy_size: DomRefCell::new(Some(strategy_size.to_traced())),
             started: Default::default(),
             abort_controller: Dom::from_ref(&AbortController::new_with_proto(cx, global, None)),
         }

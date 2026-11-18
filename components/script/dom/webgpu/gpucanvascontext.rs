@@ -3,13 +3,14 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::borrow::Cow;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
 use arrayvec::ArrayVec;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use pixels::Snapshot;
+use script_bindings::cell::DomRefCell;
 use script_bindings::cformat;
 use script_bindings::codegen::GenericBindings::WebGPUBinding::{
     GPUDeviceMethods, GPUTextureFormat, GPUTextureUsageConstants,
@@ -135,9 +136,9 @@ pub(crate) struct GPUCanvasContext {
     canvas: HTMLCanvasElementOrOffscreenCanvas,
     #[ignore_malloc_size_of = "manual writing is hard"]
     /// <https://gpuweb.github.io/gpuweb/#dom-gpucanvascontext-configuration-slot>
-    configuration: RefCell<Option<GPUCanvasConfiguration>>,
+    configuration: DomRefCell<Option<GPUCanvasConfiguration>>,
     /// <https://gpuweb.github.io/gpuweb/#dom-gpucanvascontext-texturedescriptor-slot>
-    texture_descriptor: RefCell<Option<GPUTextureDescriptor>>,
+    texture_descriptor: DomRefCell<Option<GPUTextureDescriptor>>,
     /// <https://gpuweb.github.io/gpuweb/#dom-gpucanvascontext-currenttexture-slot>
     current_texture: MutNullableDom<GPUTexture>,
     /// Set if image is cleared
@@ -171,8 +172,8 @@ impl GPUCanvasContext {
         Self {
             reflector_: Reflector::new(),
             canvas,
-            configuration: RefCell::new(None),
-            texture_descriptor: RefCell::new(None),
+            configuration: DomRefCell::new(None),
+            texture_descriptor: DomRefCell::new(None),
             current_texture: MutNullableDom::default(),
             cleared: Cell::new(true),
             droppable: DroppableGPUCanvasContext {

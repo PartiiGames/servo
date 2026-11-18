@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
 use std::str;
 
@@ -14,6 +14,7 @@ use devtools_traits::{
 use js::context::JSContext;
 use markup5ever::{LocalName, ns};
 use rustc_hash::FxHashMap;
+use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::CSSRuleBinding::CSSRuleMethods;
 use script_bindings::codegen::GenericBindings::NodeBinding::NodeMethods;
 use script_bindings::root::Dom;
@@ -65,7 +66,7 @@ pub(crate) struct PerPipelineState {
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 #[derive(JSTraceable, Default)]
 pub(crate) struct DevtoolsState {
-    per_pipeline_state: RefCell<FxHashMap<NoTrace<PipelineId>, PerPipelineState>>,
+    per_pipeline_state: DomRefCell<FxHashMap<NoTrace<PipelineId>, PerPipelineState>>,
 }
 
 impl PerPipelineState {

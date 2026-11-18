@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
@@ -69,13 +68,13 @@ pub(crate) enum TransformerType {
     /// Algorithms provided by Js callbacks
     Js {
         /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-cancelalgorithm>
-        cancel: RefCell<Option<TracedCallback<TransformerCancelCallback>>>,
+        cancel: DomRefCell<Option<TracedCallback<TransformerCancelCallback>>>,
 
         /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-flushalgorithm>
-        flush: RefCell<Option<TracedCallback<TransformerFlushCallback>>>,
+        flush: DomRefCell<Option<TracedCallback<TransformerFlushCallback>>>,
 
         /// <https://streams.spec.whatwg.org/#transformstreamdefaultcontroller-transformalgorithm>
-        transform: RefCell<Option<TracedCallback<TransformerTransformCallback>>>,
+        transform: DomRefCell<Option<TracedCallback<TransformerTransformCallback>>>,
 
         /// The JS object used as `this` when invoking sink algorithms.
         #[ignore_malloc_size_of = "mozjs"]
@@ -102,9 +101,9 @@ pub(crate) enum TransformerType {
 impl TransformerType {
     pub(crate) fn new_from_js_transformer(transformer: &Transformer) -> TransformerType {
         TransformerType::Js {
-            cancel: RefCell::new(transformer.cancel.clone()),
-            flush: RefCell::new(transformer.flush.clone()),
-            transform: RefCell::new(transformer.transform.clone()),
+            cancel: DomRefCell::new(transformer.cancel.clone()),
+            flush: DomRefCell::new(transformer.flush.clone()),
+            transform: DomRefCell::new(transformer.transform.clone()),
             transform_obj: Default::default(),
         }
     }

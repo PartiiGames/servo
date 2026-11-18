@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefMut};
 use std::default::Default;
 
 use dom_struct::dom_struct;
@@ -56,7 +56,7 @@ pub(crate) struct HTMLTextAreaElement {
     htmlelement: HTMLElement,
     #[no_trace]
     text_input: DomRefCell<TextInput<EmbedderClipboardProvider>>,
-    placeholder: RefCell<DOMString>,
+    placeholder: DomRefCell<DOMString>,
     // https://html.spec.whatwg.org/multipage/#concept-textarea-dirty
     value_dirty: Cell<bool>,
     form_owner: MutNullableDom<HTMLFormElement>,

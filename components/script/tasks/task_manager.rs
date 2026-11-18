@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use core::cell::RefCell;
 use core::sync::atomic::Ordering;
 use std::cell::Ref;
 
@@ -10,6 +9,7 @@ use rustc_hash::FxHashMap;
 use servo_base::id::PipelineId;
 use strum::VariantArray;
 
+use script_bindings::cell::DomRefCell;
 use crate::messaging::ScriptEventLoopSender;
 use crate::tasks::task::TaskCanceller;
 use crate::tasks::task_source::{TaskSource, TaskSourceName};
@@ -20,7 +20,7 @@ enum TaskCancellers {
     /// of them need to have the same canceller flag for all task sources.
     Shared(TaskCanceller),
     /// For `Window` each `TaskSource` has its own canceller.
-    OnePerTaskSource(RefCell<FxHashMap<TaskSourceName, TaskCanceller>>),
+    OnePerTaskSource(DomRefCell<FxHashMap<TaskSourceName, TaskCanceller>>),
 }
 
 impl TaskCancellers {
@@ -76,7 +76,7 @@ macro_rules! task_source_functions {
 
 #[derive(JSTraceable, MallocSizeOf)]
 pub(crate) struct TaskManager {
-    sender: RefCell<Option<ScriptEventLoopSender>>,
+    sender: DomRefCell<Option<ScriptEventLoopSender>>,
     #[no_trace]
     pipeline_id: PipelineId,
     cancellers: TaskCancellers,
@@ -92,7 +92,7 @@ impl TaskManager {
             Some(shared_canceller) => TaskCancellers::Shared(shared_canceller),
             None => TaskCancellers::OnePerTaskSource(Default::default()),
         };
-        let sender = RefCell::new(sender);
+        let sender = DomRefCell::new(sender);
 
         TaskManager {
             sender,
