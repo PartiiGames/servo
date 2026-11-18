@@ -12,6 +12,7 @@ use js::jsapi::{Heap, JSObject};
 use js::jsval::{JSVal, UndefinedValue};
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject as SafeHandleObject, HandleValue as SafeHandleValue};
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::dom::bindings::callback::{ExceptionHandling, RootedCallback, TracedCallback};
@@ -151,7 +152,7 @@ struct TransferBackPressurePromiseReaction {
 
     /// The backpressurePromise.
     #[ignore_malloc_size_of = "nested Rc"]
-    backpressure_promise: Rc<RefCell<Option<TracedPromise>>>,
+    backpressure_promise: Rc<DomRefCell<Option<TracedPromise>>>,
 
     /// The chunk received by the `writeAlgorithm`.
     #[ignore_malloc_size_of = "mozjs"]
@@ -286,7 +287,7 @@ pub enum UnderlyingSinkType {
     /// Algorithms supporting streams transfer are implemented in Rust.
     /// The promise and port used in those algorithms are stored here.
     Transfer {
-        backpressure_promise: Rc<RefCell<Option<TracedPromise>>>,
+        backpressure_promise: Rc<DomRefCell<Option<TracedPromise>>>,
         port: Dom<MessagePort>,
     },
     /// Algorithms supporting transform streams are implemented in Rust.

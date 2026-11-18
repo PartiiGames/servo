@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::mem;
 use std::ptr::{self};
@@ -867,7 +867,7 @@ impl WritableStream {
 
         // Let backpressurePromise be a new promise.
         let backpressure_promise = Promise::new(cx, &global);
-        rooted!(&in(cx) let backpressure_promise = RcHolder(Rc::new(RefCell::new(Some(backpressure_promise.to_traced())))));
+        rooted!(&in(cx) let backpressure_promise = RcHolder(Rc::new(DomRefCell::new(Some(backpressure_promise.to_traced())))));
 
         // Let controller be a new WritableStreamDefaultController.
         let controller = WritableStreamDefaultController::new(
@@ -1121,7 +1121,7 @@ pub(crate) struct CrossRealmTransformWritable {
 
     /// The `backpressurePromise` used in the algorithm.
     #[conditional_malloc_size_of]
-    backpressure_promise: Rc<RefCell<Option<TracedPromise>>>,
+    backpressure_promise: Rc<DomRefCell<Option<TracedPromise>>>,
 }
 
 impl CrossRealmTransformWritable {

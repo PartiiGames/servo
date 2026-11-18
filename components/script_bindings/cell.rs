@@ -56,6 +56,25 @@ impl<T> DomRefCell<T> {
         }
     }
 
+    /// Borrow the contents for a GC trace hook, which may run on a GC helper thread (parallel marking).
+    ///
+    /// # Safety
+    ///
+    /// Like `borrow_for_layout`, this leaves the borrow flag untouched (it is only read), so several marking
+    /// threads can trace the same cell at once. Only for tracing while the mutator is stopped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is currently mutably borrowed, as `borrow` did.
+    #[expect(unsafe_code)]
+    pub unsafe fn borrow_for_gc_trace(&self) -> &T {
+        unsafe {
+            self.value
+                .try_borrow_unguarded()
+                .expect("cell is mutably borrowed during a GC trace")
+        }
+    }
+
     /// Borrow the contents for the purpose of script deallocation.
     ///
     /// # Safety
@@ -264,14 +283,22 @@ impl<T: Default> DomRefCell<T> {
     }
 }
 
+// Tracing reads the cell without touching its borrow flag (`borrow_for_gc_trace`). SpiderMonkey's parallel marking
+// (on by default since the gc-fast defaults) calls trace hooks on GC helper threads, several at once, and a value
+// that several JS objects share through an `Rc` (the script thread's window proxies, traced by every WindowProxy) is
+// then traced by two threads together. `borrow()` there is a non-atomic increment and decrement of the flag: two
+// threads lose an update, the flag ends at -1 ("mutably borrowed") and the next borrow panics inside the GC, which
+// cannot unwind and aborts the app (rocket-to-heaven soak, job f2650144: "RefCell already mutably borrowed" in
+// ScriptWindowProxies' trace from ParallelMarkTask). Reading the flag only is safe: the mutator is stopped while a
+// slice marks, so nothing writes it.
 unsafe impl<T: CustomTraceable> CustomTraceable for DomRefCell<T> {
     unsafe fn trace(&self, trc: *mut JSTracer) {
-        unsafe { (*self).borrow().trace(trc) }
+        unsafe { (*self).borrow_for_gc_trace().trace(trc) }
     }
 }
 
 unsafe impl<T: js::gc::Traceable> js::gc::Traceable for DomRefCell<T> {
     unsafe fn trace(&self, trc: *mut JSTracer) {
-        unsafe { (*self).borrow().trace(trc) };
+        unsafe { (*self).borrow_for_gc_trace().trace(trc) };
     }
 }
