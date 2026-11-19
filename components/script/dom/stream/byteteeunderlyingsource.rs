@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
@@ -12,6 +12,7 @@ use js::jsapi::{Heap, Value};
 use js::jsval::UndefinedValue;
 use js::rust::HandleValue as SafeHandleValue;
 use js::typedarray::ArrayBufferViewU8;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 
 use super::byteteereadintorequest::ByteTeeReadIntoRequest;
@@ -44,7 +45,7 @@ pub(crate) enum ByteTeePullAlgorithm {
 pub(crate) struct ByteTeeUnderlyingSource {
     reflector_: Reflector,
     #[conditional_malloc_size_of]
-    reader: Rc<RefCell<ReaderType>>,
+    reader: Rc<DomRefCell<ReaderType>>,
     stream: Dom<ReadableStream>,
     branch_1: MutNullableDom<ReadableStream>,
     branch_2: MutNullableDom<ReadableStream>,
@@ -74,7 +75,7 @@ impl ByteTeeUnderlyingSource {
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new(
         cx: &mut JSContext,
-        reader: Rc<RefCell<ReaderType>>,
+        reader: Rc<DomRefCell<ReaderType>>,
         stream: &ReadableStream,
         reading: Rc<Cell<bool>>,
         read_again_for_branch_1: Rc<Cell<bool>>,
@@ -124,7 +125,7 @@ impl ByteTeeUnderlyingSource {
     pub(crate) fn forward_reader_error(
         &self,
         cx: &mut JSContext,
-        this_reader: Rc<RefCell<ReaderType>>,
+        this_reader: Rc<DomRefCell<ReaderType>>,
     ) {
         let this_reader = this_reader.borrow();
         match &*this_reader {

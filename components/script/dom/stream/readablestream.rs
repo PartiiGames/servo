@@ -30,6 +30,7 @@ use crate::dom::bindings::codegen::Bindings::ReadableStreamBinding::{
     ReadableStreamGetReaderOptions, ReadableStreamMethods, ReadableStreamReaderMode,
     ReadableWritablePair, StreamPipeOptions,
 };
+use script_bindings::cell::DomRefCell;
 use script_bindings::str::DOMString;
 use crate::dom::domexception::{DOMErrorName, DOMException};
 use crate::dom::encoding::textdecoderstream::TextDecoderStream;
@@ -130,7 +131,7 @@ pub(crate) struct PipeTo {
     /// Pending writes are needed when shutting down(with an action),
     /// because we can only finalize when all writes are finished.
     #[ignore_malloc_size_of = "nested Rc"]
-    pending_writes: Rc<RefCell<VecDeque<TracedPromise>>>,
+    pending_writes: Rc<DomRefCell<VecDeque<TracedPromise>>>,
 
     /// The state machine.
     #[conditional_malloc_size_of]
@@ -159,12 +160,12 @@ pub(crate) struct PipeTo {
     /// The error potentially passed to shutdown,
     /// stored here because we must keep it across a microtask.
     #[ignore_malloc_size_of = "mozjs"]
-    shutdown_error: Rc<RefCell<Option<Heap<JSVal>>>>,
+    shutdown_error: Rc<DomRefCell<Option<Heap<JSVal>>>>,
 
     /// The promise returned by a shutdown action.
     /// We keep it to only continue when it is not pending anymore.
     #[conditional_malloc_size_of]
-    shutdown_action_promise: Rc<RefCell<Option<TracedPromise>>>,
+    shutdown_action_promise: Rc<DomRefCell<Option<TracedPromise>>>,
 
     /// The promise resolved or rejected at
     /// <https://streams.spec.whatwg.org/#rs-pipeTo-finalize>
@@ -1711,7 +1712,7 @@ impl ReadableStream {
 
         // Let reader be ? AcquireReadableStreamDefaultReader(stream).
         let reader = self.acquire_default_reader(cx)?;
-        let reader = Rc::new(RefCell::new(ReaderType::Default(MutNullableDom::new(
+        let reader = Rc::new(DomRefCell::new(ReaderType::Default(MutNullableDom::new(
             Some(&reader),
         ))));
 

@@ -11,7 +11,7 @@
 //! native Promise values that refer to the same JS value yet are distinct native objects
 //! (ie. address equality for the native objects is meaningless).
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::rc::Rc;
@@ -33,6 +33,7 @@ use js::rust::wrappers2::{
     SetAnyPromiseIsHandled, SetPromiseUserInputEventHandlingState,
 };
 use js::rust::{HandleObject, HandleValue, MutableHandleObject};
+use script_bindings::cell::DomRefCell;
 use script_bindings::interfaces::{
     HeapTracedPromiseHelpers, PromiseHelpers, StackRootPromiseHelpers,
 };
@@ -515,7 +516,7 @@ struct WaitForAllFulfillmentHandler {
     /// The results of the promises.
     #[ignore_malloc_size_of = "mozjs"]
     #[expect(clippy::vec_box)]
-    result: Rc<RefCell<Vec<Box<Heap<JSVal>>>>>,
+    result: Rc<DomRefCell<Vec<Box<Heap<JSVal>>>>>,
 
     /// The index identifying which promise this handler is attached to.
     promise_index: usize,
@@ -647,7 +648,7 @@ fn wait_for_all(
     // Note: done with `enumerate` below.
 
     // Let result be a list containing total null values.
-    let result: Rc<RefCell<Vec<Box<Heap<JSVal>>>>> = Default::default();
+    let result: Rc<DomRefCell<Vec<Box<Heap<JSVal>>>>> = Default::default();
 
     // For each promise of promises:
     for (promise_index, promise) in promises.into_iter().enumerate() {
