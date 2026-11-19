@@ -83,7 +83,11 @@ use crate::fetch::network_listener::{
 pub(crate) fn hardware_concurrency() -> u64 {
     static CPUS: LazyLock<u64> = LazyLock::new(|| num_cpus::get().try_into().unwrap_or(1));
 
-    *CPUS
+    // Partii: the embedder may report fewer (dom_partii_hardware_concurrency), never more.
+    match pref!(dom_partii_hardware_concurrency) {
+        n if n > 0 => (n as u64).min(*CPUS),
+        _ => *CPUS,
+    }
 }
 
 /// <https://html.spec.whatwg.org/multipage/#safelisted-scheme>
