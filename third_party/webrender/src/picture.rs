@@ -2183,6 +2183,21 @@ fn prepare_tiled_picture_surface(
                             ),
                         );
 
+                        // Partii (gf-passes): the tile task this tile would have without a
+                        // sub-graph, for drawing its post-backdrop part on the tile directly.
+                        let partii_static = match surface {
+                            ResolvedSurfaceTexture::TextureCache { .. } => Some(crate::surface::PartiiStaticTile {
+                                surface: surface.clone(),
+                                size: composite_task_size,
+                                content_origin,
+                                surface_spatial_node_index,
+                                device_pixel_scale,
+                                scissor_rect,
+                                valid_rect,
+                            }),
+                            ResolvedSurfaceTexture::Native { .. } => None,
+                        };
+
                         let composite_task_id = frame_state.rg_builder.add().init(
                             RenderTask::new(
                                 RenderTaskLocation::Static {
@@ -2207,6 +2222,7 @@ fn prepare_tiled_picture_surface(
                                 composite_task_id: Some(composite_task_id),
                                 dirty_rect: tile.cached_surface.local_dirty_rect,
                                 sub_graph_pics: tile.cached_surface.sub_graph_pics.clone(),
+                                partii_static,
                             },
                         );
                     } else {
@@ -2243,6 +2259,7 @@ fn prepare_tiled_picture_surface(
                                 composite_task_id: None,
                                 dirty_rect: tile.cached_surface.local_dirty_rect,
                                 sub_graph_pics: Vec::new(),
+                                partii_static: None,
                             },
                         );
                     }

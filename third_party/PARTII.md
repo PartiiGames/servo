@@ -47,6 +47,15 @@ Patches on top of webrender 0.70.0:
   re-running the picture and its downscale-and-blur chain (src/picture.rs,
   src/picture_composite_mode.rs, src/render_task_cache.rs, src/resource_cache.rs, src/surface.rs,
   src/tile_cache/mod.rs, src/invalidation/vert_buffer.rs, src/batch.rs).
+- `PARTII_WR_BD_PASSES` (bit mask, default 3; `=0` is upstream): fewer dependent render passes for a
+  backdrop-filter (stream gf-passes; on a software GL each dependent pass makes the rasterizer threads wait for
+  each other, which costs most when other threads keep the CPUs busy). Bit 1: a backdrop's intermediate surface
+  that only copies its one blur's output (no mask, same size and origin, rect uv mapping) aliases that output
+  (`RenderTaskLocation::Existing`) and draws nothing, so `BackdropRender` reads the blur directly
+  (src/surface.rs `partii_alias_intermediate`). Bit 2: a picture-cache tile with one backdrop sub-graph draws
+  its post-backdrop prims on the tile itself, and its tile composite copies only the pre-backdrop content, in the
+  pass beside the resolve (src/surface.rs `PartiiStaticTile`, src/picture.rs). The `PARTII_WR_INVAL_LOG` dump
+  lists every pass's tasks and inputs.
 - `PARTII_WR_INVAL_LOG=<passes>` (off by default; measurement only): logs why picture-cache tiles are
   redrawn (a summary every 2 s, and a dump of frames with at least <passes> render passes)
   (src/invalidation/, src/picture.rs, src/frame_builder.rs).

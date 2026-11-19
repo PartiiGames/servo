@@ -316,6 +316,45 @@ pub struct SurfaceTileDescriptor {
     pub dirty_rect: PictureRect,
     /// Partii: the backdrop-filter sub-graphs drawn on this tile (`CachedSurface::sub_graph_pics`).
     pub sub_graph_pics: Vec<PictureIndex>,
+    /// Partii (`partii_bd_passes` bit 2): for a tile drawn through an off-screen content task and a
+    /// tile composite, the picture-cache tile it composites into, so the part after its one
+    /// backdrop-filter can be drawn on that tile directly (see `PartiiStaticTile`).
+    pub partii_static: Option<PartiiStaticTile>,
+}
+
+/// Partii (gf-passes): the picture-cache tile task parameters of a tile that has a backdrop-filter
+/// sub-graph (the ones the tile would use without one). Upstream draws such a tile as
+///   content task (pre-backdrop prims) -> [resolve, blur, ...] -> same content task again
+///   (post-backdrop prims) -> tile composite (copy into the picture-cache tile),
+/// two render passes after the sub-graph. With one sub-graph on the tile, the copy only needs the
+/// pre-backdrop content: it runs in the pass after the content task (beside the resolve), and the
+/// post-backdrop prims are drawn straight onto the picture-cache tile, so the frame has one
+/// dependent pass less (on a software GL every dependent pass makes the rasterizer threads wait
+/// for each other).
+#[derive(Clone)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct PartiiStaticTile {
+    pub surface: crate::picture::ResolvedSurfaceTexture,
+    pub size: DeviceIntSize,
+    pub content_origin: DevicePoint,
+    pub surface_spatial_node_index: SpatialNodeIndex,
+    pub device_pixel_scale: DevicePixelScale,
+    pub scissor_rect: DeviceIntRect,
+    pub valid_rect: DeviceIntRect,
+}
+
+/// Partii (gf-passes): `PARTII_WR_BD_PASSES`, a bit mask of the backdrop-filter pass cuts (default
+/// all on; `=0` is upstream):
+///   1: a backdrop's intermediate surface that is a plain copy of its blur's output (one blur, no
+///      mask, same size and origin) aliases that output instead of drawing a copy (one pass less);
+///   2: a tile's post-backdrop prims are drawn on its picture-cache tile, its tile composite copies
+///      the pre-backdrop content beside the resolve (one pass less; `PartiiStaticTile`).
+pub fn partii_bd_passes() -> u32 {
+    static V: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
+        std::env::var("PARTII_WR_BD_PASSES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(3)
+    });
+    *V
 }
 
 /// Partii: backdrop-filter sub-graphs split, and are dependencies of, only the picture-cache
@@ -675,6 +714,9 @@ impl SurfaceBuilder {
                     let reads_tile = |descriptor: &SurfaceTileDescriptor| {
                         !backdrop_local() || descriptor.sub_graph_pics.contains(&pic_index)
                     };
+                    if child_root_task_id.is_none() && builder.extra_dependencies.is_empty() {
+                        partii_alias_intermediate(child_render_task_id, rg_builder, cmd_buffers);
+                    }
                     // Get info about the resolve operation to copy from parent surface or tiles to the picture cache task
                     if let Some(resolve_task_id) = builder.resolve_source {
                         let mut src_task_ids = Vec::new();
@@ -705,6 +747,67 @@ impl SurfaceBuilder {
                                         continue;
                                     }
                                     let parent_task_id = descriptor.current_task_id;
+
+                                    // Partii (gf-passes, `PartiiStaticTile`): the tile's only sub-graph, on a
+                                    // tile drawn through a content task and a tile composite: the composite
+                                    // copies the pre-backdrop content now, and the rest of the tile is drawn
+                                    // on the picture-cache tile itself.
+                                    if partii_bd_passes() & 2 != 0 && backdrop_local() &&
+                                        descriptor.sub_graph_pics.len() == 1 &&
+                                        descriptor.composite_task_id.is_some() &&
+                                        matches!(rg_builder.get_task(parent_task_id).location, RenderTaskLocation::Unallocated { .. })
+                                    {
+                                        if let Some(st) = descriptor.partii_static.clone() {
+                                            let composite_task_id = descriptor.composite_task_id.unwrap();
+                                            src_task_ids.push(parent_task_id);
+                                            rg_builder.add_dependency(resolve_task_id, parent_task_id);
+                                            rg_builder.add_dependency(composite_task_id, parent_task_id);
+                                            match rg_builder.get_task_mut(composite_task_id).kind {
+                                                RenderTaskKind::TileComposite(ref mut info) => {
+                                                    info.task_id = Some(parent_task_id);
+                                                }
+                                                _ => unreachable!("bug: not a tile composite"),
+                                            }
+                                            let cmd_buffer_index = cmd_buffers.create_cmd_buffer();
+                                            let new_task_id = rg_builder.add().init(
+                                                RenderTask::new(
+                                                    RenderTaskLocation::Static {
+                                                        surface: crate::render_task::StaticRenderTaskSurface::PictureCache {
+                                                            surface: st.surface.clone(),
+                                                        },
+                                                        rect: st.size.into(),
+                                                    },
+                                                    RenderTaskKind::new_picture(
+                                                        st.size,
+                                                        true,
+                                                        st.content_origin,
+                                                        st.surface_spatial_node_index,
+                                                        st.surface_spatial_node_index,
+                                                        st.device_pixel_scale,
+                                                        Some(st.scissor_rect),
+                                                        Some(st.valid_rect),
+                                                        None,   // drawn over the composited pre-backdrop content
+                                                        cmd_buffer_index,
+                                                        false,
+                                                        None,
+                                                    ),
+                                                ),
+                                            );
+                                            // Drawn after the composite (same tile), not reading it.
+                                            rg_builder.add_dependency(new_task_id, composite_task_id);
+                                            tiles.insert(
+                                                key,
+                                                SurfaceTileDescriptor {
+                                                    current_task_id: new_task_id,
+                                                    composite_task_id: None,
+                                                    partii_static: None,
+                                                    ..descriptor
+                                                },
+                                            );
+                                            continue;
+                                        }
+                                    }
+
                                     let parent_task = rg_builder.get_task_mut(parent_task_id);
 
                                     match parent_task.location {
@@ -964,6 +1067,68 @@ impl SurfaceBuilder {
     pub fn finalize(self) {
         assert!(self.builder_stack.is_empty());
     }
+}
+
+/// Partii (gf-passes, `partii_bd_passes` bit 1): a backdrop-filter's output surface
+/// (`PictureCompositeMode::IntermediateSurface`) that only draws one blur's result, unmasked, at
+/// the blur's own size and origin, is a copy of that result: point it at the blur's output
+/// (`RenderTaskLocation::Existing`) and drop its draws, so `BackdropRender` reads the blur
+/// directly and the frame has one dependent pass less. Checked from the task graph: the
+/// intermediate's only input is a horizontal blur whose vertical blur reads the resolve picture
+/// (no downscale between them), with a plain rect uv mapping; anything else keeps the copy.
+fn partii_alias_intermediate(
+    task_id: RenderTaskId,
+    rg_builder: &mut RenderTaskGraphBuilder,
+    cmd_buffers: &mut CommandBufferList,
+) -> bool {
+    use crate::gpu_types::UvRectKind;
+    if partii_bd_passes() & 1 == 0 {
+        return false;
+    }
+    let (size, origin, scale) = {
+        let t = rg_builder.get_task(task_id);
+        let (size, info) = match (&t.location, &t.kind) {
+            (RenderTaskLocation::Unallocated { size }, RenderTaskKind::Picture(info)) => (*size, info),
+            _ => return false,
+        };
+        if t.children.len() != 1 || !t.sub_tasks.is_empty() || info.resolve_op.is_some() {
+            return false;
+        }
+        (size, info.content_origin, info.device_pixel_scale)
+    };
+    let h_id = rg_builder.get_task(task_id).children[0];
+    let h = rg_builder.get_task(h_id);
+    let ok_h = matches!(h.kind, RenderTaskKind::HorizontalBlur(..)) &&
+        matches!(h.location, RenderTaskLocation::Unallocated { size: s } if s == size) &&
+        matches!(h.uv_rect_kind, UvRectKind::Rect) &&
+        h.children.len() == 1 && !h_id.has_sub_rect();
+    if !ok_h {
+        return false;
+    }
+    let v = rg_builder.get_task(h.children[0]);
+    if !matches!(v.kind, RenderTaskKind::VerticalBlur(..)) || v.children.len() != 1 ||
+        !matches!(v.location, RenderTaskLocation::Unallocated { size: s } if s == size)
+    {
+        return false;
+    }
+    let c = rg_builder.get_task(v.children[0]);
+    let ok_c = match (&c.location, &c.kind) {
+        (RenderTaskLocation::Unallocated { size: s }, RenderTaskKind::Picture(ci)) =>
+            *s == size && ci.content_origin == origin && ci.device_pixel_scale == scale,
+        _ => false,
+    };
+    if !ok_c {
+        return false;
+    }
+    let cmd_buffer_index = cmd_buffers.create_cmd_buffer();
+    let t = rg_builder.get_task_mut(task_id);
+    t.location = RenderTaskLocation::Existing { parent_task_id: h_id, size };
+    if let RenderTaskKind::Picture(ref mut info) = t.kind {
+        info.clear_color = None;
+        info.can_use_shared_surface = false;
+        info.cmd_buffer_index = cmd_buffer_index;
+    }
+    true
 }
 
 

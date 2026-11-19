@@ -1516,9 +1516,32 @@ fn partii_inval_flush(graph: &RenderTaskGraph) {
                 pics.push(format!("{}x{}", s.width, s.height));
             }
         }
+        // Partii (gf-passes): every pass with its tasks: <index>:<kind> <w>x<h> <location>
+        // (D dynamic, S picture-cache tile or texture cache, R read-only) <- [inputs].
+        let mut by_pass = String::new();
+        for (p, pass) in graph.passes.iter().enumerate() {
+            let mut line = format!("  pass {} ({} targets):", p, pass.sub_passes.len());
+            for id in &pass.task_ids {
+                let t = &graph.tasks[id.index()];
+                let s = t.get_target_size();
+                let loc = match t.location {
+                    crate::render_task::RenderTaskLocation::Dynamic { .. } => "D",
+                    crate::render_task::RenderTaskLocation::Static { ref surface, .. } => match surface {
+                        crate::render_task::StaticRenderTaskSurface::PictureCache { .. } => "T",
+                        crate::render_task::StaticRenderTaskSurface::ReadOnly { .. } => "R",
+                        _ => "S",
+                    },
+                    _ => "?",
+                };
+                let ch: Vec<String> = t.children.iter().map(|c| c.index().to_string()).collect();
+                line.push_str(&format!(" {}:{} {}x{} {} <-[{}];", id.index(), t.kind.as_str(), s.width, s.height, loc, ch.join(",")));
+            }
+            by_pass.push_str(&line);
+            by_pass.push('\n');
+        }
         eprintln!(
-            "partii-inval frame: passes {} tasks {} kinds {:?} pictures [{}]\n{}",
-            graph.passes.len(), graph.tasks.len(), kinds, pics.join(" "), text.trim_end(),
+            "partii-inval frame: passes {} tasks {} kinds {:?} pictures [{}]\n{}{}",
+            graph.passes.len(), graph.tasks.len(), kinds, pics.join(" "), by_pass, text.trim_end(),
         );
     }
     if now - since >= std::time::Duration::from_secs(2) {
