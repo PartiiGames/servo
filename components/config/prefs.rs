@@ -215,6 +215,9 @@ pub struct Preferences {
     /// Partii: the PartiiHot namespace, calls into Hot TS compiled ahead of time and linked into the
     /// embedder (console mode, no JIT; script::partii_hot).
     pub dom_partii_hot_enabled: bool,
+    /// Partii: navigator.hardwareConcurrency when above 0 (the embedder's count of the cores a page can
+    /// use, e.g. less the software GL rasterizer's threads); 0 is every CPU this process may run on.
+    pub dom_partii_hardware_concurrency: i64,
     // feature: Permissions API | #31235 | Web/API/Permissions_API
     pub dom_permissions_enabled: bool,
     pub dom_permissions_testing_allowed_in_nonsecure_contexts: bool,
@@ -525,6 +528,7 @@ impl Preferences {
             dom_notification_enabled: false,
             dom_parallel_css_parsing_enabled: true,
             dom_partii_hot_enabled: false,
+            dom_partii_hardware_concurrency: 0,
             dom_offscreen_canvas_enabled: false,
             dom_permissions_enabled: false,
             dom_permissions_testing_allowed_in_nonsecure_contexts: false,
