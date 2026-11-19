@@ -1122,11 +1122,25 @@ fn partii_task_tree(id: RenderTaskId, rg: &RenderTaskGraphBuilder, depth: usize)
     s
 }
 
+/// Partii (gf-passes): a uv kind that samples the whole task rect: `Rect`, or the identity `Quad`
+/// that `calculate_uv_rect_kind` gives an axis-aligned surface.
+fn partii_uv_is_rect(k: &crate::gpu_types::UvRectKind) -> bool {
+    use crate::gpu_types::UvRectKind;
+    match *k {
+        UvRectKind::Rect => true,
+        UvRectKind::Quad { top_left, top_right, bottom_left, bottom_right } => {
+            let is = |v: DeviceHomogeneousVector, x: f32, y: f32| {
+                v.w != 0.0 && (v.x / v.w - x).abs() < 1e-4 && (v.y / v.w - y).abs() < 1e-4
+            };
+            is(top_left, 0.0, 0.0) && is(top_right, 1.0, 0.0) && is(bottom_left, 0.0, 1.0) && is(bottom_right, 1.0, 1.0)
+        }
+    }
+}
+
 fn partii_blur_chain(
     task_id: RenderTaskId,
     rg_builder: &RenderTaskGraphBuilder,
 ) -> Option<(RenderTaskId, RenderTaskId, RenderTaskId)> {
-    use crate::gpu_types::UvRectKind;
     let t = rg_builder.get_task(task_id);
     match t.kind {
         RenderTaskKind::Picture(ref info) if info.resolve_op.is_none() => {}
@@ -1141,7 +1155,7 @@ fn partii_blur_chain(
         RenderTaskLocation::Unallocated { size } => size,
         _ => return None,
     };
-    if !matches!(h.kind, RenderTaskKind::HorizontalBlur(..)) || !matches!(h.uv_rect_kind, UvRectKind::Rect) ||
+    if !matches!(h.kind, RenderTaskKind::HorizontalBlur(..)) || !partii_uv_is_rect(&h.uv_rect_kind) ||
         h.children.len() != 1 || h_id.has_sub_rect()
     {
         return None;
