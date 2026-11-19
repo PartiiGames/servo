@@ -725,6 +725,13 @@ impl SurfaceBuilder {
                     if partii_chain.is_some() {
                         partii_alias_intermediate(child_render_task_id, rg_builder, cmd_buffers);
                     }
+                    if crate::invalidation::partii_log::enabled() {
+                        crate::invalidation::partii_log::push(&format!(
+                            "  sub-graph pic {:?}: root {:?} extra deps {} resolve {:?} chain {:?}: {}\n",
+                            pic_index, child_root_task_id, builder.extra_dependencies.len(), builder.resolve_source,
+                            partii_chain, partii_task_tree(child_render_task_id, rg_builder, 4),
+                        ));
+                    }
                     let mut partii_tiled = false;
                     // Get info about the resolve operation to copy from parent surface or tiles to the picture cache task
                     if let Some(resolve_task_id) = builder.resolve_source {
@@ -1091,6 +1098,30 @@ impl SurfaceBuilder {
 /// (`PictureCompositeMode::IntermediateSurface`) draws one blur and nothing else: the output's only
 /// input is a horizontal blur whose vertical blur reads the resolve picture, all three the same
 /// size (no downscale between them), with a plain rect uv mapping. Returns (h, v, resolve).
+/// Partii (gf-passes), measurement: a task and its children to `depth`, for the `PARTII_WR_INVAL_LOG` dump.
+fn partii_task_tree(id: RenderTaskId, rg: &RenderTaskGraphBuilder, depth: usize) -> String {
+    let t = rg.get_task(id);
+    let loc = match t.location {
+        RenderTaskLocation::Unallocated { size } => format!("U{}x{}", size.width, size.height),
+        RenderTaskLocation::Existing { parent_task_id, size } => format!("E{:?}/{}x{}", parent_task_id, size.width, size.height),
+        RenderTaskLocation::Dynamic { .. } => "D".to_string(),
+        RenderTaskLocation::Static { .. } => "S".to_string(),
+        _ => "other".to_string(),
+    };
+    let extra = match t.kind {
+        RenderTaskKind::Picture(ref info) => format!(" resolve {} origin {:?} scale {:?}", info.resolve_op.is_some(), info.content_origin, info.device_pixel_scale.0),
+        _ => String::new(),
+    };
+    let mut s = format!("{:?}:{} {} uv {:?} sub {} subrect {}{} [", id, t.kind.as_str(), loc, t.uv_rect_kind,
+        !t.sub_tasks.is_empty(), id.has_sub_rect(), extra);
+    for (i, c) in t.children.iter().enumerate() {
+        if i > 0 { s.push_str(", "); }
+        if depth > 0 { s.push_str(&partii_task_tree(*c, rg, depth - 1)); } else { s.push_str(&format!("{:?}", c)); }
+    }
+    s.push(']');
+    s
+}
+
 fn partii_blur_chain(
     task_id: RenderTaskId,
     rg_builder: &RenderTaskGraphBuilder,
