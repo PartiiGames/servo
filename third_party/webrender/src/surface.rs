@@ -349,10 +349,12 @@ pub struct PartiiStaticTile {
 ///   1: a backdrop's intermediate surface that is a plain copy of its blur's output (one blur, no
 ///      mask, same size and origin) aliases that output instead of drawing a copy (one pass less);
 ///   2: a tile's post-backdrop prims are drawn on its picture-cache tile, its tile composite copies
-///      the pre-backdrop content beside the resolve (one pass less; `PartiiStaticTile`).
+///      the pre-backdrop content beside the resolve (one pass less; `PartiiStaticTile`);
+///   4: such a blur reads its backdrop from the tile's content task, no resolve copy (one pass less;
+///      `partii_blur_reads_tile`).
 pub fn partii_bd_passes() -> u32 {
     static V: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
-        std::env::var("PARTII_WR_BD_PASSES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(3)
+        std::env::var("PARTII_WR_BD_PASSES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(7)
     });
     *V
 }
@@ -714,9 +716,16 @@ impl SurfaceBuilder {
                     let reads_tile = |descriptor: &SurfaceTileDescriptor| {
                         !backdrop_local() || descriptor.sub_graph_pics.contains(&pic_index)
                     };
-                    if child_root_task_id.is_none() && builder.extra_dependencies.is_empty() {
+                    // Partii (gf-passes): a sub-graph that is one blur (`partii_blur_chain`).
+                    let partii_chain = if child_root_task_id.is_none() && builder.extra_dependencies.is_empty() {
+                        partii_blur_chain(child_render_task_id, rg_builder)
+                    } else {
+                        None
+                    };
+                    if partii_chain.is_some() {
                         partii_alias_intermediate(child_render_task_id, rg_builder, cmd_buffers);
                     }
+                    let mut partii_tiled = false;
                     // Get info about the resolve operation to copy from parent surface or tiles to the picture cache task
                     if let Some(resolve_task_id) = builder.resolve_source {
                         let mut src_task_ids = Vec::new();
@@ -737,6 +746,7 @@ impl SurfaceBuilder {
 
                         match self.builder_stack.last_mut().unwrap().kind {
                             CommandBufferBuilderKind::Tiled { ref mut tiles } => {
+                                partii_tiled = true;
                                 let keys: Vec<TileKey> = tiles.keys().cloned().collect();
 
                                 // For each tile in parent surface
@@ -940,9 +950,17 @@ impl SurfaceBuilder {
                             }
                         }
 
+                        // Partii (gf-passes): the blur reads the one tile it needs, no resolve copy.
+                        let partii_direct = match partii_chain {
+                            Some((_, v_id, c_id)) if partii_tiled && c_id == resolve_task_id && src_task_ids.len() == 1 =>
+                                partii_blur_reads_tile(c_id, v_id, src_task_ids[0], rg_builder),
+                            _ => false,
+                        };
+
                         let dest_task = rg_builder.get_task_mut(resolve_task_id);
 
                         match dest_task.kind {
+                            RenderTaskKind::Picture(_) if partii_direct => {}
                             RenderTaskKind::Picture(ref mut dest_task_info) => {
                                 assert!(dest_task_info.resolve_op.is_none());
                                 dest_task_info.resolve_op = Some(ResolveOp {
@@ -1069,55 +1087,77 @@ impl SurfaceBuilder {
     }
 }
 
-/// Partii (gf-passes, `partii_bd_passes` bit 1): a backdrop-filter's output surface
-/// (`PictureCompositeMode::IntermediateSurface`) that only draws one blur's result, unmasked, at
-/// the blur's own size and origin, is a copy of that result: point it at the blur's output
+/// Partii (gf-passes): a backdrop-filter sub-graph whose output surface
+/// (`PictureCompositeMode::IntermediateSurface`) draws one blur and nothing else: the output's only
+/// input is a horizontal blur whose vertical blur reads the resolve picture, all three the same
+/// size (no downscale between them), with a plain rect uv mapping. Returns (h, v, resolve).
+fn partii_blur_chain(
+    task_id: RenderTaskId,
+    rg_builder: &RenderTaskGraphBuilder,
+) -> Option<(RenderTaskId, RenderTaskId, RenderTaskId)> {
+    use crate::gpu_types::UvRectKind;
+    let t = rg_builder.get_task(task_id);
+    match t.kind {
+        RenderTaskKind::Picture(ref info) if info.resolve_op.is_none() => {}
+        _ => return None,
+    }
+    if t.children.len() != 1 || !t.sub_tasks.is_empty() {
+        return None;
+    }
+    let h_id = t.children[0];
+    let h = rg_builder.get_task(h_id);
+    let size = match h.location {
+        RenderTaskLocation::Unallocated { size } => size,
+        _ => return None,
+    };
+    if !matches!(h.kind, RenderTaskKind::HorizontalBlur(..)) || !matches!(h.uv_rect_kind, UvRectKind::Rect) ||
+        h.children.len() != 1 || h_id.has_sub_rect()
+    {
+        return None;
+    }
+    let v_id = h.children[0];
+    let v = rg_builder.get_task(v_id);
+    if !matches!(v.kind, RenderTaskKind::VerticalBlur(..)) || v.children.len() != 1 || v_id.has_sub_rect() ||
+        !matches!(v.location, RenderTaskLocation::Unallocated { size: s } if s == size)
+    {
+        return None;
+    }
+    let c_id = v.children[0];
+    let c = rg_builder.get_task(c_id);
+    match (&c.location, &c.kind) {
+        (RenderTaskLocation::Unallocated { size: s }, RenderTaskKind::Picture(_)) if *s == size && !c_id.has_sub_rect() =>
+            Some((h_id, v_id, c_id)),
+        _ => None,
+    }
+}
+
+/// Partii (gf-passes, `partii_bd_passes` bit 1): the output surface of a `partii_blur_chain`, at the
+/// blur's own size and origin, is a copy of the blur's result: point it at the blur's output
 /// (`RenderTaskLocation::Existing`) and drop its draws, so `BackdropRender` reads the blur
-/// directly and the frame has one dependent pass less. Checked from the task graph: the
-/// intermediate's only input is a horizontal blur whose vertical blur reads the resolve picture
-/// (no downscale between them), with a plain rect uv mapping; anything else keeps the copy.
+/// directly and the frame has one dependent pass less.
 fn partii_alias_intermediate(
     task_id: RenderTaskId,
     rg_builder: &mut RenderTaskGraphBuilder,
     cmd_buffers: &mut CommandBufferList,
 ) -> bool {
-    use crate::gpu_types::UvRectKind;
     if partii_bd_passes() & 1 == 0 {
         return false;
     }
+    let Some((h_id, _, c_id)) = partii_blur_chain(task_id, rg_builder) else { return false };
     let (size, origin, scale) = {
         let t = rg_builder.get_task(task_id);
-        let (size, info) = match (&t.location, &t.kind) {
-            (RenderTaskLocation::Unallocated { size }, RenderTaskKind::Picture(info)) => (*size, info),
+        match (&t.location, &t.kind) {
+            (RenderTaskLocation::Unallocated { size }, RenderTaskKind::Picture(info)) =>
+                (*size, info.content_origin, info.device_pixel_scale),
             _ => return false,
-        };
-        if t.children.len() != 1 || !t.sub_tasks.is_empty() || info.resolve_op.is_some() {
-            return false;
         }
-        (size, info.content_origin, info.device_pixel_scale)
     };
-    let h_id = rg_builder.get_task(task_id).children[0];
-    let h = rg_builder.get_task(h_id);
-    let ok_h = matches!(h.kind, RenderTaskKind::HorizontalBlur(..)) &&
-        matches!(h.location, RenderTaskLocation::Unallocated { size: s } if s == size) &&
-        matches!(h.uv_rect_kind, UvRectKind::Rect) &&
-        h.children.len() == 1 && !h_id.has_sub_rect();
-    if !ok_h {
-        return false;
-    }
-    let v = rg_builder.get_task(h.children[0]);
-    if !matches!(v.kind, RenderTaskKind::VerticalBlur(..)) || v.children.len() != 1 ||
-        !matches!(v.location, RenderTaskLocation::Unallocated { size: s } if s == size)
-    {
-        return false;
-    }
-    let c = rg_builder.get_task(v.children[0]);
-    let ok_c = match (&c.location, &c.kind) {
+    let ok = match (&rg_builder.get_task(c_id).location, &rg_builder.get_task(c_id).kind) {
         (RenderTaskLocation::Unallocated { size: s }, RenderTaskKind::Picture(ci)) =>
             *s == size && ci.content_origin == origin && ci.device_pixel_scale == scale,
         _ => false,
     };
-    if !ok_c {
+    if !ok {
         return false;
     }
     let cmd_buffer_index = cmd_buffers.create_cmd_buffer();
@@ -1127,6 +1167,72 @@ fn partii_alias_intermediate(
         info.clear_color = None;
         info.can_use_shared_surface = false;
         info.cmd_buffer_index = cmd_buffer_index;
+    }
+    true
+}
+
+/// Partii (gf-passes, `partii_bd_passes` bit 4): the resolve picture `c_id` of a `partii_blur_chain`
+/// copies its backdrop from one tile content task `a_id` that holds all of it: the vertical blur
+/// reads that rect of the tile task directly (at the tile's resolution, so a half-resolution
+/// backdrop is halved by the blur's own bilinear taps; sigma and region scaled to source pixels),
+/// and the resolve picture is left as an unused 1x1 task with no resolve. One dependent pass less.
+/// Returns whether it did (then the caller skips the resolve).
+fn partii_blur_reads_tile(
+    c_id: RenderTaskId,
+    v_id: RenderTaskId,
+    a_id: RenderTaskId,
+    rg_builder: &mut RenderTaskGraphBuilder,
+) -> bool {
+    if partii_bd_passes() & 4 == 0 {
+        return false;
+    }
+    let (a_size, a_origin, a_scale) = match (&rg_builder.get_task(a_id).location, &rg_builder.get_task(a_id).kind) {
+        (RenderTaskLocation::Unallocated { size }, RenderTaskKind::Picture(info)) if !a_id.has_sub_rect() =>
+            (*size, info.content_origin, info.device_pixel_scale),
+        _ => return false,
+    };
+    let (c_size, c_origin, c_scale, c_content) = match (&rg_builder.get_task(c_id).location, &rg_builder.get_task(c_id).kind) {
+        (RenderTaskLocation::Unallocated { size }, RenderTaskKind::Picture(info)) =>
+            (*size, info.content_origin, info.device_pixel_scale, info.content_size),
+        _ => return false,
+    };
+    if c_content != c_size || c_scale.0 <= 0.0 {
+        return false;
+    }
+    // The resolve's wanted rect, in the tile task's pixels (handle_resolve's mapping).
+    let r = a_scale.0 / c_scale.0;
+    let p0 = (c_origin.to_vector() * r - a_origin.to_vector()).to_point();
+    let w = c_size.width as f32 * r;
+    let h = c_size.height as f32 * r;
+    let near = |v: f32| (v - v.round()).abs() < 0.01;
+    if !(near(p0.x) && near(p0.y) && near(w) && near(h)) {
+        return false;
+    }
+    let rect = DeviceIntRect::from_origin_and_size(
+        DeviceIntPoint::new(p0.x.round() as i32, p0.y.round() as i32),
+        DeviceIntSize::new(w.round() as i32, h.round() as i32),
+    );
+    if rect.min.x < 0 || rect.min.y < 0 || rect.max.x > a_size.width || rect.max.y > a_size.height || rect.is_empty() {
+        return false;
+    }
+    {
+        let v = rg_builder.get_task_mut(v_id);
+        match v.kind {
+            RenderTaskKind::VerticalBlur(ref mut info) => {
+                info.blur_std_deviation *= r;
+                info.blur_region = (info.blur_region.to_f32() * r).round().to_i32();
+                info.partii_src_rect = Some(rect);
+            }
+            _ => return false,
+        }
+        v.children[0] = a_id;
+    }
+    let c = rg_builder.get_task_mut(c_id);
+    c.location = RenderTaskLocation::Unallocated { size: DeviceIntSize::new(1, 1) };
+    if let RenderTaskKind::Picture(ref mut info) = c.kind {
+        info.clear_color = None;
+        info.can_use_shared_surface = true;
+        info.content_size = DeviceIntSize::new(1, 1);
     }
     true
 }

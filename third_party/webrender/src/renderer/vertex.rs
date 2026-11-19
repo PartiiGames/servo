@@ -46,6 +46,7 @@ pub mod desc {
             VertexAttribute::i32("aBlurDirection"),
             VertexAttribute::i32("aBlurEdgeMode"),
             VertexAttribute::f32x3("aBlurParams"),
+            VertexAttribute::f32x4("aBlurSrcRect"),
         ],
     };
 

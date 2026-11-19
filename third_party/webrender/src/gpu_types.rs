@@ -138,6 +138,8 @@ pub struct BlurInstance {
     pub edge_mode: i32,
     pub blur_std_deviation: f32,
     pub blur_region: DeviceSize,
+    /// Partii (gf-passes): the source rect in texels (p0, p1); all zero = the source task's rect.
+    pub src_rect: [f32; 4],
 }
 
 #[derive(Clone, Debug)]

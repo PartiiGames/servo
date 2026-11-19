@@ -30,6 +30,8 @@ PER_INSTANCE in int aBlurSourceTaskAddress;
 PER_INSTANCE in int aBlurDirection;
 PER_INSTANCE in int aBlurEdgeMode;
 PER_INSTANCE in vec3 aBlurParams;
+// Partii (gf-passes): the source rect in texels (p0, p1); empty = the source task's rect.
+PER_INSTANCE in vec4 aBlurSrcRect;
 
 struct BlurTask {
     RectWithEndpoint task_rect;
@@ -76,6 +78,9 @@ void calculate_gauss_coefficients(float sigma) {
 void main(void) {
     BlurTask blur_task = fetch_blur_task(aBlurRenderTaskAddress);
     RectWithEndpoint src_rect = fetch_render_task_rect(aBlurSourceTaskAddress);
+    if (aBlurSrcRect.z > aBlurSrcRect.x) {
+        src_rect = RectWithEndpoint(aBlurSrcRect.xy, aBlurSrcRect.zw);
+    }
 
     RectWithEndpoint target_rect = blur_task.task_rect;
 

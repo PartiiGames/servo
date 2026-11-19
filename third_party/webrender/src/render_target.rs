@@ -409,6 +409,7 @@ impl RenderTarget {
                     info.edge_mode,
                     task_id.into(),
                     task.children[0],
+                    info.partii_src_rect,
                     render_tasks,
                     &ctx.frame_memory,
                 );
@@ -425,6 +426,7 @@ impl RenderTarget {
                     info.edge_mode,
                     task_id.into(),
                     task.children[0],
+                    info.partii_src_rect,
                     render_tasks,
                     &ctx.frame_memory,
                 );
@@ -621,10 +623,18 @@ fn add_blur_instances(
     edge_mode: BlurEdgeMode,
     task_address: RenderTaskAddress,
     src_task_id: RenderTaskId,
+    partii_src_rect: Option<DeviceIntRect>,
     render_tasks: &RenderTaskGraph,
     memory: &FrameMemory,
 ) {
     let source = render_tasks[src_task_id].get_texture_source();
+    let src_rect = match partii_src_rect {
+        Some(r) => {
+            let r = r.translate(render_tasks[src_task_id].get_target_rect().min.to_vector()).to_f32();
+            [r.min.x, r.min.y, r.max.x, r.max.y]
+        }
+        None => [0.0; 4],
+    };
 
     let instance = BlurInstance {
         task_address,
@@ -633,6 +643,7 @@ fn add_blur_instances(
         blur_std_deviation,
         edge_mode: edge_mode.as_int(),
         blur_region: blur_region.to_f32(),
+        src_rect,
     };
 
     instances

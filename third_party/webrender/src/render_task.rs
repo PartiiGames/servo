@@ -308,6 +308,10 @@ pub struct BlurTask {
     pub target_kind: RenderTargetKind,
     pub blur_region: DeviceIntSize,
     pub edge_mode: BlurEdgeMode,
+    /// Partii (gf-passes, `partii_bd_passes` bit 4): read this rect of the source task (relative to its
+    /// target rect's origin, source pixels) instead of the whole task: a backdrop blur reading the
+    /// picture-cache tile's content task directly, without the resolve copy.
+    pub partii_src_rect: Option<DeviceIntRect>,
 }
 
 impl BlurTask {
@@ -1104,6 +1108,7 @@ impl RenderTask {
                     target_kind,
                     blur_region,
                     edge_mode,
+                    partii_src_rect: None,
                 }),
             ).with_uv_rect_kind(uv_rect_kind));
             rg_builder.add_dependency(blur_task_v, downscaling_src_task_id);
@@ -1115,6 +1120,7 @@ impl RenderTask {
                     target_kind,
                     blur_region,
                     edge_mode,
+                    partii_src_rect: None,
                 }),
             ).with_uv_rect_kind(uv_rect_kind));
             rg_builder.add_dependency(task_id, blur_task_v);
