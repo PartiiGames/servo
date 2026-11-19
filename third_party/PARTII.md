@@ -50,9 +50,10 @@ Patches on top of webrender 0.70.0:
 - `PARTII_WR_BD_PASSES` (bit mask, default 7; `=0` is upstream): fewer dependent render passes for a
   backdrop-filter (stream gf-passes; on a software GL each dependent pass makes the rasterizer threads wait for
   each other, which costs most when other threads keep the CPUs busy). Bit 1: a backdrop's intermediate surface
-  that only copies its one blur's output (no mask, same size and origin, rect uv mapping) aliases that output
-  (`RenderTaskLocation::Existing`) and draws nothing, so `BackdropRender` reads the blur directly
-  (src/surface.rs `partii_alias_intermediate`). Bit 2: a picture-cache tile with one backdrop sub-graph draws
+  that only copies its one blur's output (no mask, same size and origin, rect or identity-quad uv) is skipped:
+  `BackdropRender` samples the blur task (src/prepare.rs, src/batch.rs `partii_tex_task_id`) with the
+  intermediate's mapping, and the intermediate becomes a 1x1 leaf with no draws (src/surface.rs
+  `partii_skip_intermediate`; an `Existing` alias would still need its own pass after the blur). Bit 2: a picture-cache tile with one backdrop sub-graph draws
   its post-backdrop prims on the tile itself, and its tile composite copies only the pre-backdrop content, in the
   pass beside the resolve (src/surface.rs `PartiiStaticTile`, src/picture.rs). Bit 4: such a one-blur backdrop
   whose backdrop lies inside one tile's content task has its vertical blur read that rect of the tile task

@@ -19,6 +19,9 @@ use crate::scene_building::IsVisible;
 #[cfg_attr(feature = "capture", derive(Serialize))]
 pub struct BackdropRenderScratch {
     pub src_task_id: RenderTaskId,
+    /// Partii (gf-passes): the task whose pixels are drawn, when not `src_task_id`'s
+    /// (`SurfaceBuilder::partii_sub_graph_tex`).
+    pub partii_tex_task_id: Option<RenderTaskId>,
 }
 
 #[cfg_attr(feature = "capture", derive(Serialize))]

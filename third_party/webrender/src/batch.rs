@@ -2374,6 +2374,8 @@ impl BatchBuilder {
                 let scratch_handle = prim_info.kind_scratch.unwrap_backdrop_render();
                 let blend_mode = BlendMode::PremultipliedAlpha;
                 let pic_task_id = Some(ctx.scratch.frame.backdrop_render[scratch_handle].src_task_id);
+                // Partii (gf-passes): the pixels may come from the blur task itself (bit 1).
+                let tex_task_id = ctx.scratch.frame.backdrop_render[scratch_handle].partii_tex_task_id.or(pic_task_id);
 
                 let (clip_task_address, clip_mask_texture_id) = ctx.get_prim_clip_task_and_texture(
                     prim_info.clip_task_index,
@@ -2383,7 +2385,7 @@ impl BatchBuilder {
                 let kind = BatchKind::Brush(
                     BrushBatchKind::Image(ImageBufferKind::Texture2D)
                 );
-                let (_, texture) = render_tasks.resolve_location(pic_task_id).unwrap();
+                let (_, texture) = render_tasks.resolve_location(tex_task_id).unwrap();
                 let textures = BatchTextures::prim_textured(
                     texture,
                     clip_mask_texture_id,
@@ -2411,7 +2413,7 @@ impl BatchBuilder {
                     RenderTaskKind::Picture(ref info) => info,
                     _ => panic!("bug: not a picture"),
                 };
-                let target_rect = pic_task.get_target_rect();
+                let target_rect = render_tasks[tex_task_id.unwrap()].get_target_rect();
 
                 let backdrop_rect = DeviceRect::from_origin_and_size(
                     pic_info.content_origin,

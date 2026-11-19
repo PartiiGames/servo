@@ -1518,8 +1518,17 @@ fn prepare_interned_prim_for_render(
                         *pic_index,
                         frame_state.rg_builder,
                     );
+                    let partii_tex = frame_state.surface_builder.partii_sub_graph_tex.remove(pic_index);
+                    if let Some(tex_id) = partii_tex {
+                        frame_state.surface_builder.add_sub_graph_output_task(
+                            tex_id,
+                            *pic_index,
+                            frame_state.rg_builder,
+                        );
+                    }
                     let backdrop_handle = scratch.frame.backdrop_render.push(BackdropRenderScratch {
                         src_task_id: sub_graph_output_id,
+                        partii_tex_task_id: partii_tex,
                     });
                     scratch.frame.draws[prim_instance_index.0 as usize].kind_scratch =
                         KindScratchHandle::BackdropRender(backdrop_handle);

@@ -515,6 +515,9 @@ pub struct SurfaceBuilder {
     // A map of the output render tasks from any sub-graphs that haven't
     // been consumed by BackdropRender prims yet
     pub sub_graph_output_map: FastHashMap<PictureIndex, RenderTaskId>,
+    /// Partii (gf-passes, `partii_bd_passes` bit 1): for a sub-graph whose output surface was dropped
+    /// (`partii_skip_intermediate`), the blur task the BackdropRender samples instead.
+    pub partii_sub_graph_tex: FastHashMap<PictureIndex, RenderTaskId>,
 }
 
 impl SurfaceBuilder {
@@ -523,6 +526,7 @@ impl SurfaceBuilder {
             current_cmd_buffers: CommandBufferTargets::new(),
             builder_stack: Vec::new(),
             sub_graph_output_map: FastHashMap::default(),
+            partii_sub_graph_tex: FastHashMap::default(),
         }
     }
 
@@ -722,8 +726,14 @@ impl SurfaceBuilder {
                     } else {
                         None
                     };
+                    // The task the sub-graph's consumers wait for: the blur itself when bit 1 drops
+                    // the output surface.
+                    let mut partii_out = child_root_task_id.unwrap_or(child_render_task_id);
                     if partii_chain.is_some() {
-                        partii_alias_intermediate(child_render_task_id, rg_builder, cmd_buffers);
+                        if let Some(h_id) = partii_skip_intermediate(child_render_task_id, rg_builder, cmd_buffers) {
+                            partii_out = h_id;
+                            self.partii_sub_graph_tex.insert(pic_index, h_id);
+                        }
                     }
                     if crate::invalidation::partii_log::enabled() {
                         crate::invalidation::partii_log::push(&format!(
@@ -997,14 +1007,14 @@ impl SurfaceBuilder {
                                 }
                                 rg_builder.add_dependency(
                                     descriptor.current_task_id,
-                                    child_root_task_id.unwrap_or(child_render_task_id),
+                                    partii_out,
                                 );
                             }
                         }
                         CommandBufferBuilderKind::Simple { render_task_id: parent_task_id, .. } => {
                             rg_builder.add_dependency(
                                 parent_task_id,
-                                child_root_task_id.unwrap_or(child_render_task_id),
+                                partii_out,
                             );
                         }
                         CommandBufferBuilderKind::Invalid => {
@@ -1177,24 +1187,26 @@ fn partii_blur_chain(
 }
 
 /// Partii (gf-passes, `partii_bd_passes` bit 1): the output surface of a `partii_blur_chain`, at the
-/// blur's own size and origin, is a copy of the blur's result: point it at the blur's output
-/// (`RenderTaskLocation::Existing`) and drop its draws, so `BackdropRender` reads the blur
-/// directly and the frame has one dependent pass less.
-fn partii_alias_intermediate(
+/// blur's own size and origin, would only copy the blur's result (WebRender's IntermediateSurface TODO in
+/// batch.rs, "support making this a pass-through"). The BackdropRender samples the blur task instead
+/// (`partii_sub_graph_tex`; the picture's mapping still comes from this task), and this task becomes a 1x1
+/// leaf with no draws, a child of the blur so the graph frees it. One dependent pass less.
+/// Returns the blur task the consumers wait for.
+fn partii_skip_intermediate(
     task_id: RenderTaskId,
     rg_builder: &mut RenderTaskGraphBuilder,
     cmd_buffers: &mut CommandBufferList,
-) -> bool {
+) -> Option<RenderTaskId> {
     if partii_bd_passes() & 1 == 0 {
-        return false;
+        return None;
     }
-    let Some((h_id, _, c_id)) = partii_blur_chain(task_id, rg_builder) else { return false };
+    let (h_id, _, c_id) = partii_blur_chain(task_id, rg_builder)?;
     let (size, origin, scale) = {
         let t = rg_builder.get_task(task_id);
         match (&t.location, &t.kind) {
-            (RenderTaskLocation::Unallocated { size }, RenderTaskKind::Picture(info)) =>
+            (RenderTaskLocation::Unallocated { size }, RenderTaskKind::Picture(info)) if info.content_size == *size =>
                 (*size, info.content_origin, info.device_pixel_scale),
-            _ => return false,
+            _ => return None,
         }
     };
     let ok = match (&rg_builder.get_task(c_id).location, &rg_builder.get_task(c_id).kind) {
@@ -1203,17 +1215,22 @@ fn partii_alias_intermediate(
         _ => false,
     };
     if !ok {
-        return false;
+        return None;
     }
     let cmd_buffer_index = cmd_buffers.create_cmd_buffer();
-    let t = rg_builder.get_task_mut(task_id);
-    t.location = RenderTaskLocation::Existing { parent_task_id: h_id, size };
-    if let RenderTaskKind::Picture(ref mut info) = t.kind {
-        info.clear_color = None;
-        info.can_use_shared_surface = false;
-        info.cmd_buffer_index = cmd_buffer_index;
+    {
+        let t = rg_builder.get_task_mut(task_id);
+        t.children.clear();
+        t.location = RenderTaskLocation::Unallocated { size: DeviceIntSize::new(1, 1) };
+        if let RenderTaskKind::Picture(ref mut info) = t.kind {
+            info.clear_color = None;
+            info.can_use_shared_surface = true;
+            info.cmd_buffer_index = cmd_buffer_index;
+            info.content_size = DeviceIntSize::new(1, 1);
+        }
     }
-    true
+    rg_builder.add_dependency(h_id, task_id);
+    Some(h_id)
 }
 
 /// Partii (gf-passes, `partii_bd_passes` bit 4): the resolve picture `c_id` of a `partii_blur_chain`
@@ -1270,9 +1287,14 @@ fn partii_blur_reads_tile(
             }
             _ => return false,
         }
+        // The blur's source is its first child (`add_blur_instances`); the resolve picture stays a
+        // second child, so the graph still frees its (1x1) target after the blur's pass.
         v.children[0] = a_id;
+        v.children.push(c_id);
     }
     let c = rg_builder.get_task_mut(c_id);
+    // A leaf now: it no longer copies from the tile, so it does not wait for it.
+    c.children.retain(|t| *t != a_id);
     c.location = RenderTaskLocation::Unallocated { size: DeviceIntSize::new(1, 1) };
     if let RenderTaskKind::Picture(ref mut info) = c.kind {
         info.clear_color = None;
