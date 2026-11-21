@@ -40,7 +40,7 @@
 //! **Incremental marking** (`PARTII_GC_INCREMENTAL`; not on Windows; by default on exactly when
 //! sweeping can be sliced as well, i.e. the barrier tracer shim is built, see below; `=0` turns it
 //! off, `=1` forces it on without the shim): a periodic GC
-//! marks in slices of `PARTII_GC_SLICE_MS` (default 2) at most every `PARTII_GC_SLICE_GAP_MS`
+//! marks in slices of `PARTII_GC_SLICE_MS` (default 1) at most every `PARTII_GC_SLICE_GAP_MS`
 //! (default 10), from the event loops, and sweeps in one pause: as soon as sweeping starts the GC is
 //! finished before any script runs again. The DOM's Rust edges have no write barriers, so `script_bindings::
 //! incremental_gc` shades every reflector Rust hands out while marking, and re-traces the Rust roots
@@ -179,14 +179,17 @@ fn env_switch(name: &str, default: bool) -> bool {
 
 /// Whether window slices are frame-aligned unless `PARTII_GC_FRAME_ALIGN` says otherwise.
 const FRAME_ALIGN_DEFAULT: bool = true;
-/// Defaults from gc-fast (frames A/B 397aaae8, 9e93e105, 915bb056 on ohanarestore; GC p99 like for like): 2 ms slices,
-/// frame-aligned window slices, the idle nursery collection, parallel marking and a 4 MB nursery cap. Each has its
-/// switch: PARTII_GC_SLICE_MS / _US, PARTII_GC_FRAME_ALIGN=0, PARTII_GC_IDLE_NURSERY=0, and PARTII_GC_PARAMS
-/// (PARALLEL_MARKING_ENABLED=0, MAX_NURSERY_BYTES=67108864 = SpiderMonkey's own) overrides the two parameters.
-const SLICE_MS_DEFAULT: u64 = 2;
+/// Defaults from gc-fast (frames A/B 397aaae8, 9e93e105, 915bb056 on ohanarestore; GC p99 like for like): frame-aligned
+/// window slices, the idle nursery collection and parallel marking. gc-fast-3 (74a4fc34, f30c681c on noir, 659d5680 on
+/// ohanarestore): 1 ms slices and a 2 MB nursery cap, which together keep 2d, 3d, ecs, hexii and rocket-to-heaven at
+/// a GC p99 of 1-3 ms on both nodes (was 2 ms and 4 MB: 3d and ecs up to 3.8 ms). Each has its switch:
+/// PARTII_GC_SLICE_MS / _US (2 = the old budget), PARTII_GC_FRAME_ALIGN=0, PARTII_GC_IDLE_NURSERY=0, and
+/// PARTII_GC_PARAMS (PARALLEL_MARKING_ENABLED=0, MAX_NURSERY_BYTES=4194304 = the old cap, 67108864 = SpiderMonkey's
+/// own) overrides the two parameters.
+const SLICE_MS_DEFAULT: u64 = 1;
 const IDLE_NURSERY_DEFAULT: bool = true;
 const PARALLEL_MARKING_DEFAULT: u32 = 1;
-const MAX_NURSERY_BYTES_DEFAULT: u32 = 4 * 1024 * 1024;
+const MAX_NURSERY_BYTES_DEFAULT: u32 = 2 * 1024 * 1024;
 
 /// What the script thread's last turn did, for frame-aligned slices: whether it ran a rendering
 /// update, and the next frame or timer (`None`: nothing limits the turn).
