@@ -5050,6 +5050,18 @@ fn prepare_pixels(
     pixel_format: Option<PixelFormat>,
     mut pixels: Cow<[u8]>,
 ) -> Cow<[u8]> {
+    if let Some(out) = partii_fused_rgba8(
+        internal_format,
+        data_type,
+        size,
+        unpacking_alignment,
+        alpha_treatment,
+        y_axis_treatment,
+        pixel_format,
+        &pixels,
+    ) {
+        return out.into();
+    }
     match alpha_treatment {
         Some(AlphaTreatment::Premultiply) => {
             if let Some(pixel_format) = pixel_format {
@@ -5093,6 +5105,82 @@ fn prepare_pixels(
     }
 
     pixels
+}
+
+/// Partii (stream gpu-mac, 2026-11-22): the common canvas / image upload (an RGBA8 or BGRA8 source into an RGBA
+/// unsigned-byte texture, premultiplied or not, flipped or not) in one pass from the borrowed shared-memory pixels into
+/// one output buffer. The general path below copies them out of shared memory, premultiplies in place, swizzles in
+/// place, copies channel by channel into a new Vec and copies once more to flip: four passes and three buffers, which
+/// on the Apple M5 made a 1280x720 canvas upload 9-14 ms of the WebGL thread (hexii's webgl_upload pauses at each new
+/// game, up to 90 ms). Same bytes out as the general path. PARTII_WEBGL_FUSED_UPLOAD=0: the general path only.
+#[expect(clippy::too_many_arguments)]
+fn partii_fused_rgba8(
+    internal_format: TexFormat,
+    data_type: TexDataType,
+    size: Size2D<u32>,
+    unpacking_alignment: u32,
+    alpha_treatment: Option<AlphaTreatment>,
+    y_axis_treatment: YAxisTreatment,
+    pixel_format: Option<PixelFormat>,
+    pixels: &[u8],
+) -> Option<Vec<u8>> {
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("PARTII_WEBGL_FUSED_UPLOAD").as_deref() != Ok("0")
+    });
+    if !*ON || !matches!(data_type, TexDataType::UnsignedByte) {
+        return None;
+    }
+    if !matches!(
+        internal_format.to_unsized(),
+        TexFormat::RGBA | TexFormat::RGBAInteger
+    ) {
+        return None;
+    }
+    let bgra = match pixel_format? {
+        PixelFormat::BGRA8 => true,
+        PixelFormat::RGBA8 => false,
+        _ => return None,
+    };
+    let premultiply = match alpha_treatment {
+        None => false,
+        Some(AlphaTreatment::Premultiply) => true,
+        Some(AlphaTreatment::Unmultiply) => return None,
+    };
+    let (w, h) = (size.width as usize, size.height as usize);
+    let row = w * 4;
+    if pixels.len() != row * h {
+        return None;
+    }
+    let flip = y_axis_treatment == YAxisTreatment::Flipped;
+    // Rows are padded only when flipped, as flip_pixels_y does.
+    let align = (unpacking_alignment as usize).max(1);
+    let stride = if flip { (row + align - 1) & !(align - 1) } else { row };
+    let mut out = vec![0u8; stride * h];
+    let (ri, bi) = if bgra { (2, 0) } else { (0, 2) };
+    for y in 0..h {
+        let src_y = if flip { h - 1 - y } else { y };
+        let src = &pixels[src_y * row..src_y * row + row];
+        let dst = &mut out[y * stride..y * stride + row];
+        if !premultiply && !bgra {
+            dst.copy_from_slice(src);
+            continue;
+        }
+        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+            let a = s[3];
+            let (r, g, b) = (s[ri], s[1], s[bi]);
+            if premultiply {
+                d[0] = pixels::multiply_u8_color(r, a);
+                d[1] = pixels::multiply_u8_color(g, a);
+                d[2] = pixels::multiply_u8_color(b, a);
+            } else {
+                d[0] = r;
+                d[1] = g;
+                d[2] = b;
+            }
+            d[3] = a;
+        }
+    }
+    Some(out)
 }
 
 /// Components per pixel of a readPixels format. glow's components_per_format panics on the
