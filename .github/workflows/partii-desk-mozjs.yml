@@ -4,7 +4,7 @@
 # plus dist/include, js/src/js-confdefs.h and partii-mozjs.txt from the same build (partii-runtime's
 # tools/gc/mozjs-archive.sh, for MSVC). The release servoshell built on it shows the shim compiles and links.
 # Runs only on pushes to partii/desk-* branches of PartiiGames/servo (never upstream's workflows, never a PR).
-# No secrets: the fork is public and so are these logs.
+# No secrets: the fork is public and so are these logs (and the archive artifact).
 name: partii-desk-mozjs
 on:
   push:
