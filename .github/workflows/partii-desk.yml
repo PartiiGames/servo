@@ -5,7 +5,7 @@
 # tools/gc/mozjs-archive.sh, for MSVC). The release servoshell built on it shows the shim compiles and links.
 # Runs only on pushes to partii/desk-* branches of PartiiGames/servo (never upstream's workflows, never a PR).
 # No secrets: the fork is public and so are these logs (and the archive artifact).
-name: partii-desk-mozjs
+name: partii-desk
 on:
   push:
     branches: ["partii/desk-*"]
@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: partii-desk-mozjs-${{ github.ref }}
+  group: partii-desk-${{ github.ref }}
   cancel-in-progress: true
 
 env:
