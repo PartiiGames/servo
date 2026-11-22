@@ -789,6 +789,8 @@ impl WebGLThread {
         // Partii (frame-attr): the thread's work per message, by kind.
         let _span = servo_base::frame_trace::enabled()
             .then(|| servo_base::frame_trace::span(frame_trace_phase(&msg)));
+        // Partii (gpu-mac): PARTII_WEBGL_SLOW_MS=<ms> logs every message that took longer, with what it was.
+        let _slow = partii_slow_ms().map(|ms| PartiiSlowLog(ms, std::time::Instant::now(), partii_describe(&msg)));
         match msg {
             WebGLMsg::CreateContext(painter_id, version, size, attributes, result_sender) => {
                 let result = self.create_webgl_context(painter_id, version, size, attributes);
@@ -6184,6 +6186,44 @@ fn surface_framebuffer(device: &Device, ctx: &Context) -> Option<gl::NativeFrame
         .ok()
         .flatten()
         .and_then(|info| info.framebuffer_object)
+}
+
+/// Partii (gpu-mac): the threshold of PARTII_WEBGL_SLOW_MS (unset: no log).
+fn partii_slow_ms() -> Option<f64> {
+    static MS: std::sync::LazyLock<Option<f64>> = std::sync::LazyLock::new(|| {
+        std::env::var("PARTII_WEBGL_SLOW_MS").ok().and_then(|v| v.parse().ok())
+    });
+    *MS
+}
+
+/// What a message is, short: the command's Debug form (pixel data is a TruncatedDebug) cut to 200 characters.
+fn partii_describe(msg: &WebGLMsg) -> String {
+    let mut d = match msg {
+        WebGLMsg::WebGLCommand(_, command, _) => format!("{command:?}"),
+        WebGLMsg::SwapBuffers(..) => "SwapBuffers".to_owned(),
+        WebGLMsg::CreateContext(_, version, size, ..) => format!("CreateContext({version:?}, {size:?})"),
+        WebGLMsg::ResizeContext(_, size, _) => format!("ResizeContext({size:?})"),
+        _ => "other".to_owned(),
+    };
+    if d.len() > 200 {
+        let mut end = 200;
+        while !d.is_char_boundary(end) {
+            end -= 1;
+        }
+        d.truncate(end);
+    }
+    d
+}
+
+/// Logs the message on drop when it took longer than the threshold.
+struct PartiiSlowLog(f64, std::time::Instant, String);
+impl Drop for PartiiSlowLog {
+    fn drop(&mut self) {
+        let ms = self.1.elapsed().as_secs_f64() * 1000.0;
+        if ms > self.0 {
+            eprintln!("partii-webgl-slow: {ms:.1} ms {}", self.2);
+        }
+    }
 }
 
 /// Partii (frame-attr): the frame trace's phase for a WebGL thread message.
