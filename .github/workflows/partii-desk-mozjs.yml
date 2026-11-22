@@ -1,0 +1,103 @@
+# Partii desk-6: SpiderMonkey from source on a GitHub Windows x64 runner (MOZJS_FROM_SOURCE=1), so the barrier
+# tracer shim (components/script_bindings/incremental_gc_shim.cpp) is built and incremental GC is on, as a Partii
+# mozjs archive for Windows: mozjs_sys's own archive layout (js_static.lib, jsapi.lib, jsglue.lib, the bindings)
+# plus dist/include, js/src/js-confdefs.h and partii-mozjs.txt from the same build (partii-runtime's
+# tools/gc/mozjs-archive.sh, for MSVC). The release servoshell built on it shows the shim compiles and links.
+# Runs only on pushes to partii/desk-* branches of PartiiGames/servo (never upstream's workflows, never a PR).
+# No secrets: the fork is public and so are these logs.
+name: partii-desk-mozjs
+on:
+  push:
+    branches: ["partii/desk-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: partii-desk-mozjs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    name: mozjs from source, Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 300
+    env:
+      CARGO_TARGET_DIR: C:\\t
+      RUSTUP_WINDOWS_PATH_ADD_BIN: 1
+      MOZJS_FROM_SOURCE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1, persist-credentials: false }
+      - uses: ./.github/actions/setup-python
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "20.1"
+          directory: ${{ runner.temp }}/llvm
+      - name: Set LIBCLANG_PATH
+        run: |
+          $llvm_bin = Join-Path $env:LLVM_PATH "bin"
+          echo "LIBCLANG_PATH=$llvm_bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Bootstrap
+        run: |
+          .\mach fetch
+          .\mach bootstrap-gstreamer
+      - name: Build (release, SpiderMonkey from source)
+        timeout-minutes: 240
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          .\mach build --release --locked 2>&1 | Tee-Object -FilePath build.log | Select-String -Pattern "incremental_gc_shim|mozjs_sys|error|warning: unused" | Select-Object -Last 40
+          $rc = $LASTEXITCODE
+          "build exit $rc in $([int]$sw.Elapsed.TotalSeconds) s" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          Select-String -Path build.log -Pattern "incremental_gc_shim" | Select-Object -First 5 | ForEach-Object { $_.Line } | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($rc -ne 0) { Get-Content build.log -Tail 80; exit $rc }
+      - name: Shim built in?
+        shell: bash
+        run: |
+          set +e
+          ls C:/t/release/build/ | grep -E '^(mozjs_sys|script_bindings)-' | head
+          for d in C:/t/release/build/script_bindings-*/out; do ls "$d" | grep -i -E 'shim|\.lib$' | sed "s|^|$d: |"; done
+          grep -h "partii_incremental_gc_shim" C:/t/release/build/script_bindings-*/output 2>/dev/null | head -3
+      - name: Smoketest
+        run: .\mach smoketest --release
+      - name: Partii mozjs archive (Windows)
+        shell: bash
+        run: |
+          set -eu
+          dirs=$(for d in C:/t/release/build/mozjs_sys-*/out/build; do [ -f "$d/dist/include/jsapi.h" ] && [ -f "$d/js/src/js-confdefs.h" ] && [ -f "$d/js/src/build/js_static.lib" ] && echo "$d"; done)
+          [ "$(echo "$dirs" | grep -c .)" = 1 ] || { echo "want one from-source mozjs_sys build, found: $dirs"; exit 2; }
+          B=$dirs; T=x86_64-pc-windows-msvc
+          VER=$(awk '/^name = "mozjs_sys"$/{getline; gsub(/version = |"/,""); print; exit}' Cargo.lock)
+          grep -q '#define JS_DEBUG 1' "$B/dist/include/js-config.h" && { echo "debug SpiderMonkey"; exit 2; }
+          W=$RUNNER_TEMP/mozjs-arch; rm -rf "$W"; mkdir -p "$W/js/src/build" "$W/dist"
+          cp "$B/js/src/build/js_static.lib" "$W/js/src/build/"
+          cp "$B/jsapi.lib" "$B/jsglue.lib" "$B/jsapi.rs" "$B/gluebindings.rs" "$W/"
+          cp "$B/js/src/js-confdefs.h" "$W/js/src/"
+          cp -rL "$B/dist/include" "$W/dist/"
+          { echo "mozjs_sys $VER"; echo "target $T"; python -I -c 'import sys; d=open(sys.argv[1],"rb").read(); h=0xcbf29ce484222325
+          for b in d: h=((h^b)*0x100000001b3)&0xffffffffffffffff
+          print("jsapi.rs fnv1a64 %016x bytes %d" % (h, len(d)))' "$B/jsapi.rs"
+            echo "from $B"; echo "made $(date -u +%FT%TZ) on GitHub Actions run $GITHUB_RUN_ID, fork $GITHUB_SHA"; } > "$W/partii-mozjs.txt"
+          mkdir -p arch && tar -C "$W" -czf "arch/libmozjs-$T.tar.gz" .
+          cat "$W/partii-mozjs.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -l arch; sha256sum arch/*.tar.gz | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: partii-mozjs-x86_64-pc-windows-msvc
+          path: arch
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 14

@@ -170,9 +170,6 @@ fn find_python() -> Command {
 fn build_incremental_gc_shim() {
     println!("cargo::rerun-if-changed=incremental_gc_shim.cpp");
     println!("cargo::rustc-check-cfg=cfg(partii_gc_shim)");
-    if env::var("CARGO_CFG_WINDOWS").is_ok() {
-        return;
-    }
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let build_root = out_dir
         .parent()
@@ -217,14 +214,25 @@ fn build_incremental_gc_shim() {
         std::fs::read_to_string(build_dir.join("dist/include/js-config.h")).unwrap_or_default();
     let debug = config.contains("#define JS_DEBUG 1");
     let mut cc = cc::Build::new();
-    cc.cpp(true)
-        .std("gnu++20")
-        .pic(true)
-        .flag_if_supported("-fno-rtti")
-        .flag_if_supported("-fno-sized-deallocation")
-        .flag_if_supported("-Wno-unused-parameter")
-        .flag_if_supported("-Wno-invalid-offsetof")
-        .flag("-include")
+    // As mozjs_sys compiles its own jsglue.cpp against these headers (its get_common_cc): clang-cl
+    // where it can on Windows (SpiderMonkey's own compiler there), the MSVC spelling of the flags.
+    cc.prefer_clang_cl_over_msvc(true);
+    cc.cpp(true);
+    let msvc = cc.get_compiler().is_like_msvc();
+    if env::var("CARGO_CFG_WINDOWS").is_ok() {
+        cc.std("c++20")
+            .flag_if_supported("-GR-")
+            .define("WIN32", None)
+            .define("_CRT_USE_BUILTIN_OFFSETOF", None);
+    } else {
+        cc.std("gnu++20")
+            .pic(true)
+            .flag_if_supported("-fno-rtti")
+            .flag_if_supported("-fno-sized-deallocation")
+            .flag_if_supported("-Wno-unused-parameter")
+            .flag_if_supported("-Wno-invalid-offsetof");
+    }
+    cc.flag(if msvc { "-FI" } else { "-include" })
         .flag(build_dir.join("js/src/js-confdefs.h").display().to_string())
         .include(build_dir.join("dist/include"))
         .define("STATIC_JS_API", None)
