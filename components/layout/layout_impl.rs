@@ -732,6 +732,7 @@ impl Layout for LayoutThread {
     }
 
     fn reflow(&mut self, reflow_request: ReflowRequest) -> Option<ReflowResult> {
+        let _layout = servo_base::frame_trace::span(servo_base::frame_trace::Phase::Layout);
         time_profile!(
             profile_time::ProfilerCategory::Layout,
             self.profiler_metadata(),
@@ -1667,6 +1668,7 @@ impl LayoutThread {
         image_resolver: &Arc<ImageResolver>,
         reflow_statistics: &mut ReflowStatistics,
     ) -> bool {
+        let _dl = servo_base::frame_trace::span(servo_base::frame_trace::Phase::DisplayList);
         if !ReflowPhases::necessary(&reflow_request.reflow_goal)
             .contains(ReflowPhases::DisplayListConstruction)
         {

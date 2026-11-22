@@ -2662,7 +2662,9 @@ impl GlobalScope {
             );
 
             let mut source = transform_str_to_source_text(&code);
+            let compile_span = servo_base::frame_trace::span(servo_base::frame_trace::Phase::ScriptCompile);
             rooted!(&in(cx) let compiled_script = unsafe { Compile1(cx, options.ptr, &mut source) });
+            drop(compile_span);
 
             if compiled_script.is_null() {
                 debug!("error compiling Dom string");

@@ -2028,6 +2028,13 @@ impl Document {
         let timing = self.global().performance(cx).Now();
 
         let num_callbacks = self.animation_frame_list.borrow().len();
+        // Partii (frame-attr): a frame starts (bit 0: the top-level document's).
+        if num_callbacks > 0 {
+            servo_base::frame_trace::mark(
+                servo_base::frame_trace::Phase::Frame,
+                self.window().is_top_level() as u16,
+            );
+        }
         for _ in 0..num_callbacks {
             rooted!(&in(cx) let maybe_callback = self
                 .animation_frame_list

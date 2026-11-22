@@ -144,6 +144,7 @@ mod picture_textures;
 mod frame_allocator;
 mod bump_allocator;
 mod svg_filter;
+pub mod partii_trace;
 
 ///
 pub mod intern;

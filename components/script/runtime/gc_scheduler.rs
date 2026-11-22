@@ -993,6 +993,11 @@ fn black_remark_before_slice(cx: *mut RawJSContext) {
     let done = unsafe { incremental_gc::black_remark(cx, roots) };
     REMARKED.with(|r| r.set(true));
     let took = started.elapsed();
+    servo_base::frame_trace::record(
+        servo_base::frame_trace::Phase::GcRemark,
+        started,
+        started + took,
+    );
     BLACK_REMARKS.with(|b| {
         let (n, edges, max, total) = b.get();
         b.set((n + 1, edges + done.edges, max.max(took), total + took));

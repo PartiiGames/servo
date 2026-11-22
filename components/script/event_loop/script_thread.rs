@@ -1150,6 +1150,7 @@ impl ScriptThread {
     ///
     /// Returns true if any reflows produced a new display list.
     pub(crate) fn update_the_rendering(&self, cx: &mut js::context::JSContext) -> bool {
+        let _rendering = servo_base::frame_trace::span(servo_base::frame_trace::Phase::Rendering);
         let now = Instant::now();
         self.last_render_opportunity_time.set(Some(now));
         self.cancel_scheduled_update_the_rendering();
@@ -1582,6 +1583,8 @@ impl ScriptThread {
                 &fully_active,
             ),
         };
+        // Partii (frame-attr): the turn, from waking to the end of this function.
+        let _turn = servo_base::frame_trace::span(servo_base::frame_trace::Phase::ScriptTurn);
 
         loop {
             debug!("Handling event: {event:?}");

@@ -786,6 +786,9 @@ impl WebGLThread {
     /// Handles a generic WebGLMsg message
     fn handle_msg(&mut self, msg: WebGLMsg, webgl_chan: &WebGLChan) -> bool {
         trace!("processing {:?}", msg);
+        // Partii (frame-attr): the thread's work per message, by kind.
+        let _span = servo_base::frame_trace::enabled()
+            .then(|| servo_base::frame_trace::span(frame_trace_phase(&msg)));
         match msg {
             WebGLMsg::CreateContext(painter_id, version, size, attributes, result_sender) => {
                 let result = self.create_webgl_context(painter_id, version, size, attributes);
@@ -1110,6 +1113,11 @@ impl WebGLThread {
         };
 
         mark(&mut stats, "gl_loader");
+        if servo_base::frame_trace::enabled() {
+            servo_base::frame_trace::info("gl_renderer_webgl", &unsafe {
+                gl.get_parameter_string(gl::RENDERER)
+            });
+        }
         let limits = GLLimits::detect(&gl, webgl_version);
         mark(&mut stats, "limits");
 
@@ -6176,6 +6184,33 @@ fn surface_framebuffer(device: &Device, ctx: &Context) -> Option<gl::NativeFrame
         .ok()
         .flatten()
         .and_then(|info| info.framebuffer_object)
+}
+
+/// Partii (frame-attr): the frame trace's phase for a WebGL thread message.
+fn frame_trace_phase(msg: &WebGLMsg) -> servo_base::frame_trace::Phase {
+    use servo_base::frame_trace::Phase;
+    match msg {
+        WebGLMsg::WebGLCommand(_, command, _) => match command {
+            WebGLCommand::CompileShader(..) | WebGLCommand::LinkProgram(..) => Phase::WebGlCompile,
+            WebGLCommand::TexImage2D { .. } |
+            WebGLCommand::TexImage2DPBO { .. } |
+            WebGLCommand::TexSubImage2D { .. } |
+            WebGLCommand::TexSubImage2DPBO { .. } |
+            WebGLCommand::TexImage3D { .. } |
+            WebGLCommand::TexImage3DPBO { .. } |
+            WebGLCommand::TexSubImage3D { .. } |
+            WebGLCommand::TexSubImage3DPBO { .. } |
+            WebGLCommand::CompressedTexImage2D { .. } |
+            WebGLCommand::CompressedTexSubImage2D { .. } |
+            WebGLCommand::CompressedTexImage3D { .. } |
+            WebGLCommand::CompressedTexSubImage3D { .. } |
+            WebGLCommand::GenerateMipmap(..) => Phase::WebGlUpload,
+            _ => Phase::WebGl,
+        },
+        WebGLMsg::SwapBuffers(..) => Phase::WebGlSwap,
+        WebGLMsg::CreateContext(..) | WebGLMsg::ResizeContext(..) => Phase::WebGlContext,
+        _ => Phase::WebGl,
+    }
 }
 
 /// Partii (gaps-3): whether this GL is one of Mesa's software rasterizers.

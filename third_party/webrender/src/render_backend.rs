@@ -501,6 +501,7 @@ impl Document {
         render_reasons: RenderReasons,
         chunk_pool: Arc<ChunkPool>,
     ) -> RenderedDocument {
+        let _partii_span = crate::partii_trace::span(crate::partii_trace::Phase::FrameBuild);
         let frame_build_start_time = zeitstempel::now();
 
         // Advance to the next frame.
@@ -1503,6 +1504,7 @@ impl RenderBackend {
         has_built_scene: bool,
         start_time: Option<u64>
     ) -> bool {
+        let _partii_span = crate::partii_trace::span(crate::partii_trace::Phase::Backend);
         let update_doc_start = zeitstempel::now();
 
         let requested_frame = render_frame || self.frame_config.force_invalidation;

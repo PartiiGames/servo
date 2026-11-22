@@ -437,6 +437,10 @@ where
 {
     #[inline]
     pub fn recv(&self) -> ReceiveResult<T> {
+        // Partii (frame-attr): a blocking receive inside a traced span is a wait inside work (a
+        // synchronous reply), not a thread idling between tasks.
+        let _wait = crate::frame_trace::in_span()
+            .then(|| crate::frame_trace::span(crate::frame_trace::Phase::IpcWait));
         match &self.0 {
             GenericReceiverVariants::Ipc(receiver) => Ok(receiver.recv()?),
             GenericReceiverVariants::Crossbeam(receiver) => {

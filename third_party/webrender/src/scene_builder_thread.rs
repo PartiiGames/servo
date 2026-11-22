@@ -540,6 +540,7 @@ impl SceneBuilderThread {
     /// Do the bulk of the work of the scene builder thread.
     fn process_transaction(&mut self, mut txn: TransactionMsg) -> Box<BuiltTransaction> {
         profile_scope!("process_transaction");
+        let _partii_span = crate::partii_trace::span(crate::partii_trace::Phase::SceneBuild);
 
         if let Some(ref hooks) = self.hooks {
             hooks.pre_scene_build();

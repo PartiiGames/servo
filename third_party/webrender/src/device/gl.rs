@@ -2545,6 +2545,7 @@ impl Device {
         descriptor: &VertexDescriptor,
     ) -> Result<(), ShaderError> {
         profile_scope!("compile shader");
+        let _partii_span = crate::partii_trace::span(crate::partii_trace::Phase::ShaderCompile);
 
         let _guard = CrashAnnotatorGuard::new(
             &self.crash_annotator,

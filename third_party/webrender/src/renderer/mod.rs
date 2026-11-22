@@ -1960,6 +1960,7 @@ impl Renderer {
 
     fn update_texture_cache(&mut self) {
         profile_scope!("update_texture_cache");
+        let _partii_span = crate::partii_trace::span(crate::partii_trace::Phase::TextureUpload);
 
         let _gm = self.gpu_profiler.start_marker("texture cache update");
         let mut pending_texture_updates = mem::replace(&mut self.pending_texture_updates, vec![]);

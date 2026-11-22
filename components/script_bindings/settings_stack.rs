@@ -34,6 +34,9 @@ where
     C: AsMut<JSContext>,
     D: DomTypes,
 {
+    // Partii (frame-attr): a JS entry point. Its own time is the game's JS; GC, compiles and
+    // waits inside it are their own spans.
+    let _js = servo_base::frame_trace::span(servo_base::frame_trace::Phase::Js);
     let settings_stack = <D as DomHelpers<D>>::settings_stack();
     let _span = settings_stack.with(|stack| {
         trace!("Prepare to run script with {:p}", global);

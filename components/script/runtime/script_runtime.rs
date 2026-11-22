@@ -627,7 +627,8 @@ impl Runtime {
                 .is_enabled(DiagnosticsLoggingOption::GcProfile)
             {
                 SetGCSliceCallback(cx, Some(gc_slice_callback));
-            } else if gc_stats::enabled() {
+            } else if gc_stats::enabled() | servo_base::frame_trace::enabled() {
+                // Partii (frame-attr): the same callbacks put each GC pause in the frame trace.
                 SetGCSliceCallback(cx, Some(gc_stats::slice_callback));
                 js::rust::wrappers2::AddGCNurseryCollectionCallback(
                     cx,
@@ -1092,6 +1093,14 @@ mod gc_stats {
             let desc = unsafe { &*desc };
             (Some(desc.reason_), desc.isZone_)
         };
+        {
+            use servo_base::frame_trace::{Phase, enter, exit};
+            match progress {
+                GCProgress::GC_SLICE_BEGIN => enter(Phase::GcMajor),
+                GCProgress::GC_SLICE_END => exit(Phase::GcMajor),
+                _ => {},
+            }
+        }
         with(|s| match progress {
             GCProgress::GC_CYCLE_BEGIN => {
                 s.cycle += 1;
@@ -1146,6 +1155,13 @@ mod gc_stats {
         reason: GCReason,
         _data: *mut std::os::raw::c_void,
     ) {
+        {
+            use servo_base::frame_trace::{Phase, enter, exit};
+            match progress {
+                GCNurseryProgress::GC_NURSERY_COLLECTION_START => enter(Phase::GcMinor),
+                GCNurseryProgress::GC_NURSERY_COLLECTION_END => exit(Phase::GcMinor),
+            }
+        }
         with(|s| match progress {
             GCNurseryProgress::GC_NURSERY_COLLECTION_START => {
                 s.minor_start = Some(Instant::now());

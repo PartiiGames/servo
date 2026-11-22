@@ -113,6 +113,7 @@ pub(crate) unsafe fn compile_module(
     intro: Option<&'static CStr>,
     source: &str,
 ) -> *mut JSObject {
+    let _compile = servo_base::frame_trace::span(servo_base::frame_trace::Phase::ScriptCompile);
     let cached = CACHE.with_borrow_mut(|c| {
         let i = c.iter().position(|e| {
             e.url == url && e.line == line && e.intro == intro && *e.source == *source

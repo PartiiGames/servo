@@ -353,11 +353,13 @@ impl RenderingContext for SoftwareRenderingContext {
 
     #[servo_tracing::instrument(skip_all, name = "SoftwareRenderingContext::present")]
     fn present(&self) {
+        let _span = servo_base::frame_trace::span(servo_base::frame_trace::Phase::PresentSwap);
         let device = &mut self.surfman_rendering_info.device.borrow_mut();
         let context = &mut self.surfman_rendering_info.context.borrow_mut();
         let _ = self
             .swap_chain
             .swap_buffers(device, context, PreserveBuffer::No);
+        servo_base::frame_trace::mark(servo_base::frame_trace::Phase::Present, 0);
     }
 
     fn make_current(&self) -> Result<(), Error> {
@@ -542,9 +544,12 @@ impl RenderingContext for WindowRenderingContext {
 
     #[servo_tracing::instrument(skip_all, name = "WindowRenderingContext::present")]
     fn present(&self) {
+        let span = servo_base::frame_trace::span(servo_base::frame_trace::Phase::PresentSwap);
         if let Err(error) = self.surfman_context.present_bound_surface() {
             warn!("Error presenting surface: {error:?}");
         }
+        drop(span);
+        servo_base::frame_trace::mark(servo_base::frame_trace::Phase::Present, 0);
     }
 
     fn make_current(&self) -> Result<(), Error> {

@@ -57,3 +57,7 @@ Patches on top of webrender 0.70.0:
   entries at start, one degenerate instance each into 4x4 scratch targets, so the software GL builds
   its draw-time shader variants before the first frame (`PARTII_WR_WARMUP_MS` caps it, default 4000)
   (src/device/partii_warm.rs, src/device/gl.rs, src/renderer/shade.rs, src/renderer/init.rs).
+- Frame trace spans (stream frame-attr, `src/partii_trace.rs`): the embedder sets `partii_trace::set_hooks`
+  and WebRender calls them around scene building (`process_transaction`), the render backend's document
+  updates and frame builds, texture-cache uploads and shader compiles. Servo's paint sets them when
+  `PARTII_FRAME_TRACE` is on (servo_base::frame_trace); unset, a span is one `OnceLock` load.

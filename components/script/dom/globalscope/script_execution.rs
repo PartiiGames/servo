@@ -104,7 +104,9 @@ impl GlobalScope {
             fill_compile_options(cx, url.as_str(), options, introduction_type, line_number);
 
         // Step 10. Let result be ParseScript(source, settings's realm, script).
+        let compile_span = servo_base::frame_trace::span(servo_base::frame_trace::Phase::ScriptCompile);
         rooted!(&in(cx) let compiled_script = unsafe { Compile1(cx, compilation_options.ptr, &mut source) });
+        drop(compile_span);
 
         // Step 11. If result is a list of errors, then:
         let record = if compiled_script.get().is_null() {

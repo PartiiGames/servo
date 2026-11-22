@@ -812,6 +812,7 @@ impl Paint {
 
     #[servo_tracing::instrument(skip_all)]
     pub fn handle_messages(&self, mut messages: Vec<PaintMessage>) {
+        let _span = servo_base::frame_trace::span(servo_base::frame_trace::Phase::PaintMsg);
         // Pull out the `NewWebRenderFrameReady` messages from the list of messages and handle them
         // at the end of this function. This prevents overdraw when more than a single message of
         // this type of received. In addition, if any of these frames need a repaint, that reflected

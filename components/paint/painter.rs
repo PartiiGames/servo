@@ -216,6 +216,15 @@ impl Painter {
         // Use same texture upload method as Gecko with ANGLE:
         // https://searchfox.org/mozilla-central/source/gfx/webrender_bindings/src/bindings.rs#1215-1219
         let gl_renderer = webrender_gl.get_string(RENDERER);
+        // Partii (frame-attr): WebRender's phases in the frame trace, and the real GL renderer
+        // (pages see a masked one), which tells a GPU node from llvmpipe.
+        if servo_base::frame_trace::enabled() {
+            servo_base::frame_trace::info("gl_renderer", &gl_renderer);
+            webrender::partii_trace::set_hooks(webrender::partii_trace::Hooks {
+                enter: |phase| servo_base::frame_trace::enter(wr_trace_phase(phase)),
+                exit: |phase| servo_base::frame_trace::exit(wr_trace_phase(phase)),
+            });
+        }
         // Partii (perf stream): WebRender packs render tasks (blur passes, clip masks, picture
         // surfaces) into shared render targets of max_shared_surface_size squared, 2048 by default.
         // On a software GL every pass on such a target costs more the bigger the texture is
@@ -475,9 +484,14 @@ impl Painter {
             || {
                 let stats_on = paint_stats::enabled();
                 let t0 = std::time::Instant::now();
+                let update_span =
+                    servo_base::frame_trace::span(servo_base::frame_trace::Phase::WrUpdate);
                 if let Some(renderer) = self.webrender_renderer.as_mut() {
                     renderer.update();
                 }
+                drop(update_span);
+                let _submit_span =
+                    servo_base::frame_trace::span(servo_base::frame_trace::Phase::GlSubmit);
                 // Every frame announced so far is in the channel before its announcement, so
                 // `update` has taken them all.
                 self.ready_frames.set(0);
@@ -1908,5 +1922,18 @@ pub(crate) mod frame_backpressure {
     }
     pub(crate) fn take_deferred() -> usize {
         DEFERRED.swap(0, Ordering::Relaxed)
+    }
+}
+
+/// Partii (frame-attr): the frame trace's phase for a WebRender span.
+fn wr_trace_phase(phase: webrender::partii_trace::Phase) -> servo_base::frame_trace::Phase {
+    use servo_base::frame_trace::Phase;
+    use webrender::partii_trace::Phase as Wr;
+    match phase {
+        Wr::SceneBuild => Phase::WrScene,
+        Wr::Backend => Phase::WrBackend,
+        Wr::FrameBuild => Phase::WrFrame,
+        Wr::TextureUpload => Phase::TextureUpload,
+        Wr::ShaderCompile => Phase::ShaderCompile,
     }
 }

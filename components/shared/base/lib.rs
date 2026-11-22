@@ -10,6 +10,7 @@
 //! a more shared crate that has fewer dependents.
 
 pub mod cross_process_instant;
+pub mod frame_trace;
 pub mod generic_channel;
 #[macro_use]
 pub mod id;

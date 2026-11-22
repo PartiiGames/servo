@@ -411,6 +411,7 @@ impl RasterImage {
     /// RGBA8. Returns `None` for opaque, animated or vector-rasterized images, whose
     /// premultiplied `bytes` already hold every colour.
     pub fn decode_unpremultiplied(&self) -> Option<Vec<u8>> {
+        let _decode = servo_base::frame_trace::span(servo_base::frame_trace::Phase::ImageDecode);
         let encoded = self.encoded.as_ref()?;
         let format = detect_image_format(encoded).ok()?;
         let image_decoder = decoding::DefaultImageDecoder::make_decoder(format, encoded).ok()?;
@@ -550,6 +551,7 @@ pub struct ImageMetadata {
 // reference count them.
 
 pub fn load_from_memory(buffer: &[u8], cors_status: CorsStatus) -> Option<RasterImage> {
+    let _decode = servo_base::frame_trace::span(servo_base::frame_trace::Phase::ImageDecode);
     if buffer.is_empty() {
         return None;
     }
