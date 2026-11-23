@@ -9,6 +9,9 @@
 //! conversion (prepare_pixels) and the GL call. Criterion 2(a) judges the WebGL thread's time per frame summed by
 //! phase (tools/lx/frame_attr.py), so a boot of many small uploads fails although no single one is long; this says
 //! which. Off (unset) by default; nothing is measured then.
+//!
+//! Partii (webgl-deletes): each line starts with `t=<unix s>` of the interval's first message, so a line matches the
+//! pauses frame_attr.py reports (`at_s` + the trace's t0).
 
 use std::cell::RefCell;
 use std::time::Instant;
@@ -39,6 +42,8 @@ struct Kind {
 #[derive(Default)]
 struct Frame {
     start: Option<Instant>,
+    /// When `start` was, in unix seconds.
+    start_unix: f64,
     busy_ms: f64,
     msgs: u32,
     kinds: FxHashMap<String, Kind>,
@@ -64,7 +69,12 @@ pub(crate) struct MsgGuard {
 pub(crate) fn begin(threshold: f64, kind: &'static str, bytes: u64, size: (u32, u32), swap: bool) -> MsgGuard {
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
-        f.start.get_or_insert_with(Instant::now);
+        if f.start.is_none() {
+            f.start = Some(Instant::now());
+            f.start_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64());
+        }
         f.note = None;
         f.prep_ms = 0.0;
         f.gl_ms = 0.0;
@@ -133,8 +143,8 @@ impl Drop for MsgGuard {
             let mut kinds: Vec<_> = frame.kinds.into_iter().collect();
             kinds.sort_by(|a, b| b.1.ms.total_cmp(&a.1.ms));
             let mut line = format!(
-                "partii-webgl-frame: busy {:.1} ms over {:.1} ms, {} msgs:",
-                frame.busy_ms, wall, frame.msgs
+                "partii-webgl-frame: t={:.3} busy {:.1} ms over {:.1} ms, {} msgs:",
+                frame.start_unix, frame.busy_ms, wall, frame.msgs
             );
             for (name, k) in kinds.iter().filter(|(_, k)| k.ms >= 0.2).take(14) {
                 line.push_str(&format!(" | {name} {}x {:.1} ms (max {:.2}", k.n, k.ms, k.max_ms));

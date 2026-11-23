@@ -176,6 +176,18 @@ pub struct GLState {
     storage: Option<StorageFramebuffer>,
     /// Partii (webgl-compile): GL shader compiles and program links not made yet (partii_deferred_programs).
     deferred_programs: crate::partii_deferred_programs::DeferredPrograms,
+    /// Partii (webgl-deletes): glDeleteTextures not made yet (partii_deferred_deletes).
+    deferred_deletes: crate::partii_deferred_deletes::DeferredDeletes,
+    /// Partii (webgl-deletes): textures ever bound to a target other than TEXTURE_2D (unit_textures follows only
+    /// TEXTURE_2D): their deletes never wait.
+    other_target_textures: FxHashSet<u32>,
+}
+
+impl GLState {
+    /// Partii (webgl-deletes): compiles / links and texture deletes waiting (made while idle).
+    fn deferred_len(&self) -> usize {
+        self.deferred_programs.len() + self.deferred_deletes.len()
+    }
 }
 
 /// Partii (gaps-5): see GLState::upload_shadow.
@@ -519,6 +531,8 @@ impl Default for GLState {
             upload_shadow: None,
             owed_mipmaps: FxHashSet::default(),
             deferred_programs: Default::default(),
+            deferred_deletes: Default::default(),
+            other_target_textures: FxHashSet::default(),
             unit_textures: Vec::new(),
             active_unit: 0,
             framebuffer_textures: FxHashMap::default(),
@@ -726,10 +740,9 @@ impl WebGLThread {
         let Some(&context_id) = self.deferred_program_contexts.first() else {
             return;
         };
-        let _span = servo_base::frame_trace::enabled()
-            .then(|| servo_base::frame_trace::span(servo_base::frame_trace::Phase::WebGlCompile));
+        // Partii (webgl-deletes): the spans are run_deferred_programs' (webgl_compile, then webgl for deletes).
         let _frame = crate::partii_frame_log::threshold_ms()
-            .map(|ms| crate::partii_frame_log::begin(ms, "DeferredPrograms", 0, (0, 0), false));
+            .map(|ms| crate::partii_frame_log::begin(ms, "DeferredWork", 0, (0, 0), false));
         let budget = self.deferred_tokens_ms;
         let left = match self.make_current_if_needed_mut(context_id) {
             Some(data) => WebGLImpl::run_deferred_programs(&data.gl, &mut data.state, budget),
@@ -1067,7 +1080,7 @@ impl WebGLThread {
         }
         let data = self.make_current_if_needed_mut(context_id);
         if let Some(data) = data {
-            let waited = data.state.deferred_programs.len();
+            let waited = data.state.deferred_len();
             WebGLImpl::apply(
                 &data.device,
                 &data.ctx,
@@ -1077,8 +1090,9 @@ impl WebGLThread {
                 command,
                 backtrace,
             );
-            // Partii (webgl-compile): compiles / links left waiting are made while idle (drain_deferred_programs).
-            let waiting = data.state.deferred_programs.len();
+            // Partii (webgl-compile): compiles / links left waiting are made while idle (drain_deferred_programs);
+            // webgl-deletes: texture deletes too.
+            let waiting = data.state.deferred_len();
             if waiting > waited {
                 self.deferred_since_swap = true;
             }
@@ -1879,6 +1893,25 @@ impl WebGLImpl {
             Self::make_pending_renderbuffers(gl, state, &command);
         }
 
+        // Partii (webgl-deletes): whether this texture delete waits (asked before track_textures forgets its bindings).
+        let delete_waits = match command {
+            WebGLCommand::DeleteTexture(id) if crate::partii_deferred_deletes::enabled() && lazy_textures_enabled() => {
+                crate::partii_deferred_deletes::TextureUse {
+                    unit_textures: &state.unit_textures,
+                    other_target_textures: &state.other_target_textures,
+                    framebuffer_textures: &state.framebuffer_textures,
+                    bound_framebuffers: state.bound_framebuffers,
+                }
+                .delete_may_wait(id.glow().0.get())
+            },
+            _ => false,
+        };
+        if !state.deferred_deletes.is_empty() && crate::partii_deferred_deletes::flushes(&command) {
+            state
+                .deferred_deletes
+                .flush(&mut |name| Self::delete_texture_name(gl, name));
+        }
+
         if lazy_textures_enabled() {
             Self::track_textures(state, &command);
             if !state.pending_textures.is_empty() {
@@ -2448,6 +2481,12 @@ impl WebGLImpl {
                 }
                 state.pending_renderbuffers.remove(&name);
                 unsafe { gl.delete_renderbuffer(id.glow()) }
+            },
+            WebGLCommand::DeleteTexture(id) if delete_waits => {
+                crate::partii_frame_log::note("deferred");
+                state
+                    .deferred_deletes
+                    .push(id.glow().0.get(), &mut |name| Self::delete_texture_name(gl, name));
             },
             WebGLCommand::DeleteTexture(id) => unsafe { gl.delete_texture(id.glow()) },
             WebGLCommand::DeleteProgram(id) => unsafe { gl.delete_program(id.glow()) },
@@ -4361,6 +4400,9 @@ impl WebGLImpl {
     /// (GLState::unit_textures, framebuffer_textures), and drops the pending levels a command redefines.
     fn track_textures(state: &mut GLState, command: &WebGLCommand) {
         match *command {
+            WebGLCommand::BindTexture(target, Some(id)) if target != gl::TEXTURE_2D => {
+                state.other_target_textures.insert(id.glow().0.get());
+            },
             WebGLCommand::ActiveTexture(unit) => {
                 state.active_unit = unit.saturating_sub(gl::TEXTURE0) as usize;
             },
@@ -4394,6 +4436,7 @@ impl WebGLImpl {
             WebGLCommand::DeleteTexture(id) => {
                 // GL unbinds a deleted texture from every unit.
                 let name = id.glow().0.get();
+                state.other_target_textures.remove(&name);
                 for bound in state.unit_textures.iter_mut().filter(|bound| **bound == name) {
                     *bound = 0;
                 }
@@ -4977,13 +5020,33 @@ impl WebGLImpl {
     /// are left.
     pub(crate) fn run_deferred_programs(gl: &Gl, state: &mut GLState, budget_ms: f64) -> bool {
         let start = std::time::Instant::now();
-        let mut run = |op| Self::run_program_op(gl, op);
-        while state.deferred_programs.run_oldest(&mut run) {
-            if start.elapsed().as_secs_f64() * 1000.0 >= budget_ms {
-                break;
+        if !state.deferred_programs.is_empty() {
+            let _span = servo_base::frame_trace::enabled()
+                .then(|| servo_base::frame_trace::span(servo_base::frame_trace::Phase::WebGlCompile));
+            let mut run = |op| Self::run_program_op(gl, op);
+            while state.deferred_programs.run_oldest(&mut run) {
+                if start.elapsed().as_secs_f64() * 1000.0 >= budget_ms {
+                    break;
+                }
             }
         }
-        !state.deferred_programs.is_empty()
+        // Partii (webgl-deletes): then the texture deletes, with what is left of the budget (traced as webgl).
+        if state.deferred_programs.is_empty() && !state.deferred_deletes.is_empty() {
+            let _span = servo_base::frame_trace::enabled()
+                .then(|| servo_base::frame_trace::span(servo_base::frame_trace::Phase::WebGl));
+            state.deferred_deletes.run(
+                || start.elapsed().as_secs_f64() * 1000.0 < budget_ms,
+                &mut |name| Self::delete_texture_name(gl, name),
+            );
+        }
+        !state.deferred_programs.is_empty() || !state.deferred_deletes.is_empty()
+    }
+
+    /// Partii (webgl-deletes): glDeleteTextures of one name (a delete that waited).
+    fn delete_texture_name(gl: &Gl, name: u32) {
+        if let Some(name) = std::num::NonZeroU32::new(name) {
+            unsafe { gl.delete_texture(glow::NativeTexture(name)) }
+        }
     }
 
     fn link_program(gl: &Gl, program: WebGLProgramId) -> ProgramLinkInfo {
