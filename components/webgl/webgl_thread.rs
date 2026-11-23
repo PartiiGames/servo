@@ -570,9 +570,13 @@ pub(crate) struct WebGLThread {
     painter_surfman_details_map: PainterSurfmanDetailsMap,
     /// Partii (stream gaps3): a GL context made ahead, while this thread was idle, for the next CreateContext
     /// (see `SpareContext`).
-    spare: Option<SpareContext>,
-    /// What the last CreateContext asked for: the next spare is made like it.
-    spare_like: Option<SpareKey>,
+    /// Partii (webgl-spares): up to SPARE_POOL of them, one per CreateContext of the last burst.
+    spares: Vec<SpareContext>,
+    /// What the last burst of CreateContexts asked for (oldest first, at most SPARE_POOL): the spares are made like
+    /// them (Phaser's boots make 3 contexts at once: a 1x1 and two canvas-sized; run-1122-2348 "CreateContext 3x 23 ms").
+    spare_like: Vec<SpareKey>,
+    /// When the last CreateContext came: one more than SPARE_BURST after it starts a new burst.
+    last_create: Option<std::time::Instant>,
     /// Partii (webgl-compile): contexts with shader compiles / links waiting (GLState::deferred_programs), oldest
     /// first; the thread makes them while idle, `deferred_tokens_ms` at a time (see drain_deferred_programs).
     deferred_program_contexts: Vec<WebGLContextId>,
@@ -631,8 +635,9 @@ impl WebGLThread {
             receiver: receiver.route_preserving_errors(),
             webrender_swap_chains,
             painter_surfman_details_map,
-            spare: None,
-            spare_like: None,
+            spares: Vec::new(),
+            spare_like: Vec::new(),
+            last_create: None,
             deferred_program_contexts: Vec::new(),
             deferred_since_swap: false,
             deferred_tokens_ms: deferred_ms_per_frame(),
@@ -671,7 +676,7 @@ impl WebGLThread {
                     },
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
-            } else if self.spare.is_none() && self.spare_like.is_some() && spare_enabled() {
+            } else if spare_enabled() && self.missing_spare().is_some() {
                 match self.receiver.recv_timeout(SPARE_IDLE) {
                     Ok(msg) => msg,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -736,14 +741,43 @@ impl WebGLThread {
         }
     }
 
-    /// Partii (stream gaps3): makes the spare GL context for the next CreateContext, like the last one.
+    /// Partii (webgl-spares): the first key of the last burst no spare is made like (each spare stands for one).
+    fn missing_spare(&self) -> Option<SpareKey> {
+        self.spare_matches().1
+    }
+
+    /// Partii (webgl-spares): which spares stand for a key of the last burst (by index), and the first key with none.
+    fn spare_matches(&self) -> (Vec<bool>, Option<SpareKey>) {
+        let mut used = vec![false; self.spares.len()];
+        let mut missing = None;
+        for key in &self.spare_like {
+            match (0..self.spares.len()).find(|i| !used[*i] && self.spares[*i].key == *key) {
+                Some(i) => used[i] = true,
+                None => missing = missing.or(Some(*key)),
+            }
+        }
+        (used, missing)
+    }
+
+    /// Partii (stream gaps3): makes a spare GL context for the next CreateContext, like one of the last burst's
+    /// (webgl-spares: the first without one; one per SPARE_IDLE of idle, each a few ms).
     fn make_spare_context(&mut self) {
-        let Some(key) = self.spare_like else {
+        let (used, Some(key)) = self.spare_matches() else {
             return;
         };
+        // A full pool: a spare made for an older burst goes first (there is one: the burst has at most SPARE_POOL
+        // keys and one of them has no spare).
+        if self.spares.len() >= spare_pool() {
+            let Some(i) = used.iter().position(|u| !u) else {
+                return;
+            };
+            let mut stale = self.spares.remove(i);
+            let _ = stale.device.destroy_context(&mut stale.ctx);
+            self.bound_context_id = None;
+        }
         let SpareKey { painter_id, attributes, size, alpha } = key;
         let Ok(device) = self.get_or_create_device_for_painter(painter_id) else {
-            self.spare_like = None;
+            self.spare_like.clear();
             return;
         };
         let start = std::time::Instant::now();
@@ -800,11 +834,11 @@ impl WebGLThread {
                         start.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                self.spare = Some(SpareContext { key, device, ctx });
+                self.spares.push(SpareContext { key, device, ctx });
             },
             Err(err) => {
                 warn!("spare WebGL context: {err:?}");
-                self.spare_like = None;
+                self.spare_like.clear();
             },
         }
         // eglCreateContext leaves the current context alone; make the next command make its own current anyway.
@@ -813,19 +847,18 @@ impl WebGLThread {
 
     /// Partii (stream gaps3): destroys the spare context (of `painter_id`, or any) and stops making them.
     fn drop_spare_context(&mut self, painter_id: Option<PainterId>) {
-        if let Some(mut spare) = self
-            .spare
-            .take_if(|s| painter_id.is_none_or(|p| p == s.key.painter_id))
-        {
-            let _ = spare.device.destroy_context(&mut spare.ctx);
-            self.bound_context_id = None;
+        let mut kept = Vec::new();
+        for mut spare in std::mem::take(&mut self.spares) {
+            if painter_id.is_none_or(|p| p == spare.key.painter_id) {
+                let _ = spare.device.destroy_context(&mut spare.ctx);
+                self.bound_context_id = None;
+            } else {
+                kept.push(spare);
+            }
         }
-        if painter_id.is_none() ||
-            self.spare_like
-                .is_some_and(|k| Some(k.painter_id) == painter_id)
-        {
-            self.spare_like = None;
-        }
+        self.spares = kept;
+        self.spare_like
+            .retain(|k| painter_id.is_some_and(|p| p != k.painter_id));
     }
 
     /// Enable GL_POINT_SPRITE and GL_PROGRAM_POINT_SIZE on desktop OpenGL.
@@ -1134,13 +1167,31 @@ impl WebGLThread {
         };
         // The context is taken when it was made with these attributes; its surface too when also of this size and
         // alpha, else that surface is replaced (rocket's restarts make 1x1, 1280x720, 1280x720 contexts in turn).
-        let spare = self.spare.take_if(|s| {
+        // Partii (webgl-spares): a spare made exactly like this request first, else any with these attributes.
+        let usable = |s: &SpareContext| {
             s.key.painter_id == painter_id &&
                 s.key.attributes == *context_attributes &&
                 Rc::ptr_eq(&s.device, &device)
-        });
+        };
+        let index = self
+            .spares
+            .iter()
+            .position(|s| usable(s) && s.key == key)
+            .or_else(|| self.spares.iter().position(|s| usable(s)));
+        let spare = index.map(|i| self.spares.remove(i));
         let from_spare = spare.as_ref().is_some_and(|s| s.key == key);
-        self.spare_like = spare_enabled().then_some(key);
+        if spare_enabled() {
+            // The spares are made like this burst's requests (a new burst after SPARE_BURST without one).
+            let now = std::time::Instant::now();
+            if self.last_create.is_none_or(|t| now.duration_since(t) > SPARE_BURST) {
+                self.spare_like.clear();
+            }
+            self.last_create = Some(now);
+            if self.spare_like.len() >= spare_pool() {
+                self.spare_like.remove(0);
+            }
+            self.spare_like.push(key);
+        }
         let mut ctx = match spare {
             Some(mut spare) => {
                 if !from_spare {
@@ -7018,6 +7069,20 @@ struct SpareKey {
 }
 
 const SPARE_IDLE: std::time::Duration = std::time::Duration::from_millis(8);
+/// Partii (webgl-spares): CreateContexts closer than this to the one before are one burst.
+const SPARE_BURST: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Partii (webgl-spares): `PARTII_WEBGL_SPARE_POOL=<n>`, how many spares at most (default 3; 1: one, as before).
+fn spare_pool() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PARTII_WEBGL_SPARE_POOL")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(3)
+    })
+}
 
 /// Partii (webgl-compile): see WebGLThread::drain_deferred_programs.
 const DEFERRED_PROGRAMS_IDLE: std::time::Duration = std::time::Duration::from_millis(1);
