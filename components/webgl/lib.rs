@@ -6,6 +6,7 @@
 
 pub use webgl_mode::WebGLComm;
 
+mod partii_deferred_programs;
 mod partii_frame_log;
 mod webgl_limits;
 mod webgl_mode;

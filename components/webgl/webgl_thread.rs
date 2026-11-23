@@ -174,6 +174,8 @@ pub struct GLState {
     /// The stand-in for the default framebuffer after drawingBufferStorage with a format the
     /// surface can't have (SRGB8_ALPHA8, RGBA16F).
     storage: Option<StorageFramebuffer>,
+    /// Partii (webgl-compile): GL shader compiles and program links not made yet (partii_deferred_programs).
+    deferred_programs: crate::partii_deferred_programs::DeferredPrograms,
 }
 
 /// Partii (gaps-5): see GLState::upload_shadow.
@@ -516,6 +518,7 @@ impl Default for GLState {
             pending_textures: FxHashMap::default(),
             upload_shadow: None,
             owed_mipmaps: FxHashSet::default(),
+            deferred_programs: Default::default(),
             unit_textures: Vec::new(),
             active_unit: 0,
             framebuffer_textures: FxHashMap::default(),
@@ -570,6 +573,11 @@ pub(crate) struct WebGLThread {
     spare: Option<SpareContext>,
     /// What the last CreateContext asked for: the next spare is made like it.
     spare_like: Option<SpareKey>,
+    /// Partii (webgl-compile): contexts with shader compiles / links waiting (GLState::deferred_programs), oldest
+    /// first; the thread makes them while idle, `deferred_tokens_ms` at a time (see drain_deferred_programs).
+    deferred_program_contexts: Vec<WebGLContextId>,
+    deferred_tokens_ms: f64,
+    deferred_refilled: std::time::Instant,
     /// A usage map used to delay the deletion of WebGL contexts until all WebRender
     /// rendering is finished, so that any existing `Surface`s can be properly released.
     busy_webgl_context_map: WebGLContextBusyMap,
@@ -623,6 +631,9 @@ impl WebGLThread {
             painter_surfman_details_map,
             spare: None,
             spare_like: None,
+            deferred_program_contexts: Vec::new(),
+            deferred_tokens_ms: deferred_ms_per_frame(),
+            deferred_refilled: std::time::Instant::now(),
             busy_webgl_context_map,
             #[cfg(feature = "webxr")]
             webxr_bridge: Some(WebXRBridge::new(webxr_init)),
@@ -646,7 +657,18 @@ impl WebGLThread {
         loop {
             // Partii (stream gaps3): once a page has made a context, the thread makes the next one's GL context
             // when it has had nothing to do for SPARE_IDLE (between a frame's commands and the next frame's).
-            let msg = if self.spare.is_none() && self.spare_like.is_some() && spare_enabled() {
+            // Partii (webgl-compile): shader compiles and links that waited are made when the thread has had nothing
+            // to do for DEFERRED_PROGRAMS_IDLE, a few ms a frame.
+            let msg = if !self.deferred_program_contexts.is_empty() {
+                match self.receiver.recv_timeout(self.deferred_programs_wait()) {
+                    Ok(msg) => msg,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        self.drain_deferred_programs();
+                        continue;
+                    },
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            } else if self.spare.is_none() && self.spare_like.is_some() && spare_enabled() {
                 match self.receiver.recv_timeout(SPARE_IDLE) {
                     Ok(msg) => msg,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -670,6 +692,45 @@ impl WebGLThread {
             }
         }
         self.drop_spare_context(None);
+    }
+
+    /// Partii (webgl-compile): how long to wait for a message before making waiting compiles and links: the idle
+    /// time, or until the budget has refilled enough for one op.
+    fn deferred_programs_wait(&self) -> std::time::Duration {
+        let rate = deferred_ms_per_frame() / FRAME_MS;
+        let tokens = self.deferred_tokens_ms + self.deferred_refilled.elapsed().as_secs_f64() * 1000.0 * rate;
+        let short = (DEFERRED_PROGRAMS_MIN_MS - tokens).max(0.0) / rate.max(1e-3);
+        DEFERRED_PROGRAMS_IDLE.max(std::time::Duration::from_secs_f64(short / 1000.0))
+    }
+
+    /// Partii (webgl-compile): makes the oldest context's waiting compiles and links, oldest first, while the
+    /// budget lasts. The budget refills at PARTII_WEBGL_DEFER_MS_PER_FRAME (default 3) ms per 16.7 ms and holds
+    /// at most that much, so this adds at most about twice that to any one frame's WebGL thread time.
+    fn drain_deferred_programs(&mut self) {
+        let now = std::time::Instant::now();
+        let refill = now.duration_since(self.deferred_refilled).as_secs_f64() * 1000.0 *
+            (deferred_ms_per_frame() / FRAME_MS);
+        self.deferred_tokens_ms = (self.deferred_tokens_ms + refill).min(deferred_ms_per_frame());
+        self.deferred_refilled = now;
+        if self.deferred_tokens_ms < DEFERRED_PROGRAMS_MIN_MS {
+            return;
+        }
+        let Some(&context_id) = self.deferred_program_contexts.first() else {
+            return;
+        };
+        let _span = servo_base::frame_trace::enabled()
+            .then(|| servo_base::frame_trace::span(servo_base::frame_trace::Phase::WebGlCompile));
+        let _frame = crate::partii_frame_log::threshold_ms()
+            .map(|ms| crate::partii_frame_log::begin(ms, "DeferredPrograms", 0, (0, 0), false));
+        let budget = self.deferred_tokens_ms;
+        let left = match self.make_current_if_needed_mut(context_id) {
+            Some(data) => WebGLImpl::run_deferred_programs(&data.gl, &mut data.state, budget),
+            None => false,
+        };
+        self.deferred_tokens_ms -= now.elapsed().as_secs_f64() * 1000.0;
+        if !left {
+            self.deferred_program_contexts.retain(|id| *id != context_id);
+        }
     }
 
     /// Partii (stream gaps3): makes the spare GL context for the next CreateContext, like the last one.
@@ -978,6 +1039,11 @@ impl WebGLThread {
                 command,
                 backtrace,
             );
+            // Partii (webgl-compile): compiles / links left waiting are made while idle (drain_deferred_programs).
+            let waiting = !data.state.deferred_programs.is_empty();
+            if waiting && !self.deferred_program_contexts.contains(&context_id) {
+                self.deferred_program_contexts.push(context_id);
+            }
         }
     }
 
@@ -1455,6 +1521,8 @@ impl WebGLThread {
         let Some(mut data) = self.contexts.remove(&context_id) else {
             return;
         };
+        // Partii (webgl-compile): its waiting compiles and links go with it.
+        self.deferred_program_contexts.retain(|id| *id != context_id);
 
         // Destroy the swap chains
         self.webrender_swap_chains
@@ -1797,6 +1865,16 @@ impl WebGLImpl {
                 }
             }
         }
+
+        // Partii (webgl-compile): shader compiles and links may wait (partii_deferred_programs).
+        let command = if crate::partii_deferred_programs::enabled() {
+            match Self::defer_program_work(gl, state, command) {
+                Some(command) => command,
+                None => return,
+            }
+        } else {
+            command
+        };
 
         match command {
             WebGLCommand::GetContextAttributes(ref sender) => sender.send(*attributes).unwrap(),
@@ -3306,7 +3384,7 @@ impl WebGLImpl {
             WebGLCommand::TexParameterf(target, param, value) => unsafe {
                 gl.tex_parameter_f32(target, param, value)
             },
-            WebGLCommand::LinkProgram(program_id, ref sender) => {
+            WebGLCommand::LinkProgram(program_id, ref sender, _) => {
                 // Script resolves links lazily (KHR_parallel_shader_compile), so the program may
                 // be gone before the answer arrives; that is not an error.
                 let _ = sender.send(Self::link_program(gl, program_id));
@@ -4694,6 +4772,90 @@ impl WebGLImpl {
         }
 
         state.restore_invariant(gl);
+    }
+
+    /// Partii (webgl-compile): hands shader and program work to GLState::deferred_programs, which runs it now or
+    /// later (partii_deferred_programs), and before any other command naming a shader or program, runs what
+    /// that object is waiting for. None: the command was dealt with.
+    fn defer_program_work(gl: &Gl, state: &mut GLState, command: WebGLCommand) -> Option<WebGLCommand> {
+        use crate::partii_deferred_programs::ProgramOp;
+        let deferred = &mut state.deferred_programs;
+        let mut run = |op: ProgramOp| Self::run_program_op(gl, op);
+        let (op, may_wait) = match command {
+            WebGLCommand::CompileShader(shader_id, ref source, ref translation, ref sender) => {
+                // Script learns the outcome from the translator; GL's compile waits for a link that needs it.
+                let info = Self::translate_shader_cached(gl, source, translation);
+                if let Some(ref object_code) = info.object_code {
+                    deferred.submit(ProgramOp::Compile(shader_id, object_code.clone()), true, &mut run);
+                }
+                crate::partii_frame_log::note("deferred");
+                let _ = sender.send(info);
+                return None;
+            },
+            WebGLCommand::LinkProgram(program_id, _, answered) => {
+                if !answered {
+                    // Script waits for this answer: what the link needs runs first, then the link as before.
+                    deferred.link_now(program_id, &mut run);
+                    return Some(command);
+                }
+                // Nobody reads the answer (script used its link cache's), so the sender just drops.
+                crate::partii_frame_log::note("deferred");
+                (ProgramOp::Link(program_id), true)
+            },
+            WebGLCommand::AttachShader(program_id, shader_id) => (ProgramOp::Attach(program_id, shader_id), false),
+            WebGLCommand::DetachShader(program_id, shader_id) => (ProgramOp::Detach(program_id, shader_id), false),
+            WebGLCommand::BindAttribLocation(program_id, index, ref name) => (
+                ProgramOp::BindAttribLocation(program_id, index, to_name_in_compiled_shader(name)),
+                false,
+            ),
+            WebGLCommand::DeleteShader(shader_id) => (ProgramOp::DeleteShader(shader_id), false),
+            WebGLCommand::DeleteProgram(program_id) => (ProgramOp::DeleteProgram(program_id), false),
+            WebGLCommand::UseProgram(program_id) => {
+                deferred.use_program(program_id, &mut run);
+                return Some(command);
+            },
+            _ => {
+                if !deferred.is_empty() &&
+                    let Some(name) = program_or_shader_named(&command)
+                {
+                    deferred.need(&[name], &mut run);
+                }
+                return Some(command);
+            },
+        };
+        deferred.submit(op, may_wait, &mut run);
+        None
+    }
+
+    /// Partii (webgl-compile): one shader or program GL call, made now or after waiting (DeferredPrograms).
+    fn run_program_op(gl: &Gl, op: crate::partii_deferred_programs::ProgramOp) {
+        use crate::partii_deferred_programs::ProgramOp;
+        unsafe {
+            match op {
+                ProgramOp::Compile(shader_id, object_code) => Self::compile_shader(gl, shader_id, &object_code),
+                ProgramOp::Attach(program_id, shader_id) => gl.attach_shader(program_id.glow(), shader_id.glow()),
+                ProgramOp::Detach(program_id, shader_id) => gl.detach_shader(program_id.glow(), shader_id.glow()),
+                ProgramOp::BindAttribLocation(program_id, index, name) => {
+                    gl.bind_attrib_location(program_id.glow(), index, &name)
+                },
+                ProgramOp::Link(program_id) => gl.link_program(program_id.glow()),
+                ProgramOp::DeleteShader(shader_id) => gl.delete_shader(shader_id.glow()),
+                ProgramOp::DeleteProgram(program_id) => gl.delete_program(program_id.glow()),
+            }
+        }
+    }
+
+    /// Partii (webgl-compile): runs the oldest waiting shader / program ops for up to `budget_ms`; whether any
+    /// are left.
+    pub(crate) fn run_deferred_programs(gl: &Gl, state: &mut GLState, budget_ms: f64) -> bool {
+        let start = std::time::Instant::now();
+        let mut run = |op| Self::run_program_op(gl, op);
+        while state.deferred_programs.run_oldest(&mut run) {
+            if start.elapsed().as_secs_f64() * 1000.0 >= budget_ms {
+                break;
+            }
+        }
+        !state.deferred_programs.is_empty()
     }
 
     fn link_program(gl: &Gl, program: WebGLProgramId) -> ProgramLinkInfo {
@@ -6567,6 +6729,55 @@ fn frame_trace_phase(msg: &WebGLMsg) -> servo_base::frame_trace::Phase {
     }
 }
 
+/// Partii (webgl-compile): the shader or program a command names that isn't one of the ops DeferredPrograms
+/// takes (or glUseProgram): GL is asked about it or changes it, so what it waits for must run first. Every
+/// WebGLCommand with a WebGLProgramId or WebGLShaderId in it is listed here or in defer_program_work.
+fn program_or_shader_named(command: &WebGLCommand) -> Option<u32> {
+    use WebGLCommand::*;
+    match *command {
+        GetShaderInfoLog(shader, _) => Some(shader.get()),
+        GetFragDataLocation(program, ..) |
+        GetUniformLocation(program, ..) |
+        GetProgramInfoLog(program, _) |
+        GetTransformFeedbackVarying(program, ..) |
+        TransformFeedbackVaryings(program, ..) |
+        ValidateProgram(program) |
+        GetProgramValidateStatus(program, _) |
+        GetProgramActiveUniforms(program, _) |
+        GetUniformBool(program, ..) |
+        GetUniformBool2(program, ..) |
+        GetUniformBool3(program, ..) |
+        GetUniformBool4(program, ..) |
+        GetUniformInt(program, ..) |
+        GetUniformInt2(program, ..) |
+        GetUniformInt3(program, ..) |
+        GetUniformInt4(program, ..) |
+        GetUniformUint(program, ..) |
+        GetUniformUint2(program, ..) |
+        GetUniformUint3(program, ..) |
+        GetUniformUint4(program, ..) |
+        GetUniformFloat(program, ..) |
+        GetUniformFloat2(program, ..) |
+        GetUniformFloat3(program, ..) |
+        GetUniformFloat4(program, ..) |
+        GetUniformFloat9(program, ..) |
+        GetUniformFloat16(program, ..) |
+        GetUniformFloat2x3(program, ..) |
+        GetUniformFloat2x4(program, ..) |
+        GetUniformFloat3x2(program, ..) |
+        GetUniformFloat3x4(program, ..) |
+        GetUniformFloat4x2(program, ..) |
+        GetUniformFloat4x3(program, ..) |
+        GetUniformBlockIndex(program, ..) |
+        GetUniformIndices(program, ..) |
+        GetActiveUniforms(program, ..) |
+        GetActiveUniformBlockName(program, ..) |
+        GetActiveUniformBlockParameter(program, ..) |
+        UniformBlockBinding(program, ..) => Some(program.get()),
+        _ => None,
+    }
+}
+
 /// Partii (gaps-3): whether this GL is one of Mesa's software rasterizers.
 fn software_gl(gl: &Gl) -> bool {
     let renderer = unsafe { gl.get_parameter_string(gl::RENDERER) }.to_ascii_lowercase();
@@ -6688,6 +6899,25 @@ struct SpareKey {
 }
 
 const SPARE_IDLE: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Partii (webgl-compile): see WebGLThread::drain_deferred_programs.
+const DEFERRED_PROGRAMS_IDLE: std::time::Duration = std::time::Duration::from_millis(1);
+/// The least budget worth starting with (about one compile or link on the M5).
+const DEFERRED_PROGRAMS_MIN_MS: f64 = 0.5;
+const FRAME_MS: f64 = 1000.0 / 60.0;
+
+/// Partii (webgl-compile): `PARTII_WEBGL_DEFER_MS_PER_FRAME`, the idle-time budget for waiting compiles and links
+/// (ms per 16.7 ms; default 3).
+fn deferred_ms_per_frame() -> f64 {
+    static MS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| {
+        std::env::var("PARTII_WEBGL_DEFER_MS_PER_FRAME")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|ms| *ms > 0.0)
+            .unwrap_or(3.0)
+    })
+}
 
 fn spare_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

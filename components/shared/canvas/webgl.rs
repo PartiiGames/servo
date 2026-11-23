@@ -460,7 +460,10 @@ pub enum WebGLCommand {
     Hint(u32, u32),
     LineWidth(f32),
     PixelStorei(u32, i32),
-    LinkProgram(WebGLProgramId, GenericSender<ProgramLinkInfo>),
+    /// Links a program, answering with the outcome. Partii (webgl-compile): the bool is true when script
+    /// already has the answer (its link cache) and won't read this one, so the WebGL thread may make the
+    /// link later (see the WebGL thread's DeferredPrograms).
+    LinkProgram(WebGLProgramId, GenericSender<ProgramLinkInfo>, bool),
     Uniform1f(i32, f32),
     Uniform1fv(i32, Vec<f32>),
     Uniform1i(i32, i32),

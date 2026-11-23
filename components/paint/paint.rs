@@ -843,7 +843,19 @@ impl Paint {
         });
 
         for message in messages {
+            // Partii (webgl-compile, diagnostic): PARTII_PAINT_SLOW_MS=<ms> logs each message that took longer, by
+            // kind (hexii's one 18.9 ms paint_msg pause, GPU run 2026-11-22, has no detail in the frame trace).
+            let slow = partii_paint_slow_ms().map(|ms| {
+                let kind: &'static str = (&message).into();
+                (ms, kind, std::time::Instant::now())
+            });
             self.handle_browser_message(message);
+            if let Some((ms, kind, start)) = slow {
+                let took = start.elapsed().as_secs_f64() * 1000.0;
+                if took > ms {
+                    eprintln!("partii-paint-slow: {kind} {took:.2} ms");
+                }
+            }
             if self.shutdown_state() == ShutdownState::FinishedShuttingDown {
                 return;
             }
@@ -1052,4 +1064,14 @@ impl Paint {
 
         let _ = result_sender.send((font_keys, font_instance_keys));
     }
+}
+
+/// Partii (webgl-compile, diagnostic): the threshold of PARTII_PAINT_SLOW_MS (unset: no log).
+fn partii_paint_slow_ms() -> Option<f64> {
+    static MS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| {
+        std::env::var("PARTII_PAINT_SLOW_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
 }

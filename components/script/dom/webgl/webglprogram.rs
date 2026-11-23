@@ -402,14 +402,17 @@ impl WebGLProgram {
         *self.link_compiles.borrow_mut() = Some((vertex, fragment));
         *self.link_attrib_bindings.borrow_mut() = self.attrib_bindings.borrow().clone();
 
-        let (sender, receiver) = webgl_channel().unwrap();
-        self.upcast()
-            .send_command(WebGLCommand::LinkProgram(self.id(), sender));
         // Partii (gaps-5): a link of the same compiles and bindings as one before on this script thread
         // takes that link's answer now (LINK_CACHE); the WebGL thread still links.
         let cached = key
             .as_ref()
             .and_then(|key| LINK_CACHE.with(|cache| cache.borrow().get(key).cloned()));
+        // Partii (webgl-compile): with the answer here (and not verifying it), the WebGL thread is told nobody
+        // waits for the link, so it may make it when the program is first needed or the thread is idle.
+        let answered = cached.is_some() && link_cache_mode() == LinkCacheMode::On;
+        let (sender, receiver) = webgl_channel().unwrap();
+        self.upcast()
+            .send_command(WebGLCommand::LinkProgram(self.id(), sender, answered));
         if let Some(cached) = cached {
             let link_info = if link_cache_mode() == LinkCacheMode::Verify {
                 let real = receiver.recv().ok();
