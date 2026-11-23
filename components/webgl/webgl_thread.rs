@@ -576,6 +576,8 @@ pub(crate) struct WebGLThread {
     /// Partii (webgl-compile): contexts with shader compiles / links waiting (GLState::deferred_programs), oldest
     /// first; the thread makes them while idle, `deferred_tokens_ms` at a time (see drain_deferred_programs).
     deferred_program_contexts: Vec<WebGLContextId>,
+    /// Ops were queued since the last SwapBuffers: the frame that queued them (a Phaser boot) doesn't also make them.
+    deferred_since_swap: bool,
     deferred_tokens_ms: f64,
     deferred_refilled: std::time::Instant,
     /// A usage map used to delay the deletion of WebGL contexts until all WebRender
@@ -632,6 +634,7 @@ impl WebGLThread {
             spare: None,
             spare_like: None,
             deferred_program_contexts: Vec::new(),
+            deferred_since_swap: false,
             deferred_tokens_ms: deferred_ms_per_frame(),
             deferred_refilled: std::time::Instant::now(),
             busy_webgl_context_map,
@@ -658,8 +661,8 @@ impl WebGLThread {
             // Partii (stream gaps3): once a page has made a context, the thread makes the next one's GL context
             // when it has had nothing to do for SPARE_IDLE (between a frame's commands and the next frame's).
             // Partii (webgl-compile): shader compiles and links that waited are made when the thread has had nothing
-            // to do for DEFERRED_PROGRAMS_IDLE, a few ms a frame.
-            let msg = if !self.deferred_program_contexts.is_empty() {
+            // to do for DEFERRED_PROGRAMS_IDLE, a few ms a frame, from the frame after the one that queued them.
+            let msg = if !self.deferred_program_contexts.is_empty() && !self.deferred_since_swap {
                 match self.receiver.recv_timeout(self.deferred_programs_wait()) {
                     Ok(msg) => msg,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -913,6 +916,7 @@ impl WebGLThread {
                 self.handle_webxr_command(_command);
             },
             WebGLMsg::SwapBuffers(swap_ids, canvas_epoch, sent_time) => {
+                self.deferred_since_swap = false;
                 self.handle_swap_buffers(canvas_epoch, swap_ids, sent_time);
             },
             WebGLMsg::FinishedRenderingToContext(context_id) => {
@@ -1030,6 +1034,7 @@ impl WebGLThread {
         }
         let data = self.make_current_if_needed_mut(context_id);
         if let Some(data) = data {
+            let waited = data.state.deferred_programs.len();
             WebGLImpl::apply(
                 &data.device,
                 &data.ctx,
@@ -1040,8 +1045,11 @@ impl WebGLThread {
                 backtrace,
             );
             // Partii (webgl-compile): compiles / links left waiting are made while idle (drain_deferred_programs).
-            let waiting = !data.state.deferred_programs.is_empty();
-            if waiting && !self.deferred_program_contexts.contains(&context_id) {
+            let waiting = data.state.deferred_programs.len();
+            if waiting > waited {
+                self.deferred_since_swap = true;
+            }
+            if waiting > 0 && !self.deferred_program_contexts.contains(&context_id) {
                 self.deferred_program_contexts.push(context_id);
             }
         }
