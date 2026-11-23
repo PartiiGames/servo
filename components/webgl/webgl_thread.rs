@@ -164,8 +164,13 @@ pub struct GLState {
     unit_textures: Vec<u32>,
     /// Partii (gaps-5): the active texture unit (0-based).
     active_unit: usize,
-    /// Partii (gaps-5): textures ever attached to each framebuffer (by name), while it exists.
+    /// Partii (gaps-5): textures attached to each framebuffer (by name), while it exists. Partii (webgl-deletes):
+    /// as attached now (it was every texture ever attached): Phaser's framebuffer wrappers detach their texture
+    /// before deleting it, and a texture listed here is made (pending zeros) and deleted at once.
     framebuffer_textures: FxHashMap<u32, Vec<u32>>,
+    /// Partii (webgl-deletes): what each (framebuffer, attachment point) has, for framebuffer_textures (a texture
+    /// name, or 0: a renderbuffer). DEPTH_STENCIL_ATTACHMENT is its DEPTH and STENCIL points.
+    framebuffer_points: FxHashMap<(u32, u32), u32>,
     /// Partii (perf): the framebuffer names bound to DRAW_FRAMEBUFFER and READ_FRAMEBUFFER (0: the
     /// canvas's own), as the content bound them.
     bound_framebuffers: (u32, u32),
@@ -536,6 +541,7 @@ impl Default for GLState {
             unit_textures: Vec::new(),
             active_unit: 0,
             framebuffer_textures: FxHashMap::default(),
+            framebuffer_points: FxHashMap::default(),
             bound_framebuffers: (0, 0),
             color_write_mask: [true, true, true, true],
             color_write_masks: Vec::new(),
@@ -4396,6 +4402,44 @@ impl WebGLImpl {
         }
     }
 
+    /// Partii (webgl-deletes): `texture` (0: none, or a renderbuffer) at an attachment point of the framebuffer bound
+    /// to `target`; framebuffer_textures follows.
+    fn track_attachment(state: &mut GLState, target: u32, attachment: u32, texture: u32) {
+        let framebuffer = if target == gl::READ_FRAMEBUFFER {
+            state.bound_framebuffers.1
+        } else {
+            state.bound_framebuffers.0
+        };
+        if framebuffer == 0 {
+            return;
+        }
+        let points: &[u32] = if attachment == gl::DEPTH_STENCIL_ATTACHMENT {
+            &[gl::DEPTH_ATTACHMENT, gl::STENCIL_ATTACHMENT]
+        } else {
+            &[attachment]
+        };
+        for point in points {
+            if texture == 0 {
+                state.framebuffer_points.remove(&(framebuffer, *point));
+            } else {
+                state.framebuffer_points.insert((framebuffer, *point), texture);
+            }
+        }
+        let mut attached: Vec<u32> = state
+            .framebuffer_points
+            .iter()
+            .filter(|((f, _), _)| *f == framebuffer)
+            .map(|(_, name)| *name)
+            .collect();
+        attached.sort_unstable();
+        attached.dedup();
+        if attached.is_empty() {
+            state.framebuffer_textures.remove(&framebuffer);
+        } else {
+            state.framebuffer_textures.insert(framebuffer, attached);
+        }
+    }
+
     /// Partii (gaps-5): follows the TEXTURE_2D bindings and the framebuffer attachments the content makes
     /// (GLState::unit_textures, framebuffer_textures), and drops the pending levels a command redefines.
     fn track_textures(state: &mut GLState, command: &WebGLCommand) {
@@ -4418,20 +4462,20 @@ impl WebGLImpl {
                     *bound = 0;
                 }
             },
-            WebGLCommand::FramebufferTexture2D(target, _, _, Some(texture), _) => {
-                let framebuffer = if target == gl::READ_FRAMEBUFFER {
-                    state.bound_framebuffers.1
-                } else {
-                    state.bound_framebuffers.0
-                };
-                let attached = state.framebuffer_textures.entry(framebuffer).or_default();
-                let name = texture.glow().0.get();
-                if !attached.contains(&name) {
-                    attached.push(name);
-                }
+            WebGLCommand::FramebufferTexture2D(target, attachment, _, texture, _) => {
+                Self::track_attachment(state, target, attachment, texture.map_or(0, |t| t.glow().0.get()));
+            },
+            // Partii (webgl-deletes): a layer or a renderbuffer replaces what the point had.
+            WebGLCommand::FramebufferTextureLayer(target, attachment, texture, ..) => {
+                Self::track_attachment(state, target, attachment, texture.map_or(0, |t| t.glow().0.get()));
+            },
+            WebGLCommand::FramebufferRenderbuffer(target, attachment, ..) => {
+                Self::track_attachment(state, target, attachment, 0);
             },
             WebGLCommand::DeleteFramebuffer(id) => {
-                state.framebuffer_textures.remove(&id.glow().0.get());
+                let name = id.glow().0.get();
+                state.framebuffer_textures.remove(&name);
+                state.framebuffer_points.retain(|(framebuffer, _), _| *framebuffer != name);
             },
             WebGLCommand::DeleteTexture(id) => {
                 // GL unbinds a deleted texture from every unit.
