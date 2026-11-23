@@ -29,7 +29,7 @@ use paint_api::{
 };
 use parking_lot::RwLock;
 use pixels::{self, PixelFormat, SnapshotAlphaMode, unmultiply_inplace};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use servo_base::Epoch;
 use servo_base::generic_channel::{
     GenericReceiver, GenericSender, GenericSharedMemory, RoutedReceiver,
@@ -152,6 +152,13 @@ pub struct GLState {
     /// on that texture filters these instead of reading the level back (software_mipmaps). glGetTexImage
     /// waits for everything llvmpipe has queued.
     upload_shadow: Option<UploadShadow>,
+    /// Partii (webgl-upload): 2D textures whose generateMipmap hasn't run in GL yet (see owe_mipmaps and
+    /// pay_owed_mipmaps). Phaser calls generateMipmap on every power-of-two texture it uploads while sampling
+    /// it with a LINEAR (non-mipmap) min filter (no `mipmapFilter` in the game's config), so the levels are
+    /// never read; each Phaser boot (hexii's rounds, rocket-to-heaven's deaths: a new context each time)
+    /// generates ~17-18 of them inside the boot frame (criterion 2(a)'s webgl_upload pauses). Made before
+    /// anything that could observe levels above the base or change what they'd be made from.
+    owed_mipmaps: FxHashSet<u32>,
     /// Partii (gaps-5): the TEXTURE_2D binding of each texture unit, as the content bound them (while
     /// lazy textures are on).
     unit_textures: Vec<u32>,
@@ -508,6 +515,7 @@ impl Default for GLState {
             framebuffer_renderbuffers: FxHashMap::default(),
             pending_textures: FxHashMap::default(),
             upload_shadow: None,
+            owed_mipmaps: FxHashSet::default(),
             unit_textures: Vec::new(),
             active_unit: 0,
             framebuffer_textures: FxHashMap::default(),
@@ -791,6 +799,11 @@ impl WebGLThread {
             .then(|| servo_base::frame_trace::span(frame_trace_phase(&msg)));
         // Partii (gpu-mac): PARTII_WEBGL_SLOW_MS=<ms> logs every message that took longer, with what it was.
         let _slow = partii_slow_ms().map(|ms| PartiiSlowLog(ms, std::time::Instant::now(), partii_describe(&msg)));
+        // Partii (webgl-upload): PARTII_WEBGL_FRAME_MS=<ms>, the thread's time per frame by kind (partii_frame_log).
+        let _frame = crate::partii_frame_log::threshold_ms().map(|ms| {
+            let (kind, bytes, size, swap) = partii_frame_kind(&msg);
+            crate::partii_frame_log::begin(ms, kind, bytes, size, swap)
+        });
         match msg {
             WebGLMsg::CreateContext(painter_id, version, size, attributes, result_sender) => {
                 let result = self.create_webgl_context(painter_id, version, size, attributes);
@@ -1746,6 +1759,10 @@ impl WebGLImpl {
             }
         }
 
+        if !state.owed_mipmaps.is_empty() {
+            Self::pay_owed_mipmaps(gl, state, &command);
+        }
+
         if state.msaa.is_some() {
             let reads = matches!(
                 command,
@@ -2625,6 +2642,7 @@ impl WebGLImpl {
                             format,
                             data_type: effective_data_type,
                         });
+                        crate::partii_frame_log::note("lazy");
                         return;
                     }
                 }
@@ -2657,9 +2675,11 @@ impl WebGLImpl {
                             format,
                             effective_data_type,
                         );
+                        crate::partii_frame_log::note("cleared");
                         return;
                     }
                 }
+                let prep_start = std::time::Instant::now();
                 let pixels = if zero_fill {
                     let cpp = data_type.element_size() * format.components() /
                         data_type.components_per_element();
@@ -2678,6 +2698,7 @@ impl WebGLImpl {
                         Cow::Borrowed(data),
                     )
                 };
+                crate::partii_frame_log::add_prep(prep_start);
 
                 let (internal_format, format) = luminance_formats(
                     state,
@@ -2687,6 +2708,7 @@ impl WebGLImpl {
                     format,
                     effective_data_type,
                 );
+                let gl_start = std::time::Instant::now();
                 unsafe {
                     gl.pixel_store_i32(gl::UNPACK_ALIGNMENT, unpacking_alignment as i32);
                     gl.tex_image_2d(
@@ -2701,6 +2723,7 @@ impl WebGLImpl {
                         PixelUnpackData::Slice(Some(&pixels)),
                     );
                 }
+                crate::partii_frame_log::add_gl(gl_start);
                 // Partii (gaps-5): keep what a following generateMipmap would read back.
                 let channels = match (internal_format, format) {
                     (gl::RGBA | gl::RGBA8, gl::RGBA) => 4,
@@ -3085,10 +3108,26 @@ impl WebGLImpl {
             WebGLCommand::Flush => unsafe { gl.flush() },
             WebGLCommand::GenerateMipmap(target) => {
                 if Self::pending_mipmaps(gl, state, target) {
+                    crate::partii_frame_log::note("pending");
                     return;
                 }
-                if !Self::zero_mipmaps(gl, state, target) && !Self::software_mipmaps(gl, state, target) {
+                if Self::owe_mipmaps(gl, state, target) {
+                    crate::partii_frame_log::note("owed");
+                } else if Self::zero_mipmaps(gl, state, target) {
+                    crate::partii_frame_log::note("zero");
+                } else if Self::software_mipmaps(gl, state, target) {
+                    crate::partii_frame_log::note("soft");
+                } else {
+                    if crate::partii_frame_log::threshold_ms().is_some() {
+                        let min = unsafe { gl.get_tex_parameter_i32(target, gl::TEXTURE_MIN_FILTER) } as u32;
+                        crate::partii_frame_log::note(match min {
+                            gl::NEAREST | gl::LINEAR => "gl:minNoMip",
+                            _ => "gl:minMip",
+                        });
+                    }
+                    let gl_start = std::time::Instant::now();
                     unsafe { gl.generate_mipmap(target) }
+                    crate::partii_frame_log::add_gl(gl_start);
                 }
             },
             WebGLCommand::CreateVertexArray(ref chan) => {
@@ -4148,6 +4187,140 @@ impl WebGLImpl {
         true
     }
 
+    /// Partii (webgl-upload): generateMipmap on a 2D texture its sampling won't read the levels of: noted
+    /// (GLState::owed_mipmaps) instead of run. Only when GL itself says the texture samples level 0 alone
+    /// (base level 0, min filter NEAREST or LINEAR) and level 0 is an 8-bit RGBA / RGB image (so the deferred
+    /// glGenerateMipmap can't raise an error the content would see on a later call; the DOM has validated
+    /// the rest). The levels are made, from the same level 0, the moment anything could see them
+    /// (pay_owed_mipmaps). Already owed: stays owed. False when this doesn't apply.
+    /// `PARTII_WEBGL_LAZY_MIPMAP=0` turns it off.
+    fn owe_mipmaps(gl: &Gl, state: &mut GLState, target: u32) -> bool {
+        if target != gl::TEXTURE_2D || !lazy_mipmaps_enabled() || !lazy_textures_enabled() {
+            return false;
+        }
+        // glGetTexLevelParameteriv: desktop GL, GLES 3.1+.
+        let version = gl.version();
+        if version.is_embedded && (version.major, version.minor) < (3, 1) {
+            return false;
+        }
+        unsafe {
+            let texture = gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) as u32;
+            if texture == 0 {
+                return false;
+            }
+            if state.owed_mipmaps.contains(&texture) {
+                return true;
+            }
+            // Attached to a framebuffer: a draw could change level 0 before the levels are made.
+            if state
+                .framebuffer_textures
+                .values()
+                .any(|attached| attached.contains(&texture))
+            {
+                return false;
+            }
+            let min_filter = gl.get_tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER) as u32;
+            if !matches!(min_filter, gl::NEAREST | gl::LINEAR) ||
+                gl.get_tex_parameter_i32(gl::TEXTURE_2D, gl::TEXTURE_BASE_LEVEL) != 0
+            {
+                return false;
+            }
+            let internal_format =
+                gl.get_tex_level_parameter_i32(gl::TEXTURE_2D, 0, gl::TEXTURE_INTERNAL_FORMAT) as u32;
+            if !matches!(internal_format, gl::RGBA8 | gl::RGB8 | gl::RGBA | gl::RGB) {
+                return false;
+            }
+            state.owed_mipmaps.insert(texture);
+        }
+        true
+    }
+
+    /// Partii (webgl-upload): before `command` runs, makes the owed mipmaps (GLState::owed_mipmaps) of the
+    /// textures it could observe them through or change their source: the bound 2D texture before any
+    /// texture image or storage command, and before a parameter that may make sampling read the levels
+    /// (a mipmap min filter, base / max level, anisotropy, anything not known to be harmless); a texture
+    /// attached to a framebuffer (it may be drawn into or read from at any level); in WebGL 2, every texture
+    /// bound to a unit at a draw (sampler objects and texelFetch / textureLod can read levels whatever the
+    /// texture's own min filter). A WebGL 1 draw samples an owed texture's level 0 only (its min filter
+    /// stays NEAREST / LINEAR while owed). A deleted texture's debt is dropped.
+    fn pay_owed_mipmaps(gl: &Gl, state: &mut GLState, command: &WebGLCommand) {
+        let bound_2d = || unsafe { gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) } as u32;
+        let names: Vec<u32> = match *command {
+            WebGLCommand::DeleteTexture(id) => {
+                state.owed_mipmaps.remove(&id.glow().0.get());
+                return;
+            },
+            WebGLCommand::FramebufferTexture2D(_, _, _, Some(texture), _) |
+            WebGLCommand::FramebufferTextureLayer(_, _, Some(texture), _, _) => {
+                vec![texture.glow().0.get()]
+            },
+            // Parameters that never make sampling read levels above the base, nor change them.
+            WebGLCommand::TexParameteri(_, pname, value) if Self::harmless_while_owed(pname, value as u32) => {
+                return;
+            },
+            WebGLCommand::TexParameterf(_, pname, value) if Self::harmless_while_owed(pname, value as u32) => {
+                return;
+            },
+            WebGLCommand::TexParameteri(..) |
+            WebGLCommand::TexParameterf(..) |
+            WebGLCommand::TexImage2D { .. } |
+            WebGLCommand::TexImage2DPBO { .. } |
+            WebGLCommand::TexSubImage2D { .. } |
+            WebGLCommand::TexSubImage2DPBO { .. } |
+            WebGLCommand::CompressedTexImage2D { .. } |
+            WebGLCommand::CompressedTexSubImage2D { .. } |
+            WebGLCommand::CopyTexImage2D { .. } |
+            WebGLCommand::CopyTexSubImage2D(..) |
+            WebGLCommand::TexStorage2D(..) => vec![bound_2d()],
+            WebGLCommand::DrawArrays { .. } |
+            WebGLCommand::DrawArraysInstanced { .. } |
+            WebGLCommand::DrawElements { .. } |
+            WebGLCommand::DrawElementsInstanced { .. } |
+            WebGLCommand::DrawArraysInstancedBaseInstance { .. } |
+            WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance { .. }
+                if state._webgl_version != WebGLVersion::WebGL1 =>
+            {
+                state.unit_textures.clone()
+            },
+            _ => return,
+        };
+        let names: Vec<u32> = names
+            .into_iter()
+            .filter(|name| state.owed_mipmaps.remove(name))
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        unsafe {
+            let bound = gl.get_parameter_i32(gl::TEXTURE_BINDING_2D) as u32;
+            for name in &names {
+                gl.bind_texture(gl::TEXTURE_2D, NonZeroU32::new(*name).map(glow::NativeTexture));
+                gl.generate_mipmap(gl::TEXTURE_2D);
+            }
+            gl.bind_texture(gl::TEXTURE_2D, NonZeroU32::new(bound).map(glow::NativeTexture));
+        }
+        crate::partii_frame_log::note("paid-mipmaps");
+        crate::partii_frame_log::add_gl(start);
+    }
+
+    /// Partii (webgl-upload): a texture parameter after which sampling still reads only the base level
+    /// and the levels' source is unchanged (pay_owed_mipmaps).
+    fn harmless_while_owed(pname: u32, value: u32) -> bool {
+        match pname {
+            gl::TEXTURE_MIN_FILTER => matches!(value, gl::NEAREST | gl::LINEAR),
+            gl::TEXTURE_MAG_FILTER |
+            gl::TEXTURE_WRAP_S |
+            gl::TEXTURE_WRAP_T |
+            gl::TEXTURE_WRAP_R |
+            gl::TEXTURE_COMPARE_MODE |
+            gl::TEXTURE_COMPARE_FUNC |
+            gl::TEXTURE_MIN_LOD |
+            gl::TEXTURE_MAX_LOD => true,
+            _ => false,
+        }
+    }
+
     /// Partii (gaps-5): follows the TEXTURE_2D bindings and the framebuffer attachments the content makes
     /// (GLState::unit_textures, framebuffer_textures), and drops the pending levels a command redefines.
     fn track_textures(state: &mut GLState, command: &WebGLCommand) {
@@ -5050,6 +5223,20 @@ fn prepare_pixels(
     pixel_format: Option<PixelFormat>,
     mut pixels: Cow<[u8]>,
 ) -> Cow<[u8]> {
+    // Partii (webgl-upload): an RGBA8 source into an RGBA unsigned-byte texture with nothing to premultiply,
+    // unmultiply or flip (a canvas or image uploaded premultiplied, as Phaser does): the borrowed pixels go to
+    // GL as they are. The fused and general paths would copy them into a new buffer byte for byte.
+    // `PARTII_WEBGL_ZERO_COPY=0` keeps the copy.
+    if alpha_treatment.is_none() &&
+        y_axis_treatment == YAxisTreatment::AsIs &&
+        matches!(pixel_format, Some(PixelFormat::RGBA8)) &&
+        matches!(data_type, TexDataType::UnsignedByte) &&
+        matches!(internal_format.to_unsized(), TexFormat::RGBA | TexFormat::RGBAInteger) &&
+        pixels.len() == size.width as usize * size.height as usize * 4 &&
+        zero_copy_enabled()
+    {
+        return pixels;
+    }
     if let Some(out) = partii_fused_rgba8(
         internal_format,
         data_type,
@@ -6314,6 +6501,44 @@ impl Drop for PartiiSlowLog {
     }
 }
 
+/// Partii (webgl-upload): a message's kind, bytes, size and whether it ends a frame, for partii_frame_log.
+fn partii_frame_kind(msg: &WebGLMsg) -> (&'static str, u64, (u32, u32), bool) {
+    let command = match msg {
+        WebGLMsg::WebGLCommand(_, command, _) => command,
+        WebGLMsg::SwapBuffers(..) => return ("SwapBuffers", 0, (0, 0), true),
+        WebGLMsg::CreateContext(..) => return ("CreateContext", 0, (0, 0), false),
+        WebGLMsg::ResizeContext(..) => return ("ResizeContext", 0, (0, 0), false),
+        _ => return ("other-msg", 0, (0, 0), false),
+    };
+    match command {
+        WebGLCommand::TexImage2D { size, data, .. } => {
+            let kind = if data.is_empty() { "TexImage2D(null)" } else { "TexImage2D" };
+            (kind, data.len() as u64, (size.width, size.height), false)
+        },
+        WebGLCommand::TexSubImage2D { size, data, .. } => {
+            ("TexSubImage2D", data.len() as u64, (size.width, size.height), false)
+        },
+        WebGLCommand::TexImage2DPBO { size, .. } => ("TexImage2DPBO", 0, (size.width, size.height), false),
+        WebGLCommand::TexImage3D { .. } => ("TexImage3D", 0, (0, 0), false),
+        WebGLCommand::TexSubImage3D { .. } => ("TexSubImage3D", 0, (0, 0), false),
+        WebGLCommand::CompressedTexImage2D { .. } => ("CompressedTexImage2D", 0, (0, 0), false),
+        WebGLCommand::GenerateMipmap(..) => ("GenerateMipmap", 0, (0, 0), false),
+        WebGLCommand::CompileShader(..) => ("CompileShader", 0, (0, 0), false),
+        WebGLCommand::LinkProgram(..) => ("LinkProgram", 0, (0, 0), false),
+        WebGLCommand::DrawArrays { .. } |
+        WebGLCommand::DrawArraysInstanced { .. } |
+        WebGLCommand::DrawElements { .. } |
+        WebGLCommand::DrawElementsInstanced { .. } |
+        WebGLCommand::DrawArraysInstancedBaseInstance { .. } |
+        WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance { .. } => ("Draw", 0, (0, 0), false),
+        WebGLCommand::Clear(..) => ("Clear", 0, (0, 0), false),
+        WebGLCommand::BufferData(..) | WebGLCommand::BufferSubData(..) => ("BufferData", 0, (0, 0), false),
+        WebGLCommand::FramebufferTexture2D(..) => ("FramebufferTexture2D", 0, (0, 0), false),
+        WebGLCommand::ReadPixels(..) | WebGLCommand::ReadPixelsPP(..) => ("ReadPixels", 0, (0, 0), false),
+        _ => ("other", 0, (0, 0), false),
+    }
+}
+
 /// Partii (frame-attr): the frame trace's phase for a WebGL thread message.
 fn frame_trace_phase(msg: &WebGLMsg) -> servo_base::frame_trace::Phase {
     use servo_base::frame_trace::Phase;
@@ -6390,6 +6615,19 @@ fn msaa_enabled(gl: &Gl) -> bool {
             .iter()
             .any(|software| renderer.contains(software))
     })
+}
+
+/// Partii (webgl-upload): see prepare_pixels; `PARTII_WEBGL_ZERO_COPY=0` (A/B switch).
+fn zero_copy_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_ZERO_COPY").map_or(true, |v| v != "0"))
+}
+
+/// Partii (webgl-upload): generateMipmap of a texture sampled without mipmaps is deferred until its levels
+/// could be seen (GLState::owed_mipmaps), unless `PARTII_WEBGL_LAZY_MIPMAP=0` (A/B switch).
+fn lazy_mipmaps_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_LAZY_MIPMAP").map_or(true, |v| v != "0"))
 }
 
 /// Partii (perf): texImage2D(null) clears colour-renderable levels instead of uploading zeros, unless
