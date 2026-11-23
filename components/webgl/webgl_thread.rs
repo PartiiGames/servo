@@ -2621,7 +2621,7 @@ impl WebGLImpl {
                         internal_format.as_gl_constant(),
                         gl::RGBA | gl::RGB | gl::RGBA8 | gl::RGB8
                     ) &&
-                    gl.version().major >= 3
+                    fbo_zeroing_supported(gl)
                 {
                     let (internal_format, format) = luminance_formats(
                         state,
@@ -3960,7 +3960,7 @@ impl WebGLImpl {
             _ => return false,
         };
         unsafe {
-            if gl.version().major < 3 || gl.get_parameter_i32(gl::PIXEL_UNPACK_BUFFER_BINDING) != 0 {
+            if !fbo_zeroing_supported(gl) || gl.get_parameter_i32(gl::PIXEL_UNPACK_BUFFER_BINDING) != 0 {
                 return false;
             }
             let Some(texture) = NonZeroU32::new(gl.get_parameter_i32(binding) as u32) else {
@@ -3994,7 +3994,8 @@ impl WebGLImpl {
             let complete =
                 gl.check_framebuffer_status(gl::DRAW_FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
             if complete {
-                let discard = gl.is_enabled(gl::RASTERIZER_DISCARD);
+                // RASTERIZER_DISCARD is GL 3.0 (WebGL 2 only): a 2.1 context would raise INVALID_ENUM.
+                let discard = gl.version().major >= 3 && gl.is_enabled(gl::RASTERIZER_DISCARD);
                 if discard {
                     gl.disable(gl::RASTERIZER_DISCARD);
                 }
@@ -6615,6 +6616,32 @@ fn msaa_enabled(gl: &Gl) -> bool {
             .iter()
             .any(|software| renderer.contains(software))
     })
+}
+
+/// Partii (webgl-upload): whether texImage2D(null) levels can be made lazily and zeroed by a clear through a
+/// temporary framebuffer (the gaps-5 lazy textures, tex_image_2d_cleared): framebuffer objects with separate draw
+/// and read bindings. Until now this asked for GL 3+, but WebGL 1 on desktop GL runs in a 2.1 compatibility context
+/// (to_surfman_version): Mesa gives 4.x there, macOS's legacy profile exactly 2.1, so on the Mac every
+/// texImage2D(null) uploaded a zero-filled buffer. Phaser's boot makes 83 1280x720 render targets that way: on the
+/// M5 24-29 ms of glTexImage2D inside the boot frame (PARTII_WEBGL_FRAME_MS), criterion 2(a)'s webgl_upload pauses
+/// in hexii and rocket-to-heaven. Desktop 2.x with ARB_framebuffer_object (or EXT_framebuffer_object +
+/// EXT_framebuffer_blit) has what these paths use; the Mac's WebGL 1 contexts already rely on both (MSAA resolve
+/// blit, framebuffer_bits). `PARTII_WEBGL_GL2_LAZY=0` keeps the GL 3+ rule (A/B switch).
+fn fbo_zeroing_supported(gl: &Gl) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let version = gl.version();
+    if version.major >= 3 {
+        return true;
+    }
+    if version.is_embedded ||
+        !*ON.get_or_init(|| std::env::var("PARTII_WEBGL_GL2_LAZY").map_or(true, |v| v != "0"))
+    {
+        return false;
+    }
+    let extensions = gl.supported_extensions();
+    extensions.contains("GL_ARB_framebuffer_object") ||
+        (extensions.contains("GL_EXT_framebuffer_object") &&
+            extensions.contains("GL_EXT_framebuffer_blit"))
 }
 
 /// Partii (webgl-upload): see prepare_pixels; `PARTII_WEBGL_ZERO_COPY=0` (A/B switch).
