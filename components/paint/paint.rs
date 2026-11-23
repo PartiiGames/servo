@@ -842,6 +842,11 @@ impl Paint {
             _ => true,
         });
 
+        // Partii (webgl-uniforms, diagnostic): with PARTII_PAINT_SLOW_MS=<ms>, a batch that took longer is logged
+        // whole: time per kind of message and the frame-ready tail (run-1122-2348 b2: a 19.9 ms paint_msg pause, no
+        // single message over 10 ms).
+        let batch_start = partii_paint_slow_ms().map(|_| std::time::Instant::now());
+        let mut batch_kinds: Vec<(&'static str, u32, f64)> = vec![];
         for message in messages {
             // Partii (webgl-compile, diagnostic): PARTII_PAINT_SLOW_MS=<ms> logs each message that took longer, by
             // kind (hexii's one 18.9 ms paint_msg pause, GPU run 2026-11-22, has no detail in the frame trace).
@@ -855,11 +860,20 @@ impl Paint {
                 if took > ms {
                     eprintln!("partii-paint-slow: {kind} {took:.2} ms");
                 }
+                match batch_kinds.iter_mut().find(|k| k.0 == kind) {
+                    Some(k) => {
+                        k.1 += 1;
+                        k.2 += took;
+                    },
+                    None => batch_kinds.push((kind, 1, took)),
+                }
             }
             if self.shutdown_state() == ShutdownState::FinishedShuttingDown {
                 return;
             }
         }
+        let tail_start = batch_start.map(|_| std::time::Instant::now());
+        let _batch_log = PartiiPaintBatchLog(batch_start, tail_start, batch_kinds);
 
         for (painter_id, repaint_needed) in saw_webrender_frame_ready_for_painter.iter() {
             if let Some(painter) = self.maybe_painter(*painter_id) {
@@ -1074,4 +1088,34 @@ fn partii_paint_slow_ms() -> Option<f64> {
             .ok()
             .and_then(|v| v.parse().ok())
     })
+}
+
+/// Partii (webgl-uniforms, diagnostic): logs a paint batch slower than PARTII_PAINT_SLOW_MS when it drops (the end of
+/// handle_messages): its messages by kind and the frame-ready tail after them.
+struct PartiiPaintBatchLog(
+    Option<std::time::Instant>,
+    Option<std::time::Instant>,
+    Vec<(&'static str, u32, f64)>,
+);
+
+impl Drop for PartiiPaintBatchLog {
+    fn drop(&mut self) {
+        let (Some(start), Some(tail), Some(ms)) = (self.0, self.1, partii_paint_slow_ms()) else {
+            return;
+        };
+        let total = start.elapsed().as_secs_f64() * 1000.0;
+        if total <= ms {
+            return;
+        }
+        let kinds: Vec<String> = self
+            .2
+            .iter()
+            .map(|(kind, n, t)| format!("{kind} {n}x {t:.2}"))
+            .collect();
+        eprintln!(
+            "partii-paint-batch: {total:.2} ms: {} | frame-ready tail {:.2} ms",
+            kinds.join(" | "),
+            tail.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }

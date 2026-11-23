@@ -2443,141 +2443,39 @@ impl WebGLImpl {
                     state.restore_alpha_invariant(gl);
                 }
             },
-            WebGLCommand::Uniform1f(uniform_id, v) => unsafe {
-                gl.uniform_1_f32(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform1fv(uniform_id, ref v) => unsafe {
-                gl.uniform_1_f32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform1i(uniform_id, v) => unsafe {
-                gl.uniform_1_i32(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform1iv(uniform_id, ref v) => unsafe {
-                gl.uniform_1_i32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform1ui(uniform_id, v) => unsafe {
-                gl.uniform_1_u32(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform1uiv(uniform_id, ref v) => unsafe {
-                gl.uniform_1_u32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform2f(uniform_id, x, y) => unsafe {
-                gl.uniform_2_f32(native_uniform_location(uniform_id).as_ref(), x, y)
-            },
-            WebGLCommand::Uniform2fv(uniform_id, ref v) => unsafe {
-                gl.uniform_2_f32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform2i(uniform_id, x, y) => unsafe {
-                gl.uniform_2_i32(native_uniform_location(uniform_id).as_ref(), x, y)
-            },
-            WebGLCommand::Uniform2iv(uniform_id, ref v) => unsafe {
-                gl.uniform_2_i32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform2ui(uniform_id, x, y) => unsafe {
-                gl.uniform_2_u32(native_uniform_location(uniform_id).as_ref(), x, y)
-            },
-            WebGLCommand::Uniform2uiv(uniform_id, ref v) => unsafe {
-                gl.uniform_2_u32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform3f(uniform_id, x, y, z) => unsafe {
-                gl.uniform_3_f32(native_uniform_location(uniform_id).as_ref(), x, y, z)
-            },
-            WebGLCommand::Uniform3fv(uniform_id, ref v) => unsafe {
-                gl.uniform_3_f32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform3i(uniform_id, x, y, z) => unsafe {
-                gl.uniform_3_i32(native_uniform_location(uniform_id).as_ref(), x, y, z)
-            },
-            WebGLCommand::Uniform3iv(uniform_id, ref v) => unsafe {
-                gl.uniform_3_i32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform3ui(uniform_id, x, y, z) => unsafe {
-                gl.uniform_3_u32(native_uniform_location(uniform_id).as_ref(), x, y, z)
-            },
-            WebGLCommand::Uniform3uiv(uniform_id, ref v) => unsafe {
-                gl.uniform_3_u32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform4f(uniform_id, x, y, z, w) => unsafe {
-                gl.uniform_4_f32(native_uniform_location(uniform_id).as_ref(), x, y, z, w)
-            },
-            WebGLCommand::Uniform4fv(uniform_id, ref v) => unsafe {
-                gl.uniform_4_f32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform4i(uniform_id, x, y, z, w) => unsafe {
-                gl.uniform_4_i32(native_uniform_location(uniform_id).as_ref(), x, y, z, w)
-            },
-            WebGLCommand::Uniform4iv(uniform_id, ref v) => unsafe {
-                gl.uniform_4_i32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::Uniform4ui(uniform_id, x, y, z, w) => unsafe {
-                gl.uniform_4_u32(native_uniform_location(uniform_id).as_ref(), x, y, z, w)
-            },
-            WebGLCommand::Uniform4uiv(uniform_id, ref v) => unsafe {
-                gl.uniform_4_u32_slice(native_uniform_location(uniform_id).as_ref(), v)
-            },
-            WebGLCommand::UniformMatrix2fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_2_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
-            WebGLCommand::UniformMatrix3fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_3_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
-            WebGLCommand::UniformMatrix4fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_4_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
-            WebGLCommand::UniformMatrix3x2fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_3x2_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
-            WebGLCommand::UniformMatrix4x2fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_4x2_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
-            WebGLCommand::UniformMatrix2x3fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_2x3_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
-            WebGLCommand::UniformMatrix4x3fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_4x3_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
-            WebGLCommand::UniformMatrix2x4fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_2x4_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
-            WebGLCommand::UniformMatrix3x4fv(uniform_id, ref v) => unsafe {
-                gl.uniform_matrix_3x4_f32_slice(
-                    native_uniform_location(uniform_id).as_ref(),
-                    false,
-                    v,
-                )
-            },
+            WebGLCommand::Uniform1f(..) |
+            WebGLCommand::Uniform1fv(..) |
+            WebGLCommand::Uniform1i(..) |
+            WebGLCommand::Uniform1iv(..) |
+            WebGLCommand::Uniform1ui(..) |
+            WebGLCommand::Uniform1uiv(..) |
+            WebGLCommand::Uniform2f(..) |
+            WebGLCommand::Uniform2fv(..) |
+            WebGLCommand::Uniform2i(..) |
+            WebGLCommand::Uniform2iv(..) |
+            WebGLCommand::Uniform2ui(..) |
+            WebGLCommand::Uniform2uiv(..) |
+            WebGLCommand::Uniform3f(..) |
+            WebGLCommand::Uniform3fv(..) |
+            WebGLCommand::Uniform3i(..) |
+            WebGLCommand::Uniform3iv(..) |
+            WebGLCommand::Uniform3ui(..) |
+            WebGLCommand::Uniform3uiv(..) |
+            WebGLCommand::Uniform4f(..) |
+            WebGLCommand::Uniform4fv(..) |
+            WebGLCommand::Uniform4i(..) |
+            WebGLCommand::Uniform4iv(..) |
+            WebGLCommand::Uniform4ui(..) |
+            WebGLCommand::Uniform4uiv(..) |
+            WebGLCommand::UniformMatrix2fv(..) |
+            WebGLCommand::UniformMatrix3fv(..) |
+            WebGLCommand::UniformMatrix4fv(..) |
+            WebGLCommand::UniformMatrix3x2fv(..) |
+            WebGLCommand::UniformMatrix4x2fv(..) |
+            WebGLCommand::UniformMatrix2x3fv(..) |
+            WebGLCommand::UniformMatrix4x3fv(..) |
+            WebGLCommand::UniformMatrix2x4fv(..) |
+            WebGLCommand::UniformMatrix3x4fv(..) => Self::apply_uniform(gl, &command),
             WebGLCommand::ValidateProgram(program_id) => unsafe {
                 gl.validate_program(program_id.glow())
             },
@@ -4782,13 +4680,167 @@ impl WebGLImpl {
         state.restore_invariant(gl);
     }
 
+    /// Partii (webgl-uniforms): a uniform command on the program GL has in use (now, or after waiting with its
+    /// program's ops: DeferredPrograms::uniform).
+    fn apply_uniform(gl: &Gl, command: &WebGLCommand) {
+        match *command {
+            WebGLCommand::Uniform1f(uniform_id, v) => unsafe {
+                gl.uniform_1_f32(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform1fv(uniform_id, ref v) => unsafe {
+                gl.uniform_1_f32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform1i(uniform_id, v) => unsafe {
+                gl.uniform_1_i32(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform1iv(uniform_id, ref v) => unsafe {
+                gl.uniform_1_i32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform1ui(uniform_id, v) => unsafe {
+                gl.uniform_1_u32(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform1uiv(uniform_id, ref v) => unsafe {
+                gl.uniform_1_u32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform2f(uniform_id, x, y) => unsafe {
+                gl.uniform_2_f32(native_uniform_location(uniform_id).as_ref(), x, y)
+            },
+            WebGLCommand::Uniform2fv(uniform_id, ref v) => unsafe {
+                gl.uniform_2_f32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform2i(uniform_id, x, y) => unsafe {
+                gl.uniform_2_i32(native_uniform_location(uniform_id).as_ref(), x, y)
+            },
+            WebGLCommand::Uniform2iv(uniform_id, ref v) => unsafe {
+                gl.uniform_2_i32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform2ui(uniform_id, x, y) => unsafe {
+                gl.uniform_2_u32(native_uniform_location(uniform_id).as_ref(), x, y)
+            },
+            WebGLCommand::Uniform2uiv(uniform_id, ref v) => unsafe {
+                gl.uniform_2_u32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform3f(uniform_id, x, y, z) => unsafe {
+                gl.uniform_3_f32(native_uniform_location(uniform_id).as_ref(), x, y, z)
+            },
+            WebGLCommand::Uniform3fv(uniform_id, ref v) => unsafe {
+                gl.uniform_3_f32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform3i(uniform_id, x, y, z) => unsafe {
+                gl.uniform_3_i32(native_uniform_location(uniform_id).as_ref(), x, y, z)
+            },
+            WebGLCommand::Uniform3iv(uniform_id, ref v) => unsafe {
+                gl.uniform_3_i32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform3ui(uniform_id, x, y, z) => unsafe {
+                gl.uniform_3_u32(native_uniform_location(uniform_id).as_ref(), x, y, z)
+            },
+            WebGLCommand::Uniform3uiv(uniform_id, ref v) => unsafe {
+                gl.uniform_3_u32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform4f(uniform_id, x, y, z, w) => unsafe {
+                gl.uniform_4_f32(native_uniform_location(uniform_id).as_ref(), x, y, z, w)
+            },
+            WebGLCommand::Uniform4fv(uniform_id, ref v) => unsafe {
+                gl.uniform_4_f32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform4i(uniform_id, x, y, z, w) => unsafe {
+                gl.uniform_4_i32(native_uniform_location(uniform_id).as_ref(), x, y, z, w)
+            },
+            WebGLCommand::Uniform4iv(uniform_id, ref v) => unsafe {
+                gl.uniform_4_i32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::Uniform4ui(uniform_id, x, y, z, w) => unsafe {
+                gl.uniform_4_u32(native_uniform_location(uniform_id).as_ref(), x, y, z, w)
+            },
+            WebGLCommand::Uniform4uiv(uniform_id, ref v) => unsafe {
+                gl.uniform_4_u32_slice(native_uniform_location(uniform_id).as_ref(), v)
+            },
+            WebGLCommand::UniformMatrix2fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_2_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            WebGLCommand::UniformMatrix3fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_3_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            WebGLCommand::UniformMatrix4fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_4_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            WebGLCommand::UniformMatrix3x2fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_3x2_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            WebGLCommand::UniformMatrix4x2fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_4x2_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            WebGLCommand::UniformMatrix2x3fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_2x3_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            WebGLCommand::UniformMatrix4x3fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_4x3_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            WebGLCommand::UniformMatrix2x4fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_2x4_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            WebGLCommand::UniformMatrix3x4fv(uniform_id, ref v) => unsafe {
+                gl.uniform_matrix_3x4_f32_slice(
+                    native_uniform_location(uniform_id).as_ref(),
+                    false,
+                    v,
+                )
+            },
+            _ => unreachable!("not a uniform command: {command:?}"),
+        }
+    }
+
     /// Partii (webgl-compile): hands shader and program work to GLState::deferred_programs, which runs it now or
     /// later (partii_deferred_programs), and before any other command naming a shader or program, runs what
     /// that object is waiting for. None: the command was dealt with.
     fn defer_program_work(gl: &Gl, state: &mut GLState, command: WebGLCommand) -> Option<WebGLCommand> {
-        use crate::partii_deferred_programs::ProgramOp;
+        use crate::partii_deferred_programs::{ProgramOp, UniformCall};
         let deferred = &mut state.deferred_programs;
-        let mut run = |op: ProgramOp| Self::run_program_op(gl, op);
+        // Partii (webgl-uniforms): waiting compiles and links made inside another command are traced as
+        // webgl_compile and noted (`<command>:ran-deferred` in PARTII_WEBGL_FRAME_MS), not hidden in that command.
+        let mut run = |op: ProgramOp| {
+            let compile = matches!(op, ProgramOp::Compile(..) | ProgramOp::Link(..));
+            let _span = (compile && servo_base::frame_trace::enabled())
+                .then(|| servo_base::frame_trace::span(servo_base::frame_trace::Phase::WebGlCompile));
+            if compile {
+                crate::partii_frame_log::note("ran-deferred");
+            }
+            Self::run_program_op(gl, op)
+        };
+        let lazy = crate::partii_deferred_programs::lazy_use_program();
         let (op, may_wait) = match command {
             WebGLCommand::CompileShader(shader_id, ref source, ref translation, ref sender) => {
                 // Script learns the outcome from the translator; GL's compile waits for a link that needs it.
@@ -4819,10 +4871,22 @@ impl WebGLImpl {
             WebGLCommand::DeleteShader(shader_id) => (ProgramOp::DeleteShader(shader_id), false),
             WebGLCommand::DeleteProgram(program_id) => (ProgramOp::DeleteProgram(program_id), false),
             WebGLCommand::UseProgram(program_id) => {
+                if lazy {
+                    deferred.use_program_lazy(program_id, &mut run);
+                    return None;
+                }
                 deferred.use_program(program_id, &mut run);
                 return Some(command);
             },
+            _ if lazy && is_uniform_command(&command) => {
+                return deferred
+                    .uniform(UniformCall(command), &mut run)
+                    .map(|UniformCall(command)| command);
+            },
             _ => {
+                if lazy && uses_program_in_use(&command) {
+                    deferred.sync_current(&mut run);
+                }
                 if !deferred.is_empty() &&
                     let Some(name) = program_or_shader_named(&command)
                 {
@@ -4849,6 +4913,11 @@ impl WebGLImpl {
                 ProgramOp::Link(program_id) => gl.link_program(program_id.glow()),
                 ProgramOp::DeleteShader(shader_id) => gl.delete_shader(shader_id.glow()),
                 ProgramOp::DeleteProgram(program_id) => gl.delete_program(program_id.glow()),
+                ProgramOp::Uniform(program_id, call) => {
+                    gl.use_program(Some(program_id.glow()));
+                    Self::apply_uniform(gl, &call.0);
+                },
+                ProgramOp::Bind(program_id) => gl.use_program(program_id.map(|p| p.glow())),
             }
         }
     }
@@ -6706,7 +6775,8 @@ fn partii_frame_kind(msg: &WebGLMsg) -> (&'static str, u64, (u32, u32), bool) {
         WebGLCommand::BufferData(..) | WebGLCommand::BufferSubData(..) => ("BufferData", 0, (0, 0), false),
         WebGLCommand::FramebufferTexture2D(..) => ("FramebufferTexture2D", 0, (0, 0), false),
         WebGLCommand::ReadPixels(..) | WebGLCommand::ReadPixelsPP(..) => ("ReadPixels", 0, (0, 0), false),
-        _ => ("other", 0, (0, 0), false),
+        // Partii (webgl-uniforms): the rest by command (was "other").
+        _ => (command.into(), 0, (0, 0), false),
     }
 }
 
@@ -6735,6 +6805,47 @@ fn frame_trace_phase(msg: &WebGLMsg) -> servo_base::frame_trace::Phase {
         WebGLMsg::CreateContext(..) | WebGLMsg::ResizeContext(..) => Phase::WebGlContext,
         _ => Phase::WebGl,
     }
+}
+
+/// Partii (webgl-uniforms): a glUniform* command (sets a uniform of the program in use).
+fn is_uniform_command(command: &WebGLCommand) -> bool {
+    use WebGLCommand::*;
+    matches!(
+        command,
+        Uniform1f(..) | Uniform1fv(..) | Uniform1i(..) | Uniform1iv(..) | Uniform1ui(..) | Uniform1uiv(..) |
+            Uniform2f(..) | Uniform2fv(..) | Uniform2i(..) | Uniform2iv(..) | Uniform2ui(..) | Uniform2uiv(..) |
+            Uniform3f(..) | Uniform3fv(..) | Uniform3i(..) | Uniform3iv(..) | Uniform3ui(..) | Uniform3uiv(..) |
+            Uniform4f(..) | Uniform4fv(..) | Uniform4i(..) | Uniform4iv(..) | Uniform4ui(..) | Uniform4uiv(..) |
+            UniformMatrix2fv(..) | UniformMatrix3fv(..) | UniformMatrix4fv(..) | UniformMatrix3x2fv(..) |
+            UniformMatrix4x2fv(..) | UniformMatrix2x3fv(..) | UniformMatrix4x3fv(..) | UniformMatrix2x4fv(..) |
+            UniformMatrix3x4fv(..)
+    )
+}
+
+/// Partii (webgl-uniforms): a command that uses GL's program in use, or may read it (GetParameter*): with lazy
+/// glUseProgram, GL binds the program content asked for first (DeferredPrograms::sync_current).
+fn uses_program_in_use(command: &WebGLCommand) -> bool {
+    use WebGLCommand::*;
+    matches!(
+        command,
+        DrawArrays { .. } |
+            DrawArraysInstanced { .. } |
+            DrawElements { .. } |
+            DrawElementsInstanced { .. } |
+            DrawArraysInstancedBaseInstance { .. } |
+            DrawElementsInstancedBaseVertexBaseInstance { .. } |
+            BeginTransformFeedback(..) |
+            ResumeTransformFeedback() |
+            GetParameterBool(..) |
+            GetParameterBool4(..) |
+            GetParameterInt(..) |
+            GetParameterUInt(..) |
+            GetParameterInt2(..) |
+            GetParameterInt4(..) |
+            GetParameterFloat(..) |
+            GetParameterFloat2(..) |
+            GetParameterFloat4(..)
+    )
 }
 
 /// Partii (webgl-compile): the shader or program a command names that isn't one of the ops DeferredPrograms

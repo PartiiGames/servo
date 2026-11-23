@@ -1613,13 +1613,18 @@ impl Painter {
             return;
         };
 
-        let Some(hit_test_result) = Self::hit_test_at_point_with_api_and_document(
-            &self.webrender_api,
-            self.webrender_document,
-            last_mouse_move_position,
-        )
-        .first()
-        .cloned() else {
+        // Partii (webgl-uniforms, diagnostic): a blocking round trip to WebRender's render backend, which answers after
+        // whatever it is doing (a frame build at a round start): traced as ipc_wait, not the paint thread's own time.
+        let hit_test = {
+            let _span = servo_base::frame_trace::enabled()
+                .then(|| servo_base::frame_trace::span(servo_base::frame_trace::Phase::IpcWait));
+            Self::hit_test_at_point_with_api_and_document(
+                &self.webrender_api,
+                self.webrender_document,
+                last_mouse_move_position,
+            )
+        };
+        let Some(hit_test_result) = hit_test.first().cloned() else {
             return;
         };
 

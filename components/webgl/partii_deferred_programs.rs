@@ -21,6 +21,14 @@
 //! program and the shaders attached to it then (`attached`), so it pulls in their compiles. Shader and program
 //! names come from one GL namespace. A deletion that waits keeps the GL name alive, so GL can't hand it out again
 //! while ops still name it. `PARTII_WEBGL_DEFER_PROGRAMS=0` turns this off.
+//!
+//! Partii (stream webgl-uniforms): glUseProgram is lazy too. Each Phaser pipeline binds its program at boot only to set
+//! its first uniforms (one draw in the boot frame), so making a program's work wait until glUseProgram still ran all
+//! 31 links in the boot frame (GPU slot run-1122-2348: "other 1440x 12-18 ms" there with the deferral on, 0.5-0.9 ms
+//! with it off). Now glUseProgram of a program with ops waiting only records it (`wanted`); uniform calls for it join
+//! its ops (each binds it, sets, and binds back what GL has bound); the GL bind, and what the program waits for, runs
+//! before a command that uses the program in use (a draw, transform feedback, a GetParameter: `sync_current`).
+//! `PARTII_WEBGL_LAZY_USE_PROGRAM=0` turns this part off.
 
 use std::collections::VecDeque;
 
@@ -31,6 +39,22 @@ use servo_canvas_traits::webgl::{WebGLProgramId, WebGLShaderId};
 pub(crate) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PARTII_WEBGL_DEFER_PROGRAMS").map_or(true, |v| v != "0"))
+}
+
+/// `PARTII_WEBGL_LAZY_USE_PROGRAM=0` makes glUseProgram run what the program waits for at once (A/B switch).
+pub(crate) fn lazy_use_program() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_LAZY_USE_PROGRAM").map_or(true, |v| v != "0"))
+}
+
+/// A uniform command (it sets the uniform of the program in use). Compared by its Debug text (tests).
+#[derive(Debug)]
+pub(crate) struct UniformCall(pub(crate) servo_canvas_traits::webgl::WebGLCommand);
+
+impl PartialEq for UniformCall {
+    fn eq(&self, other: &Self) -> bool {
+        format!("{:?}", self.0) == format!("{:?}", other.0)
+    }
 }
 
 /// One GL call on a shader or program object.
@@ -45,6 +69,10 @@ pub(crate) enum ProgramOp {
     Link(WebGLProgramId),
     DeleteShader(WebGLShaderId),
     DeleteProgram(WebGLProgramId),
+    /// glUseProgram(program) + the uniform call; then `Bind` of what GL had bound.
+    Uniform(WebGLProgramId, UniformCall),
+    /// glUseProgram (never queued).
+    Bind(Option<WebGLProgramId>),
 }
 
 #[derive(Default)]
@@ -53,8 +81,15 @@ pub(crate) struct DeferredPrograms {
     ops: VecDeque<(Vec<u32>, ProgramOp)>,
     /// The shaders attached to each program, as of the last op given (waiting or not).
     attached: FxHashMap<u32, Vec<u32>>,
-    /// The program glUseProgram last made current (0: none); a link of it can't wait.
-    current_program: u32,
+    /// The program bound in GL (0: none); a link of it can't wait.
+    bound: u32,
+    /// The program content's glUseProgram last asked for (0: none); differs from `bound` while it waits
+    /// (lazy glUseProgram).
+    wanted: u32,
+}
+
+fn program_id(name: u32) -> Option<WebGLProgramId> {
+    WebGLProgramId::maybe_new(name)
 }
 
 impl std::fmt::Debug for DeferredPrograms {
@@ -109,7 +144,13 @@ impl DeferredPrograms {
             ProgramOp::Link(program) => std::iter::once(program.get())
                 .chain(self.attached_to(program.get()))
                 .collect(),
+            ProgramOp::Uniform(program, _) => vec![program.get()],
+            ProgramOp::Bind(_) => unreachable!("Bind is never submitted"),
             ProgramOp::DeleteProgram(program) => {
+                if program.get() == self.wanted && self.wanted != self.bound {
+                    // GL keeps a deleted program in use alive: bind it before it goes.
+                    self.sync_current(run);
+                }
                 let touches = std::iter::once(program.get())
                     .chain(self.attached_to(program.get()))
                     .collect();
@@ -119,7 +160,7 @@ impl DeferredPrograms {
         };
         let link_now = match op {
             // Relinking the program in use changes what the next draw runs.
-            ProgramOp::Link(program) => !may_wait || program.get() == self.current_program,
+            ProgramOp::Link(program) => !may_wait || program.get() == self.bound,
             _ => false,
         };
         if link_now {
@@ -128,7 +169,16 @@ impl DeferredPrograms {
         } else if may_wait || self.waiting(&touches) {
             self.ops.push_back((touches, op));
         } else {
-            run(op);
+            self.exec(op, run);
+        }
+    }
+
+    /// Runs one op; a uniform op binds its program, so GL's binding goes back after it.
+    fn exec(&self, op: ProgramOp, run: &mut impl FnMut(ProgramOp)) {
+        let rebind = matches!(op, ProgramOp::Uniform(..));
+        run(op);
+        if rebind {
+            run(ProgramOp::Bind(program_id(self.bound)));
         }
     }
 
@@ -155,7 +205,7 @@ impl DeferredPrograms {
         }
         for (touches, op) in std::mem::take(&mut self.ops) {
             if touches.iter().any(|n| closure.contains(n)) {
-                run(op);
+                self.exec(op, run);
             } else {
                 self.ops.push_back((touches, op));
             }
@@ -170,7 +220,7 @@ impl DeferredPrograms {
         self.need(&touches, run);
     }
 
-    /// glUseProgram: the program's ops run first.
+    /// glUseProgram, not lazy: the program's ops run first (the caller then binds it).
     pub(crate) fn use_program(
         &mut self,
         program: Option<WebGLProgramId>,
@@ -180,14 +230,69 @@ impl DeferredPrograms {
         if name != 0 {
             self.need(&[name], run);
         }
-        self.current_program = name;
+        self.bound = name;
+        self.wanted = name;
+    }
+
+    /// glUseProgram, lazy: a program with ops waiting is only recorded; any other is bound now (with `run`).
+    pub(crate) fn use_program_lazy(
+        &mut self,
+        program: Option<WebGLProgramId>,
+        run: &mut impl FnMut(ProgramOp),
+    ) {
+        let name = program.map_or(0, |p| p.get());
+        self.wanted = name;
+        if name != 0 && self.waiting(&[name]) {
+            return;
+        }
+        if self.bound != name {
+            run(ProgramOp::Bind(program));
+            self.bound = name;
+        }
+    }
+
+    /// A uniform call (lazy glUseProgram on): Some(call) to make now (GL has the program in use bound), or None:
+    /// it waits with the program's ops.
+    pub(crate) fn uniform(
+        &mut self,
+        call: UniformCall,
+        run: &mut impl FnMut(ProgramOp),
+    ) -> Option<UniformCall> {
+        if self.wanted == self.bound {
+            return Some(call);
+        }
+        let Some(program) = program_id(self.wanted) else {
+            return Some(call);
+        };
+        if self.waiting(&[self.wanted]) {
+            self.ops
+                .push_back((vec![self.wanted], ProgramOp::Uniform(program, call)));
+            return None;
+        }
+        // Its ops were made while idle: bind it now.
+        run(ProgramOp::Bind(Some(program)));
+        self.bound = self.wanted;
+        Some(call)
+    }
+
+    /// Before a command that uses the program in use (a draw, transform feedback, reading GL state): what it waits
+    /// for runs, and GL binds it.
+    pub(crate) fn sync_current(&mut self, run: &mut impl FnMut(ProgramOp)) {
+        if self.wanted == self.bound {
+            return;
+        }
+        if self.wanted != 0 {
+            self.need(&[self.wanted], run);
+        }
+        run(ProgramOp::Bind(program_id(self.wanted)));
+        self.bound = self.wanted;
     }
 
     /// Runs the oldest waiting op (always safe: nothing waits before it). False when none was waiting.
     pub(crate) fn run_oldest(&mut self, run: &mut impl FnMut(ProgramOp)) -> bool {
         match self.ops.pop_front() {
             Some((_, op)) => {
-                run(op);
+                self.exec(op, run);
                 true
             },
             None => false,
@@ -282,6 +387,90 @@ mod tests {
         }
         assert!(variants.len() > 100, "parsed {} variants", variants.len());
         assert!(missing.is_empty(), "not covered: {missing:?}");
+    }
+
+    fn u(loc: i32) -> UniformCall {
+        UniformCall(servo_canvas_traits::webgl::WebGLCommand::Uniform1f(
+            loc, 1.0,
+        ))
+    }
+
+    #[test]
+    fn lazy_use_program_and_uniforms_wait_for_the_draw() {
+        let mut d = DeferredPrograms::default();
+        let mut log = vec![];
+        boot_program(&mut d, &mut log, 1, 2, 3, true);
+        boot_program(&mut d, &mut log, 4, 5, 6, true);
+        // Phaser's pipeline boot: bind each program, set its first uniforms; nothing runs.
+        let mut run = |op| log.push(op);
+        d.use_program_lazy(Some(p(4)), &mut run);
+        assert!(d.uniform(u(7), &mut run).is_none());
+        d.use_program_lazy(Some(p(1)), &mut run);
+        assert!(d.uniform(u(8), &mut run).is_none());
+        assert!(log.is_empty());
+        assert_eq!(d.len(), 16);
+        // The draw (with program 1): its ops, its uniform (bound, set, GL's binding back), then the bind.
+        d.sync_current(&mut |op| log.push(op));
+        let mut expect = program_ops(1, 2, 3);
+        expect.push(ProgramOp::Uniform(p(1), u(8)));
+        expect.push(ProgramOp::Bind(None));
+        expect.push(ProgramOp::Bind(Some(p(1))));
+        assert_eq!(log, expect);
+        assert_eq!(d.len(), 8);
+        // Now bound: its uniforms are made at once; a second sync does nothing.
+        log.clear();
+        assert!(d.uniform(u(9), &mut |op| log.push(op)).is_some());
+        d.sync_current(&mut |op| log.push(op));
+        assert!(log.is_empty());
+        // Program 4's uniform drains after its link, binding program 1 back.
+        while d.run_oldest(&mut |op| log.push(op)) {}
+        let mut expect = program_ops(4, 5, 6);
+        expect.push(ProgramOp::Uniform(p(4), u(7)));
+        expect.push(ProgramOp::Bind(Some(p(1))));
+        assert_eq!(log, expect);
+    }
+
+    #[test]
+    fn lazy_use_of_a_ready_program_binds_now() {
+        let mut d = DeferredPrograms::default();
+        let mut log = vec![];
+        boot_program(&mut d, &mut log, 1, 2, 3, true);
+        while d.run_oldest(&mut |op| log.push(op)) {}
+        log.clear();
+        d.use_program_lazy(Some(p(1)), &mut |op| log.push(op));
+        assert_eq!(log, vec![ProgramOp::Bind(Some(p(1)))]);
+        log.clear();
+        d.use_program_lazy(Some(p(1)), &mut |op| log.push(op));
+        d.use_program_lazy(None, &mut |op| log.push(op));
+        assert_eq!(log, vec![ProgramOp::Bind(None)]);
+    }
+
+    #[test]
+    fn uniform_after_an_idle_drain_binds_then_sets() {
+        let mut d = DeferredPrograms::default();
+        let mut log = vec![];
+        boot_program(&mut d, &mut log, 1, 2, 3, true);
+        d.use_program_lazy(Some(p(1)), &mut |op| log.push(op));
+        while d.run_oldest(&mut |op| log.push(op)) {}
+        log.clear();
+        assert!(d.uniform(u(3), &mut |op| log.push(op)).is_some());
+        assert_eq!(log, vec![ProgramOp::Bind(Some(p(1)))]);
+    }
+
+    #[test]
+    fn deleting_the_wanted_program_binds_it_first() {
+        let mut d = DeferredPrograms::default();
+        let mut log = vec![];
+        boot_program(&mut d, &mut log, 1, 2, 3, true);
+        d.use_program_lazy(Some(p(1)), &mut |op| log.push(op));
+        d.submit(ProgramOp::DeleteProgram(p(1)), false, &mut |op| {
+            log.push(op)
+        });
+        let mut expect = program_ops(1, 2, 3);
+        expect.push(ProgramOp::Bind(Some(p(1))));
+        expect.push(ProgramOp::DeleteProgram(p(1)));
+        assert_eq!(log, expect);
+        assert!(d.is_empty());
     }
 
     #[test]

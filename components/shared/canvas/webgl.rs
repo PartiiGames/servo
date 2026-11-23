@@ -328,7 +328,7 @@ pub enum WebGLObjectNameKind {
 }
 
 /// WebGL Commands for a specific WebGLContext
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, strum::IntoStaticStr)]
 pub enum WebGLCommand {
     GetContextAttributes(GenericSender<GLContextAttributes>),
     ActiveTexture(u32),
