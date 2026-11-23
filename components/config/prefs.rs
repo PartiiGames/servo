@@ -318,6 +318,10 @@ pub struct Preferences {
     pub js_baseline_jit_unsafe_eager_compilation_enabled: bool,
     pub js_ion_enabled: bool,
     pub js_ion_unsafe_eager_compilation_enabled: bool,
+    /// Partii: Warp inlines callees up to this many bytes of bytecode (SpiderMonkey's default is 140; V8 inlines up
+    /// to 460). 0 keeps SpiderMonkey's default. Games call many small helpers (noise, hashes, cell rules) from hot
+    /// loops: at 400, Digii Dwarf's world generation runs 2x faster in the js shell (796 -> 405 ms).
+    pub js_inlining_bytecode_max_length: i64,
     pub js_mem_gc_compacting_enabled: bool,
     pub js_mem_gc_empty_chunk_count_min: i64,
     pub js_mem_gc_high_frequency_heap_growth_max: i64,
@@ -608,6 +612,7 @@ impl Preferences {
             js_disable_jit: false,
             js_ion_enabled: true,
             js_ion_unsafe_eager_compilation_enabled: false,
+            js_inlining_bytecode_max_length: 400,
             // The layout system currently does not work with compacting GC, so it is disabled by default.
             // See https://github.com/servo/servo/issues/47577
             js_mem_gc_compacting_enabled: false,
