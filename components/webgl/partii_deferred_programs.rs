@@ -383,14 +383,14 @@ mod tests {
     #[test]
     fn delete_program_waits_behind_its_link_and_detach_updates_attachments() {
         let mut d = DeferredPrograms::default();
-        let mut log = vec![];
-        let mut run = |op| log.push(op);
+        let ran = std::cell::Cell::new(0);
+        let mut run = |_| ran.set(ran.get() + 1);
         d.submit(ProgramOp::Attach(p(1), s(2)), false, &mut run);
         d.submit(ProgramOp::Detach(p(1), s(2)), false, &mut run);
         d.submit(ProgramOp::Compile(s(2), "a".into()), true, &mut run);
         // Detached: this link no longer touches shader 2, so it doesn't wait behind its compile.
         d.submit(ProgramOp::Link(p(1)), false, &mut run);
-        assert_eq!(log.len(), 3);
+        assert_eq!(ran.get(), 3);
         assert_eq!(d.len(), 1);
         d.submit(ProgramOp::Link(p(1)), true, &mut run);
         d.submit(ProgramOp::DeleteProgram(p(1)), false, &mut run);
