@@ -49,6 +49,7 @@ fn main() {
     println!("cargo:rerun-if-changed=libvpx/vpx/vpx_decoder.h");
     println!("cargo:rerun-if-changed=libvpx/vpx/vpx_encoder.h");
     println!("cargo:rerun-if-env-changed=PARTII_VPX_TARGET");
+    println!("cargo:rerun-if-env-changed=PARTII_REQUIRE_NASM");
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
@@ -68,10 +69,14 @@ fn main() {
     // Partii (clips): generic-gnu on x86_64 is plain C, no SSE2/SSSE3/AVX2: the VP8 encoder runs ~4x
     // slower (18-21 ms a 640x360 frame on the farm, which has no nasm). Say so loudly: a build that
     // ships needs nasm (or yasm) on the builder.
+    // PARTII_REQUIRE_NASM=1 (release and export jobs set it, with --needs sys:nasm): that fallback fails
+    // the build instead, so a release can't ship the slow encoder silently.
     if target == "generic-gnu" && arch == "x86_64" {
-        println!(
-            "cargo:warning=libvpx: no nasm/yasm, building generic C (no SIMD): VP8 encode ~4x slower. Install nasm."
-        );
+        let msg = "libvpx: no nasm/yasm, building generic C (no SIMD): VP8 encode ~4x slower. Install nasm.";
+        if env::var("PARTII_REQUIRE_NASM").is_ok_and(|v| v == "1") {
+            panic!("{msg} (PARTII_REQUIRE_NASM=1)");
+        }
+        println!("cargo:warning={msg}");
     }
     let compiler = cc::Build::new().opt_level(2).pic(true).get_compiler();
     let ar = cc::Build::new().get_archiver();
