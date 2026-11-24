@@ -61,17 +61,18 @@ impl CanvasRenderingContext2D {
     const RGBA8_BYTES_PER_PIXEL: usize = 4;
 
     /// Partii: the whole canvas to `callback`, called on the canvas thread after the drawing sent so
-    /// far (canvas.captureStream: the script thread doesn't wait). False when there's nothing to read.
+    /// far (canvas.captureStream, toBlob: the script thread doesn't wait). Gives the callback back when
+    /// there's no bitmap to read.
     pub(crate) fn read_pixels_to_callback(
         &self,
         callback: generic_channel::GenericCallback<pixels::SharedSnapshot>,
-    ) -> bool {
+    ) -> Result<(), generic_channel::GenericCallback<pixels::SharedSnapshot>> {
         if !self.canvas_state.is_paintable() {
-            return false;
+            return Err(callback);
         }
         self.canvas_state
             .send_canvas_command_immediate(CanvasCommand::GetImageDataToCallback(callback));
-        true
+        Ok(())
     }
     /// Ideally this would be two bitmap buffers, unfortunately we currently have ~4 copies
     /// which are all retained until GC:

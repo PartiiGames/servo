@@ -115,7 +115,10 @@ impl Recorder {
         let (control, controls) = channel();
         let thread = std::thread::Builder::new()
             .name("MediaRecorder".into())
-            .spawn(move || Encoder::new(reader, options, sink, controls).run())
+            .spawn(move || {
+                background_priority();
+                Encoder::new(reader, options, sink, controls).run()
+            })
             .map_err(|e| e.to_string())?;
         Ok(Recorder { control, thread: Some(thread) })
     }
@@ -166,6 +169,7 @@ struct Encoder {
     last_key: i64,
     next_slice: Option<Instant>,
     encode_time: Duration,
+    encode_max: Duration,
 }
 
 impl Encoder {
@@ -191,6 +195,7 @@ impl Encoder {
             last_key: i64::MIN / 2,
             next_slice,
             encode_time: Duration::ZERO,
+            encode_max: Duration::ZERO,
         }
     }
 
@@ -245,12 +250,19 @@ impl Encoder {
         self.flush();
         self.hand_out();
         if let Some(w) = &self.webm {
-            log::debug!(
-                "MediaRecorder: {} frames, {} ms, encode {:?} total",
+            let line = format!(
+                "PARTII_REC frames={} ms={} encode_avg_us={} encode_max_us={} thread=MediaRecorder",
                 w.frames,
                 w.last_pts,
-                self.encode_time
+                self.encode_time.as_micros() as u64 / w.frames.max(1),
+                self.encode_max.as_micros()
             );
+            // PARTII_CLIP_STATS=1: on stderr for the clips harness.
+            if std::env::var_os("PARTII_CLIP_STATS").is_some() {
+                eprintln!("{line}");
+            } else {
+                log::debug!("{line}");
+            }
         }
         (self.sink)(RecorderEvent::Stopped { by_track });
     }
@@ -268,7 +280,11 @@ impl Encoder {
                 return Ok(());
             }
             let kbps = (self.options.video_bits_per_second / 1000).clamp(50, 20_000);
-            let threads = if w * h >= 640 * 360 { 2 } else { 1 };
+            // Partii: a second encoder thread only on a machine with room for it: on a small one the
+            // encoder's threads starve the canvas, paint and WebRender threads (2D store clip on 2
+            // CPUs: p99 75 ms while every part alone was clean).
+            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let threads = if w * h >= 640 * 360 && cores >= 8 { 2 } else { 1 };
             // SAFETY: plain values in; null on failure.
             self.vp8 = unsafe { partii_vp8_new(w as c_uint, h as c_uint, kbps, threads, 10) };
             if self.vp8.is_null() {
@@ -300,7 +316,9 @@ impl Encoder {
             return Err(self.error());
         }
         self.drain();
-        self.encode_time += started.elapsed();
+        let took = started.elapsed();
+        self.encode_time += took;
+        self.encode_max = self.encode_max.max(took);
         Ok(())
     }
 
@@ -399,5 +417,20 @@ mod tests {
         assert!(stopped);
         assert_eq!(&bytes[..4], &[0x1A, 0x45, 0xDF, 0xA3]);
         assert!(bytes.len() > 200);
+    }
+}
+
+/// Partii: the recorder runs below the page's threads: a clip may lose frames (the encoder takes the
+/// newest frame each time), the game must not. Linux: nice +10 for this thread (libvpx's worker
+/// threads, made from it, inherit it); macOS: the utility QoS class. Elsewhere: unchanged.
+fn background_priority() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        let _ = libc::setpriority(libc::PRIO_PROCESS, tid, 10);
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let _ = libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
     }
 }

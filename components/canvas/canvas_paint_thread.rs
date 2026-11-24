@@ -9,7 +9,7 @@ use crossbeam_channel::{Sender, select, unbounded};
 use euclid::default::{Rect, Size2D, Transform2D};
 use log::warn;
 use paint_api::CrossProcessPaintApi;
-use pixels::Snapshot;
+use pixels::{Snapshot, SnapshotPixelFormat};
 use profile_traits::mem::{
     ProcessReports, ProfilerChan, Report, ReportsChan, perform_memory_report,
 };
@@ -62,7 +62,11 @@ impl CanvasPaintThread {
                         recv(msg_receiver) -> msg => {
                             match msg {
                                 Ok(Ok((canvas_id, command))) => {
-                                    canvas_paint_thread.process_command(command, canvas_id);
+                                    // Partii (clips): every page's 2D canvases share this thread, and a shown
+                                    // canvas's frame waits for its UpdateImage here: a long command for another
+                                    // canvas (a contact sheet, a toBlob readback) delays it.
+                                    // PARTII_CLIP_STATS=1 logs commands over 4 ms.
+                                    canvas_paint_thread.process_command_timed(command, canvas_id);
                                 },
                                 Ok(Err(e)) => {
                                     warn!("CanvasPaintThread message deserialization error: {e:?}");
@@ -108,6 +112,9 @@ impl CanvasPaintThread {
 
         let canvas = Canvas::new(size, self.paint_api.clone())?;
         self.canvases.insert(canvas_id, canvas);
+        if slow_log() {
+            eprintln!("PARTII_CANVAS_NEW canvas={canvas_id:?} size={}x{}", size.width, size.height);
+        }
 
         Some(canvas_id)
     }
@@ -129,7 +136,14 @@ impl CanvasPaintThread {
     )]
     fn process_command(&mut self, message: CanvasCommand, canvas_id: CanvasId) {
         match message {
-            CanvasCommand::Recreate(size) => self.canvas(canvas_id).recreate(size),
+            CanvasCommand::Recreate(size) => {
+                if slow_log() {
+                    if let Some(size) = size {
+                        eprintln!("PARTII_CANVAS_NEW canvas={canvas_id:?} size={}x{}", size.width, size.height);
+                    }
+                }
+                self.canvas(canvas_id).recreate(size)
+            },
             CanvasCommand::Destroy => {
                 self.canvases.remove(&canvas_id);
             },
@@ -262,6 +276,32 @@ impl CanvasPaintThread {
                 composition_options,
                 transform,
             ),
+            CanvasCommand::DrawImageFromWebGL(
+                WebGLReadback(receiver, size),
+                dest_rect,
+                source_rect,
+                smoothing_enabled,
+                shadow_options,
+                composition_options,
+                transform,
+            ) => match receiver.recv() {
+                Ok((data, alpha_mode)) => {
+                    let mut data = data.to_vec();
+                    pixels::flip_y_rgba8_image_inplace(size, &mut data);
+                    let snapshot =
+                        Snapshot::from_vec(size, SnapshotPixelFormat::RGBA, alpha_mode, data);
+                    self.canvas(canvas_id).draw_image(
+                        snapshot,
+                        dest_rect,
+                        source_rect,
+                        smoothing_enabled,
+                        shadow_options,
+                        composition_options,
+                        transform,
+                    );
+                },
+                Err(error) => warn!("DrawImageFromWebGL: no readback ({error:?})"),
+            },
             CanvasCommand::DrawEmptyImage(
                 image_size,
                 dest_rect,
@@ -322,9 +362,23 @@ impl CanvasPaintThread {
             CanvasCommand::PopClips(clips) => self.canvas(canvas_id).pop_clips(clips),
             CanvasCommand::ProcessBatchMessages(messages) => {
                 for message in messages {
-                    self.process_command(message, canvas_id);
+                    self.process_command_timed(message, canvas_id);
                 }
             },
+        }
+    }
+
+    /// Partii (clips): process_command, logging a command over 4 ms with PARTII_CLIP_STATS=1.
+    fn process_command_timed(&mut self, message: CanvasCommand, canvas_id: CanvasId) {
+        if !slow_log() || matches!(message, CanvasCommand::ProcessBatchMessages(..)) {
+            return self.process_command(message, canvas_id);
+        }
+        let name = message.to_string();
+        let started = std::time::Instant::now();
+        self.process_command(message, canvas_id);
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        if ms > 4.0 {
+            eprintln!("PARTII_CANVAS_SLOW cmd={name} canvas={canvas_id:?} ms={ms:.1}");
         }
     }
 
@@ -639,4 +693,11 @@ impl Canvas {
             Canvas::VelloCPU(canvas_data) => canvas_data.recreate(size),
         }
     }
+}
+
+/// Partii (clips): PARTII_CLIP_STATS=1 logs canvas commands over 4 ms (PARTII_CANVAS_SLOW).
+fn slow_log() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("PARTII_CLIP_STATS").is_some());
+    *ON
 }
