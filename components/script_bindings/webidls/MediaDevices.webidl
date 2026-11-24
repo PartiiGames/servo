@@ -5,19 +5,19 @@
 // https://w3c.github.io/mediacapture-main/#dom-mediadevices
 
 [Exposed=Window,
-SecureContext, Pref="dom_webrtc_enabled"]
+SecureContext, Pref="dom_mediadevices_enabled"]
 interface MediaDevices : EventTarget {
-    //                attribute EventHandler ondevicechange;
+                      attribute EventHandler ondevicechange;
     Promise<sequence<MediaDeviceInfo>> enumerateDevices();
 };
 
 partial interface Navigator {
     // [SameObject, SecureContext]
-    [Pref="dom_webrtc_enabled"] readonly        attribute MediaDevices mediaDevices;
+    [Pref="dom_mediadevices_enabled"] readonly        attribute MediaDevices mediaDevices;
 };
 
 partial interface MediaDevices {
-    // MediaTrackSupportedConstraints getSupportedConstraints();
+    MediaTrackSupportedConstraints getSupportedConstraints();
     Promise<MediaStream> getUserMedia(optional MediaStreamConstraints constraints = {});
 };
 
@@ -47,15 +47,33 @@ dictionary ConstrainULongRange : ULongRange {
              [Clamp] unsigned long ideal;
 };
 
-// dictionary ConstrainBooleanParameters {
-//              boolean exact;
-//              boolean ideal;
-// };
+dictionary ConstrainBooleanParameters {
+             boolean exact;
+             boolean ideal;
+};
 
-// dictionary ConstrainDOMStringParameters {
-//              (DOMString or sequence<DOMString>) exact;
-//              (DOMString or sequence<DOMString>) ideal;
-// };
+dictionary ConstrainDOMStringParameters {
+             (DOMString or sequence<DOMString>) exact;
+             (DOMString or sequence<DOMString>) ideal;
+};
+
+dictionary MediaTrackSupportedConstraints {
+             boolean width = true;
+             boolean height = true;
+             boolean aspectRatio = true;
+             boolean frameRate = true;
+             boolean facingMode = true;
+             boolean resizeMode = true;
+             boolean sampleRate = true;
+             boolean sampleSize = true;
+             boolean echoCancellation = true;
+             boolean autoGainControl = true;
+             boolean noiseSuppression = true;
+             boolean latency = true;
+             boolean channelCount = true;
+             boolean deviceId = true;
+             boolean groupId = true;
+};
 
 dictionary MediaTrackConstraints : MediaTrackConstraintSet {
              sequence<MediaTrackConstraintSet> advanced;
@@ -63,24 +81,23 @@ dictionary MediaTrackConstraints : MediaTrackConstraintSet {
 
 typedef ([Clamp] unsigned long or ConstrainULongRange) ConstrainULong;
 typedef (double or ConstrainDoubleRange) ConstrainDouble;
-// typedef (boolean or ConstrainBooleanParameters) ConstrainBoolean;
-// typedef (DOMString or sequence<DOMString> or ConstrainDOMStringParameters) ConstrainDOMString;
+typedef (boolean or ConstrainBooleanParameters) ConstrainBoolean;
+typedef (DOMString or sequence<DOMString> or ConstrainDOMStringParameters) ConstrainDOMString;
 
 dictionary MediaTrackConstraintSet {
              ConstrainULong width;
              ConstrainULong height;
              ConstrainDouble aspectRatio;
              ConstrainDouble frameRate;
-             // ConstrainDOMString facingMode;
-             // ConstrainDOMString resizeMode;
-             // ConstrainDouble volume;
+             ConstrainDOMString facingMode;
+             ConstrainDOMString resizeMode;
              ConstrainULong sampleRate;
-             // ConstrainULong sampleSize;
-             // ConstrainBoolean echoCancellation;
-             // ConstrainBoolean autoGainControl;
-             // ConstrainBoolean noiseSuppression;
-             // ConstrainDouble latency;
-             // ConstrainULong channelCount;
-             // ConstrainDOMString deviceId;
-             // ConstrainDOMString groupId;
+             ConstrainULong sampleSize;
+             ConstrainBoolean echoCancellation;
+             ConstrainBoolean autoGainControl;
+             ConstrainBoolean noiseSuppression;
+             ConstrainDouble latency;
+             ConstrainULong channelCount;
+             ConstrainDOMString deviceId;
+             ConstrainDOMString groupId;
 };

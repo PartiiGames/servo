@@ -35,7 +35,8 @@ partii-libvpx-sys = { path = "libvpx-sys", optional = true }
 # AV1 decoding: rav1d, the Rust port of dav1d (BSD-2-Clause), without its assembly (that needs nasm,
 # which the build nodes don't have).
 rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
-libc = { workspace = true, optional = true }
+# Partii: also the V4L2 camera ioctls (capture/v4l2.rs).
+libc = { workspace = true }
 # RTCPeerConnection (stream voice, webrtc.rs): str0m, sans-IO WebRTC (MIT OR Apache-2.0), with its
 # aws-lc-rs crypto (DTLS through dimpl), and libopus (the same bundled build as opus above).
 str0m = { version = "0.25.0", default-features = false, features = ["aws-lc-rs"], optional = true }
@@ -44,6 +45,17 @@ opusic-sys = { version = "0.7.7", optional = true }
 # cpal's own ALSA binding: to keep alsa-lib's probe errors off stderr when there's no sound card.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
 alsa = { version = "0.11", optional = true }
+
+# Partii: cameras on macOS (capture/avf.rs), only the AVFoundation parts used.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-media", "objc2-core-video", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMSampleBuffer", "objc2-core-video"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSValue"] }
 
 [features]
 default = ["device"]
@@ -57,7 +69,7 @@ video = ["dep:matroska-demuxer"]
 # VP8 and VP9 through libvpx, built from libvpx-sys/libvpx (sh, perl and make to build).
 vpx = ["video", "dep:partii-libvpx-sys"]
 # AV1 through rav1d (pure Rust).
-av1 = ["video", "dep:rav1d", "dep:libc"]
+av1 = ["video", "dep:rav1d"]
 # RTCPeerConnection: str0m + Opus (webrtc.rs).
 webrtc = ["dep:str0m", "dep:opusic-sys"]
 
