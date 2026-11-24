@@ -262,6 +262,25 @@ impl Painter {
                 .expect("Unable to initialize WebRender worker pool."),
         ));
 
+        // Partii (app stream): WebRender's linked programs kept on disk per GL driver
+        // (program_cache.rs), when the driver can hand program binaries out.
+        let cached_programs = {
+            let mut formats = [0];
+            unsafe {
+                webrender_gl.get_integer_v(gleam::gl::NUM_PROGRAM_BINARY_FORMATS, &mut formats);
+            }
+            while webrender_gl.get_error() != gleam::gl::NO_ERROR {}
+            if formats[0] > 0 {
+                crate::program_cache::new(
+                    &webrender_gl.get_string(gleam::gl::VENDOR),
+                    &gl_renderer,
+                    &webrender_gl.get_string(gleam::gl::VERSION),
+                )
+            } else {
+                None
+            }
+        };
+
         let painter_id = PainterId::next();
         let (mut webrender_renderer, webrender_api_sender) = webrender::create_webrender_instance(
             webrender_gl.clone(),
@@ -300,6 +319,7 @@ impl Painter {
                     Some(webrender_api::units::DeviceIntSize::new(w.parse().ok()?, h.parse().ok()?))
                 }),
                 max_shared_surface_size,
+                cached_programs,
                 // Partii (gaps-7): on a software GL, WebRender compiles shader variants on a
                 // background context of its own (webrender renderer/partii_precompile.rs).
                 partii_precompile_context: if software_gl {
