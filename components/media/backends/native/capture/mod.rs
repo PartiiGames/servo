@@ -332,7 +332,16 @@ fn device_microphones() -> Vec<(String, String)> {
     #[cfg(target_os = "linux")]
     let _alsa_errors = alsa::Output::local_error_handler().ok();
     let host = cpal::default_host();
-    host.input_devices()
+    // getUserMedia without a deviceId takes the first microphone (mediadevices.rs), so the system's default input
+    // goes first, as Chrome and WebKit list it: in input_devices() order a Continuity iPhone microphone could come
+    // first and be opened (waking the phone) instead of the Mac's own.
+    let default_id = host.default_input_device().and_then(|d| {
+        let name = d.description().ok()?.name().to_string();
+        let key = d.id().map(|i| i.to_string()).unwrap_or_else(|_| name);
+        Some(device_id("audioinput", &key))
+    });
+    let mut mics: Vec<(String, String)> = host
+        .input_devices()
         .map(|devices| {
             devices
                 .filter_map(|d| {
@@ -345,7 +354,12 @@ fn device_microphones() -> Vec<(String, String)> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(default_id) = default_id {
+        // Stable: the others keep the host's order.
+        mics.sort_by_key(|(id, _)| *id != default_id);
+    }
+    mics
 }
 
 #[cfg(not(feature = "device"))]
