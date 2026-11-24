@@ -4272,7 +4272,6 @@ impl WebGLImpl {
         }
     }
 
-
     /// Partii (perf): generateMipmap on a 2D texture whose level 0 is still all zeros (Phaser's boot
     /// makes power-of-two render targets with texImage2D(null) + generateMipmap): the mipmaps of
     /// zeros are zeros, so allocate the levels zeroed (cleared, as texImage2D(null) does) instead of
