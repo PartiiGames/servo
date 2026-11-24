@@ -782,6 +782,15 @@ impl Runtime {
                     u32::MAX
                 },
             );
+            // Partii: inline larger callees (u32::MAX = SpiderMonkey's default of 140).
+            JS_SetGlobalJitCompilerOption(
+                cx,
+                JSJitCompilerOption::JSJITCOMPILER_INLINING_BYTECODE_MAX_LENGTH,
+                match pref!(js_inlining_bytecode_max_length) {
+                    n if n > 0 && n <= 100_000 => n as u32,
+                    _ => u32::MAX,
+                },
+            );
             // TODO: handle js.discard_system_source.enabled
             // TODO: handle js.asyncstack.enabled (needs new Spidermonkey)
             // TODO: handle js.throw_on_debugee_would_run (needs new Spidermonkey)
