@@ -34,6 +34,9 @@ fn main() {
         .arg(&css_properties_json)
         .arg(&out_dir)
         .env("PYTHONDONTWRITEBYTECODE", "1")
+        // Partii: a fixed hash seed, so set iteration in the generator gives the same code on every run. A random
+        // seed reordered ~195 generated files on any webidl edit, and script recompiled its codegen (~90 s).
+        .env("PYTHONHASHSEED", "0")
         .status()
         .unwrap();
     if !status.success() {

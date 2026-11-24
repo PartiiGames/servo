@@ -1763,7 +1763,7 @@ def MemberCondition(pref: str | None, func: str | None, exposed: set | None, sec
         conditions.append(f'Condition::Func(D::{func})')
     if exposed:
         conditions.extend([
-            f"Condition::Exposed(Globals::{camel_to_upper_snake(i)})" for i in exposed
+            f"Condition::Exposed(Globals::{camel_to_upper_snake(i)})" for i in sorted(exposed)
         ])
     if len(conditions) == 0:
         conditions.append("Condition::Satisfied")
