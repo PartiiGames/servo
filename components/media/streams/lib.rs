@@ -4,6 +4,7 @@
 
 pub mod capture;
 pub mod device_monitor;
+pub mod live;
 pub mod live_video;
 pub mod registry;
 
