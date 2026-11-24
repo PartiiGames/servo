@@ -237,6 +237,12 @@ impl Default for TimerRefreshDriver {
     }
 }
 
+/// Partii (perf): PARTII_REFRESH_GRID=0 restarts the frame grid at a late request, as before.
+fn keep_grid() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_REFRESH_GRID").as_deref() != Ok("0"))
+}
+
 /// Partii: one frame at `shell_refresh_rate_hz` (default 60).
 pub(crate) fn frame_period() -> Duration {
     let hz = servo_config::pref!(shell_refresh_rate_hz).clamp(1, 1000);
@@ -266,6 +272,7 @@ impl RefreshDriver for TimerRefreshDriver {
             // page whose request arrives just after its slot (a worker canvas's page: the
             // request follows the painter's frame) run at ~59.6 Hz instead of 60. Whole missed
             // periods are skipped, so a long frame never makes a burst of catch-up frames.
+            Some(start) if !keep_grid() => (start + period).max(now),
             Some(start) => {
                 let mut next = start + period;
                 while next + period <= now {

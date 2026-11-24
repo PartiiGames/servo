@@ -3356,11 +3356,13 @@ impl Document {
         // the canvases below.
         for (image_key, canvas_epoch) in placeholder_frames {
             phases.insert(ReflowPhasesRun::UpdatedImageData);
-            // Partii (perf, experiment): PARTII_PLACEHOLDER_NOBLOCK=1 lets the page keep running
-            // its rendering updates (rAF) while the painter waits for a worker's image; the
-            // painter still holds the frame until that image arrives. =2: after a placeholder's
-            // first frame, neither waits (the painter shows the latest image it has, as a
-            // compositor does with a worker's commits).
+            // Partii (perf): after a placeholder's first frame, neither the page nor the
+            // painter waits for the worker's image: the painter shows the latest image it has,
+            // as Chromium's compositor does with a worker's commits. Waiting stopped the page's
+            // rendering updates (rAF) until the worker's image had gone through the canvas
+            // thread and the painter, every frame: Digii Dwarf at 4 threads waited 10.9 ms a
+            // frame on average (41 ms max), frame p95 20.7 ms vs 16.8 without (job 428c9d96).
+            // PARTII_PLACEHOLDER_NOBLOCK=0: wait as before; =1: only the painter waits.
             let noblock = partii_placeholder_noblock();
             if noblock == 0 {
                 self.waiting_on_canvas_image_updates.set(true);
@@ -7815,7 +7817,7 @@ fn partii_placeholder_noblock() -> u8 {
         std::env::var("PARTII_PLACEHOLDER_NOBLOCK")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
+            .unwrap_or(2)
     })
 }
 
