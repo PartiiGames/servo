@@ -271,8 +271,8 @@ pub(super) fn open(
 
     let mut fmt: Format = zeroed();
     fmt.type_ = BUF_TYPE_VIDEO_CAPTURE;
-    // SAFETY: writing the `pix` member of a zeroed union.
-    unsafe {
+    // Writing a union field is safe; reading it back is not.
+    {
         fmt.fmt.pix.width = want.exact_width.or(want.width).unwrap_or(640);
         fmt.fmt.pix.height = want.exact_height.or(want.height).unwrap_or(480);
         fmt.fmt.pix.pixelformat = PIX_YUYV;
@@ -293,8 +293,7 @@ pub(super) fn open(
     let mut frame_rate = want.frame_rate.unwrap_or(30.);
     let mut parm: StreamParm = zeroed();
     parm.type_ = BUF_TYPE_VIDEO_CAPTURE;
-    // SAFETY: the `capture` member of a zeroed union.
-    unsafe {
+    {
         parm.parm.capture.timeperframe = Fract {
             numerator: 1000,
             denominator: (frame_rate * 1000.) as u32,
