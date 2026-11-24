@@ -39,6 +39,8 @@ struct Shared {
     /// The reader thread quits when this goes false.
     running: AtomicBool,
     metadata_sent: AtomicBool,
+    /// The srcObject has an audio track (the video metadata lists it).
+    has_audio: AtomicBool,
 }
 
 impl Shared {
@@ -155,6 +157,7 @@ impl StreamPlayer {
                 playing: AtomicBool::new(false),
                 running: AtomicBool::new(false),
                 metadata_sent: AtomicBool::new(false),
+                has_audio: AtomicBool::new(false),
             }),
             video: Mutex::new(None),
             audio: Mutex::new(vec![]),
@@ -163,11 +166,13 @@ impl StreamPlayer {
         }
     }
 
-    fn start_audio(&self, id: MediaStreamId) {
+    /// `last`: set_stream's last track of the srcObject (audio-only metadata waits for it, so a
+    /// camera + mic stream, whose audio track comes first, still gets the video's metadata).
+    fn start_audio(&self, id: MediaStreamId, last: bool) {
         let Some(reader) = live::subscribe_audio(&id) else {
             return;
         };
-        let first = self.audio.lock().unwrap().is_empty() && self.video.lock().unwrap().is_none();
+        self.shared.has_audio.store(true, Ordering::SeqCst);
         let out = Arc::new(AudioOut {
             shared: self.shared.clone(),
             muted: self.muted.clone(),
@@ -183,7 +188,10 @@ impl StreamPlayer {
         output().add_source(Arc::downgrade(&source) as Weak<dyn OutputSource>);
         self.audio.lock().unwrap().push(out);
         // An audio-only srcObject has metadata at once (no frame to wait for).
-        if first && !self.shared.metadata_sent.swap(true, Ordering::SeqCst) {
+        if last &&
+            self.video.lock().unwrap().is_none() &&
+            !self.shared.metadata_sent.swap(true, Ordering::SeqCst)
+        {
             self.shared.emit(PlayerEvent::MetadataUpdated(Metadata {
                 duration: None,
                 width: 0,
@@ -240,7 +248,11 @@ impl StreamPlayer {
                             format: String::new(),
                             is_seekable: false,
                             video_tracks: vec!["video".to_owned()],
-                            audio_tracks: vec![],
+                            audio_tracks: if shared.has_audio.load(Ordering::SeqCst) {
+                                vec!["audio".to_owned()]
+                            } else {
+                                vec![]
+                            },
                             is_live: true,
                             title: None,
                         }));
@@ -431,7 +443,7 @@ impl Player for StreamPlayer {
     fn buffered(&self) -> Vec<Range<f64>> {
         vec![]
     }
-    fn set_stream(&self, stream: &MediaStreamId, _only_stream: bool) -> Result<(), PlayerError> {
+    fn set_stream(&self, stream: &MediaStreamId, only_stream: bool) -> Result<(), PlayerError> {
         if live_video::is_video_track(stream) {
             let mut video = self.video.lock().unwrap();
             if video.is_some() {
@@ -442,7 +454,7 @@ impl Player for StreamPlayer {
             drop(video);
             self.start_video(*stream);
         } else {
-            self.start_audio(*stream);
+            self.start_audio(*stream, only_stream);
         }
         Ok(())
     }
