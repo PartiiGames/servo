@@ -13,6 +13,8 @@ Patches on top of 0.22.0:
   upstream); Servo's layout supplies container sizes (`query_container_size`).
 - `@container` rules parse for Servo when `layout.container-queries.enabled` is on (rule_parser.rs; Gecko
   only upstream, so every @container block was dropped and the size queries above never had a rule to match).
+- The `container` shorthand (`container: name / inline-size`) parses for Servo under the same pref (shorthands.toml,
+  shorthands.rs; Gecko only upstream): without it a named container was never a container at all.
 - `:has()` invalidation (`invalidation/element/relative_selector.rs`, `AncestorEarlierSibling`):
   an ancestor whose earlier siblings aren't on the sibling search path ends the walk over those
   siblings only (`break`), not the whole upward walk (`return`), so `:has(~ div .test)` still
