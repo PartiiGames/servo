@@ -4,6 +4,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dom_struct::dom_struct;
 use euclid::default::Size2D;
@@ -12,19 +14,21 @@ use js::context::NoGC;
 use js::error::throw_type_error;
 use js::rust::{HandleObject, HandleValue};
 use layout_api::HTMLCanvasData;
-use pixels::{EncodedImageType, Snapshot};
+use pixels::{EncodedImageType, SharedSnapshot, Snapshot, SnapshotPixelFormat};
 use rustc_hash::FxHashMap;
 use script_bindings::cell::{DomRefCell, Ref};
 #[cfg(feature = "webgl")]
 use script_bindings::reflector::DomObject;
 use script_bindings::weakref::WeakRef;
 use servo_base::Epoch;
+use servo_base::generic_channel::GenericCallback;
 #[cfg(feature = "webgl")]
 use servo_canvas_traits::webgl::{GLContextAttributes, WebGLVersion};
 use servo_constellation_traits::BlobImpl;
 #[cfg(feature = "webgpu")]
 use servo_constellation_traits::ScriptToConstellationMessage;
 use servo_media::streams::MediaStreamType;
+use servo_media::streams::live_video::{self, VideoFormat, VideoFrame, VideoSource};
 use servo_media::streams::registry::MediaStreamId;
 use style::attr::AttrValue;
 use webrender_api::ImageKey;
@@ -103,7 +107,50 @@ pub(crate) struct HTMLCanvasElement {
     /// that has not yet been part of "update the rendering".
     #[no_trace]
     pending_placeholder_frame: Cell<Option<Epoch>>,
+    /// Partii: this canvas's `captureStream()` sources (live_video), fed after each frame's rAF callbacks
+    /// while something reads them (Document::capture_canvas_frames).
+    #[no_trace]
+    #[ignore_malloc_size_of = "live_video sources (their frames are shared)"]
+    captures: RefCell<Vec<CanvasCapture>>,
 }
+
+/// One `captureStream(frameRequestRate)` of a canvas.
+struct CanvasCapture {
+    track: MediaStreamId,
+    source: VideoSource,
+    /// None: a frame every rendering update; Some(ZERO): no frames (requestFrame is not implemented).
+    interval: Option<Duration>,
+    next: Option<Instant>,
+    /// Last time it had a reader (or was made).
+    used: Instant,
+}
+
+/// Pushes one readback of a canvas to captureStream sources (any thread).
+fn push_capture_frame(
+    sources: &[VideoSource],
+    size: Size2D<u32>,
+    format: SnapshotPixelFormat,
+    bytes: &[u8],
+    at: Instant,
+) {
+    if size.width == 0 || size.height == 0 || bytes.len() < (size.width * size.height * 4) as usize {
+        return;
+    }
+    let format = match format {
+        SnapshotPixelFormat::RGBA => VideoFormat::Rgba8,
+        SnapshotPixelFormat::BGRA => VideoFormat::Bgra8,
+    };
+    let pixels: Arc<[u8]> = Arc::from(&bytes[..(size.width * size.height * 4) as usize]);
+    let frame = VideoFrame::packed(size.width, size.height, format, size.width * 4, pixels, at);
+    for source in sources {
+        source.push(frame.clone());
+    }
+}
+
+/// A capture nobody has read for this long, or whose track the DOM collected, is dropped.
+const CAPTURE_IDLE_DROP: Duration = Duration::from_secs(30);
+/// Frame callbacks come at the display's rate: a frame due within this much counts as due now.
+const CAPTURE_SLACK: Duration = Duration::from_millis(4);
 
 impl HTMLCanvasElement {
     fn new_inherited(
@@ -119,7 +166,63 @@ impl HTMLCanvasElement {
             image_key: Default::default(),
             placeholder_image_key: Default::default(),
             pending_placeholder_frame: Default::default(),
+            captures: Default::default(),
         }
+    }
+
+    /// Partii: pushes a frame to each `captureStream()` source that's due and read, from one readback.
+    /// Returns whether this canvas still has captures (Document keeps it in its list while it does).
+    pub(crate) fn capture_frames(&self, now: Instant) -> bool {
+        let mut captures = self.captures.borrow_mut();
+        captures.retain(|c| {
+            if c.source.has_readers() {
+                return true;
+            }
+            live_video::is_video_track(&c.track) && now.duration_since(c.used) < CAPTURE_IDLE_DROP
+        });
+        let due = |c: &CanvasCapture| {
+            c.source.has_readers() &&
+                c.interval != Some(Duration::ZERO) &&
+                c.next.is_none_or(|t| now + CAPTURE_SLACK >= t)
+        };
+        let mut sources = Vec::new();
+        for c in captures.iter_mut() {
+            if c.source.has_readers() {
+                c.used = now;
+            }
+            if !due(&*c) {
+                continue;
+            }
+            sources.push(c.source.clone());
+            // The next frame one interval after this one's slot, or after now when it fell behind (late
+            // frame callbacks skip frames, never burst).
+            c.next = c.interval.map(|i| {
+                let slot = c.next.unwrap_or(now) + i;
+                if slot <= now { now + i } else { slot }
+            });
+        }
+        let keep = !captures.is_empty();
+        drop(captures);
+        if sources.is_empty() {
+            return keep;
+        }
+        // A 2D canvas is read back on its canvas thread, which pushes the frame itself; other contexts
+        // (WebGL, bitmaprenderer) are read here.
+        if let Some(RenderingContext::Context2d(context)) = self.context_mode.borrow().as_ref() {
+            let callback = GenericCallback::new(move |snapshot: Result<SharedSnapshot, _>| {
+                if let Ok(snapshot) = snapshot {
+                    push_capture_frame(&sources, snapshot.size(), snapshot.format(), snapshot.data(), now);
+                }
+            });
+            if let Ok(callback) = callback {
+                let _ = context.read_pixels_to_callback(callback);
+            }
+            return keep;
+        }
+        if let Some(snapshot) = self.get_image_data() {
+            push_capture_frame(&sources, snapshot.size(), snapshot.format(), snapshot.as_raw_bytes(), now);
+        }
+        keep
     }
 
     pub(crate) fn new(
@@ -680,12 +783,10 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
         // Step 3. If this canvas element's bitmap has pixels (i.e., neither its horizontal dimension
         // nor its vertical dimension is zero),
         // then set result to a copy of this canvas element's bitmap.
-        let result = if self.Width() == 0 || self.Height() == 0 {
-            None
-        } else {
-            self.get_image_data()
-        };
-
+        // Partii: the copy and the serialization happen off the script thread: a 2D canvas is read back
+        // on its canvas thread, the image is encoded on a short-lived thread, and only making the Blob and
+        // calling back run here (they were a sync readback and a JPEG/PNG encode on the script thread:
+        // tens of ms for a 640x360 frame, a stall in jam clips' mid-recording poster).
         let this = Trusted::new(self);
         let callback_id = self.callback_id.get().wrapping_add(1);
         self.callback_id.set(callback_id);
@@ -695,48 +796,71 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
             .insert(callback_id, callback.to_traced());
         let quality = Self::maybe_quality(quality);
         let image_type = EncodedImageType::from(&mime_type.str() as &str);
+        let task_source = self.global().task_manager().canvas_blob_task_source().to_sendable();
 
-        self.global()
-            .task_manager()
-            .canvas_blob_task_source()
-            .queue(task!(to_blob: move |cx| {
-                let this = this.root();
-                let Some(callback) = this.blob_callbacks.borrow_mut().remove(&callback_id) else {
-                    return error!("Expected blob callback, but found none!");
-                };
-                // Partii: the callback is off the traced map, and making the Blob below can run a
-                // GC slice: shade it for a GC already marking and root it for one that marks its
-                // roots later, or an incremental GC could free it first.
-                script_bindings::incremental_gc::barrier_traceable(&callback);
-                rooted!(&in(cx) let callback = callback);
-
-                let Some(mut snapshot) = result else {
-                    let _ = callback.Call__(cx, None, ExceptionHandling::Report);
-                    return;
-                };
-
+        let encode_and_answer = move |result: Option<Snapshot>| {
+            let work = move || {
                 // Step 4.1: If result is non-null, then set result to a serialization of
                 // result as a file with type and quality if given.
+                let encoded = result.and_then(|mut snapshot| {
+                    let mut encoded: Vec<u8> = vec![];
+                    snapshot
+                        .encode_for_mime_type(&image_type, quality, &mut encoded)
+                        .ok()
+                        .map(|_| (encoded, image_type.as_mime_type().to_owned()))
+                });
                 // Step 4.2: Queue an element task on the canvas blob serialization task
                 // source given the canvas element to run these steps:
-                let mut encoded: Vec<u8> = vec![];
-                let blob_impl;
-                let blob;
-                let result = match snapshot.encode_for_mime_type(&image_type, quality, &mut encoded) {
-                   Ok(..) => {
-                       // Step 4.2.1: If result is non-null, then set result to a new Blob
-                       // object, created in the relevant realm of this canvas element,
-                       // representing result. [FILEAPI]
-                       blob_impl = BlobImpl::new_from_bytes(encoded, image_type.as_mime_type().to_owned());
-                       blob = Blob::new(cx, &this.global(), blob_impl);
-                       Some(&*blob)
-                   }
-                   Err(..) => None,
-                };
+                task_source.queue(task!(to_blob: move |cx| {
+                    let this = this.root();
+                    let Some(callback) = this.blob_callbacks.borrow_mut().remove(&callback_id) else {
+                        return error!("Expected blob callback, but found none!");
+                    };
+                    // Partii: the callback is off the traced map, and making the Blob below can run a
+                    // GC slice: shade it for a GC already marking and root it for one that marks its
+                    // roots later, or an incremental GC could free it first.
+                    script_bindings::incremental_gc::barrier_traceable(&callback);
+                    rooted!(&in(cx) let callback = callback);
+                    // Step 4.2.1: If result is non-null, then set result to a new Blob
+                    // object, created in the relevant realm of this canvas element,
+                    // representing result. [FILEAPI]
+                    let blob = encoded.map(|(bytes, mime)| {
+                        Blob::new(cx, &this.global(), BlobImpl::new_from_bytes(bytes, mime))
+                    });
+                    // Step 4.2.2: Invoke callback with « result » and "report".
+                    let _ = callback.Call__(cx, blob.as_deref(), ExceptionHandling::Report);
+                }));
+            };
+            if std::thread::Builder::new().name("CanvasToBlob".into()).spawn(work).is_err() {
+                error!("toBlob: couldn't start the encoder thread");
+            }
+        };
 
-                // Step 4.2.2: Invoke callback with « result » and "report".
-                let _ = callback.Call__(cx, result, ExceptionHandling::Report);
-            }));
+        // Step 2. Let result be null.
+        // Step 3. If this canvas element's bitmap has pixels (i.e., neither its horizontal dimension
+        // nor its vertical dimension is zero),
+        // then set result to a copy of this canvas element's bitmap.
+        if self.Width() == 0 || self.Height() == 0 {
+            encode_and_answer(None);
+        } else if let Some(RenderingContext::Context2d(context)) = self.context_mode.borrow().as_ref() {
+            let mut answer = Some(encode_and_answer);
+            let callback = GenericCallback::new(move |snapshot: Result<SharedSnapshot, _>| {
+                if let Some(answer) = answer.take() {
+                    answer(snapshot.ok().map(|s| s.to_owned()));
+                }
+            });
+            match callback {
+                Ok(callback) => {
+                    // No bitmap yet: a cleared one, as get_image_data gives.
+                    if let Err(callback) = context.read_pixels_to_callback(callback) {
+                        let _ = callback.send(SharedSnapshot::cleared(self.get_size()));
+                    }
+                },
+                Err(_) => error!("toBlob: no readback callback"),
+            }
+        } else {
+            encode_and_answer(self.get_image_data());
+        }
 
         Ok(())
     }
@@ -785,12 +909,27 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
     fn CaptureStream(
         &self,
         cx: &mut js::context::JSContext,
-        _frame_request_rate: Option<Finite<f64>>,
+        frame_request_rate: Option<Finite<f64>>,
     ) -> DomRoot<MediaStream> {
+        // Partii: a live_video source fed from this canvas after each frame's drawing (rAF callbacks), at
+        // most frame_request_rate times a second, and only while something (a MediaRecorder) reads it.
         let global = self.global();
+        let (id, source) = live_video::create_video_source("canvas");
+        let rate = frame_request_rate.map(|r| (*r).max(0.0));
+        source.set_frame_rate(rate.unwrap_or(0.0));
+        let interval = rate.map(|r| {
+            if r > 0.0 { Duration::from_secs_f64(1.0 / r.min(1000.0)) } else { Duration::ZERO }
+        });
+        self.captures.borrow_mut().push(CanvasCapture {
+            track: id,
+            source,
+            interval,
+            next: None,
+            used: Instant::now(),
+        });
+        self.owner_document().add_capturing_canvas(self);
         let stream = MediaStream::new(cx, &global);
-        let track =
-            MediaStreamTrack::new(cx, &global, MediaStreamId::new(), MediaStreamType::Video);
+        let track = MediaStreamTrack::new(cx, &global, id, MediaStreamType::Video);
         stream.AddTrack(&track);
         stream
     }

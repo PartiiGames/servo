@@ -20,6 +20,11 @@ pub struct MediaTrackConstraintSet {
     pub aspect: Option<Constrain<f64>>,
     pub frame_rate: Option<Constrain<f64>>,
     pub sample_rate: Option<Constrain<u32>>,
+    /// Partii: the device to open (the DOM resolves `deviceId` and `facingMode` against
+    /// enumerateDevices first and passes the chosen device's id).
+    pub device_id: Option<String>,
+    /// Partii: "user" / "environment" when the page asked for one.
+    pub facing_mode: Option<String>,
 }
 
 pub enum Constrain<T> {

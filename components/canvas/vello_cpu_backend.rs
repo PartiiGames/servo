@@ -56,6 +56,53 @@ pub(crate) struct VelloCPUDrawTarget {
     /// Partii: with each clip's fill rule, so a clip pushed back after a render keeps it.
     clips: Vec<(Path, kurbo::Affine, peniko::Fill)>,
     state: State,
+    /// Partii (clips): device pixels of image draws recorded since the last render. A canvas that
+    /// is drawn every frame but rarely read (jam clip's copy of the game) otherwise piles up
+    /// frames of draws that one read rasterizes at once, on the thread every 2D canvas shares.
+    pending_image_px: f64,
+    /// Partii (clips): with PARTII_CLIP_STATS=1, how often this canvas hit each path of the cover/cap
+    /// change: [cover scans (opacity scan ran), cover hits (queue dropped), cap renders].
+    cover_stats: [u32; 3],
+}
+
+impl Drop for VelloCPUDrawTarget {
+    fn drop(&mut self) {
+        if clip_stats() && self.cover_stats != [0; 3] {
+            let [scans, hits, caps] = self.cover_stats;
+            eprintln!(
+                "PARTII_CANVAS_COVER size={}x{} scans={scans} hits={hits} caps={caps}",
+                self.size().width,
+                self.size().height
+            );
+        }
+    }
+}
+
+/// Partii (clips): counts a cover/cap event (0 scan, 1 hit, 2 cap) for this canvas and in total;
+/// the totals print at the first event and every 200 (PARTII_CANVAS_COVER_TOTAL), so a run that
+/// never ends cleanly still shows whether any fired.
+fn note_cover(stats: &mut [u32; 3], kind: usize) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static TOTAL: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+    if !clip_stats() {
+        return;
+    }
+    stats[kind] += 1;
+    TOTAL[kind].fetch_add(1, Ordering::Relaxed);
+    let n: u32 = TOTAL.iter().map(|t| t.load(Ordering::Relaxed)).sum();
+    if n == 1 || n % 200 == 0 {
+        eprintln!(
+            "PARTII_CANVAS_COVER_TOTAL scans={} hits={} caps={}",
+            TOTAL[0].load(Ordering::Relaxed),
+            TOTAL[1].load(Ordering::Relaxed),
+            TOTAL[2].load(Ordering::Relaxed)
+        );
+    }
+}
+
+fn clip_stats() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PARTII_CLIP_STATS").is_some())
 }
 
 impl VelloCPUDrawTarget {
@@ -122,6 +169,7 @@ impl VelloCPUDrawTarget {
                 self_.ctx.render(&mut self_.pixmap, &mut self_.resources);
                 self_.ctx.reset();
                 self_.state = State::Rendered;
+                self_.pending_image_px = 0.0;
             });
         }
 
@@ -196,6 +244,39 @@ impl VelloCPUDrawTarget {
             self.is_viewport_cleared(rect, *transform)
     }
 
+    /// Partii (clips): whether drawing `surface` into `dest` replaces every pixel of the canvas, so
+    /// what is under it (the old pixmap and everything still queued) can be dropped: 'copy', or
+    /// 'source-over' of a fully opaque image (every pixel's alpha 255: a canvas made with
+    /// alpha:true usually isn't), at global alpha 1, axis-aligned, covering the whole canvas
+    /// (its edges outside it, so no antialiased border) and no clip that leaves part of it out.
+    fn image_covers_canvas(
+        &mut self,
+        surface: &vello_cpu::Pixmap,
+        dest: &Rect<f64>,
+        composition_options: &CompositionOptions,
+        transform: &Transform2D<f64>,
+    ) -> bool {
+        if !canvas_cover() {
+            return false;
+        }
+        let op = composition_options.composition_operation;
+        let copy = op == CompositionOrBlending::Composition(CompositionStyle::Copy);
+        let over = op == CompositionOrBlending::Composition(CompositionStyle::SourceOver);
+        if !((copy || over) &&
+            composition_options.alpha == 1.0 &&
+            transform.m12 == 0.0 &&
+            transform.m21 == 0.0 &&
+            self.is_viewport_cleared(&dest.cast(), *transform))
+        {
+            return false;
+        }
+        if copy {
+            return true;
+        }
+        note_cover(&mut self.cover_stats, 0);
+        all_opaque(surface.data_as_u8_slice())
+    }
+
     fn is_viewport_cleared(&mut self, rect: &Rect<f32>, transform: Transform2D<f64>) -> bool {
         let transformed_rect = transform.outer_transformed_rect(&rect.cast());
         if transformed_rect.is_empty() {
@@ -213,6 +294,9 @@ impl VelloCPUDrawTarget {
             unclipped // viewport is not clipped
     }
 }
+
+/// Partii (clips): image draws (in canvas areas) a canvas may queue before it renders them.
+const PENDING_IMAGE_CANVASES: f64 = 8.0;
 
 fn worker_thread_count(size: &Size2D<u16>) -> u16 {
     // TODO: Somewhat arbitrary chosen, should be based on a benchmark,
@@ -243,6 +327,8 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
             pixmap: vello_cpu::Pixmap::new(size.width, size.height),
             clips: Vec::new(),
             state: State::Rendered,
+            pending_image_px: 0.0,
+            cover_stats: [0; 3],
         }
     }
 
@@ -331,7 +417,25 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
-        self.ensure_drawing();
+        if self.image_covers_canvas(&surface, &dest, &composition_options, &transform) {
+            // Partii (clips): nothing under this draw shows: drop the old content and the queue.
+            self.ignore_clips(|self_| self_.ctx.reset());
+            self.state = State::Drawing;
+            self.pending_image_px = 0.0;
+            note_cover(&mut self.cover_stats, 1);
+        } else {
+            self.ensure_drawing();
+            // Partii (clips): bound what one read has to rasterize: past ~8 canvases of image
+            // draws, render now (the same work, spread out instead of in one stall).
+            let viewport = self.size().width as f64 * self.size().height as f64;
+            if canvas_cover() && self.pending_image_px > PENDING_IMAGE_CANVASES * viewport {
+                note_cover(&mut self.cover_stats, 2);
+                self.pixmap();
+                self.ensure_drawing();
+            }
+        }
+        let area = transform.outer_transformed_rect(&dest).size.area();
+        self.pending_image_px += area.min(self.size().width as f64 * self.size().height as f64);
         let scale_up = dest.size.width > source.size.width || dest.size.height > source.size.height;
         if composition_options.alpha != 1.0 {
             Arc::get_mut(&mut surface)
@@ -514,6 +618,7 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
             // whole previous frame as an image under this fill (ensure_drawing).
             self.ignore_clips(|self_| self_.ctx.reset());
             self.state = State::Drawing;
+            self.pending_image_px = 0.0;
         } else {
             self.ensure_drawing();
         }
@@ -698,6 +803,13 @@ fn all_opaque(pixels: &[u8]) -> bool {
     words
         .chunks(1024)
         .all(|chunk| chunk.iter().fold(alpha, |acc, w| acc & w) & alpha == alpha)
+}
+
+/// Partii (clips): `PARTII_CANVAS_COVER=0` turns off both the covering-drawImage queue drop and the
+/// queued-image cap (an A/B of 9347e06 in one binary).
+fn canvas_cover() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("PARTII_CANVAS_COVER").as_deref(), Ok("0")))
 }
 
 fn canvas_opaque_scan() -> bool {

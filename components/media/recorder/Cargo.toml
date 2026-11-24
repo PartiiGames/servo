@@ -1,0 +1,27 @@
+[package]
+name = "servo-media-recorder"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Partii: MediaRecorder's encoder: video tracks of the live registry to VP8 WebM through the vendored libvpx."
+build = "build.rs"
+
+[lib]
+name = "servo_media_recorder"
+path = "lib.rs"
+
+[dependencies]
+libc = { workspace = true }
+log = { workspace = true }
+partii-libvpx-sys = { path = "../backends/native/libvpx-sys" }
+servo-media-streams = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
+
+[lints]
+workspace = true

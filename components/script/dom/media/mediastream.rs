@@ -23,6 +23,10 @@ use crate::dom::window::Window;
 pub(crate) struct MediaStream {
     eventtarget: EventTarget,
     tracks: DomRefCell<Vec<Dom<MediaStreamTrack>>>,
+    /// Partii: MediaStream.id.
+    #[no_trace]
+    #[ignore_malloc_size_of = "a uuid"]
+    id: MediaStreamId,
 }
 
 impl MediaStream {
@@ -30,6 +34,7 @@ impl MediaStream {
         MediaStream {
             eventtarget: EventTarget::new_inherited(),
             tracks: DomRefCell::new(vec![]),
+            id: MediaStreamId::new(),
         }
     }
 
@@ -156,6 +161,16 @@ impl MediaStreamMethods<crate::DomTypeHolder> for MediaStream {
     /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-removetrack>
     fn RemoveTrack(&self, track: &MediaStreamTrack) {
         self.tracks.borrow_mut().retain(|x| *x != track);
+    }
+
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-id>
+    fn Id(&self) -> DOMString {
+        self.id.id().to_string().into()
+    }
+
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-active>
+    fn Active(&self) -> bool {
+        self.tracks.borrow().iter().any(|t| t.is_live())
     }
 
     /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-clone>

@@ -9,9 +9,12 @@ use log::error;
 use servo_media_streams::MediaStreamType;
 
 use crate::datachannel::{DataChannelEvent, DataChannelId, DataChannelInit, DataChannelMessage};
+use servo_media_streams::live::AudioSource;
+
 use crate::{
-    BundlePolicy, DescriptionType, IceCandidate, MediaStreamId, SdpType, SessionDescription,
-    WebRtcBackend, WebRtcControllerBackend, WebRtcSignaller,
+    BundlePolicy, DescriptionType, IceCandidate, MediaStreamId, ResultCallback, RtpDirection,
+    RtpStats, SdpType, SessionDescription, TransceiverId, WebRtcBackend, WebRtcControllerBackend,
+    WebRtcSignaller,
 };
 
 #[derive(Clone)]
@@ -90,6 +93,59 @@ impl WebRtcController {
         let _ = self.sender.send(RtcThreadEvent::CloseDataChannel(*id));
     }
 
+    pub fn add_transceiver(
+        &self,
+        id: TransceiverId,
+        kind: MediaStreamType,
+        direction: RtpDirection,
+        send: Option<MediaStreamId>,
+        receiver: AudioSource,
+        receiver_track: MediaStreamId,
+    ) {
+        let _ = self.sender.send(RtcThreadEvent::AddTransceiver(
+            id,
+            kind,
+            direction,
+            send,
+            receiver,
+            receiver_track,
+        ));
+    }
+    pub fn set_direction(&self, id: TransceiverId, direction: RtpDirection) {
+        let _ = self
+            .sender
+            .send(RtcThreadEvent::SetDirection(id, direction));
+    }
+    pub fn stop_transceiver(&self, id: TransceiverId) {
+        let _ = self.sender.send(RtcThreadEvent::StopTransceiver(id));
+    }
+    pub fn replace_track(
+        &self,
+        id: TransceiverId,
+        track: Option<MediaStreamId>,
+        cb: ResultCallback<()>,
+    ) {
+        let _ = self
+            .sender
+            .send(RtcThreadEvent::ReplaceTrack(id, track, cb));
+    }
+    pub fn get_stats(&self, cb: Box<dyn FnOnce(Vec<RtpStats>) + Send + 'static>) {
+        let _ = self.sender.send(RtcThreadEvent::GetStats(cb));
+    }
+    pub fn set_description(
+        &self,
+        which: DescriptionType,
+        desc: SessionDescription,
+        cb: ResultCallback<()>,
+    ) {
+        let _ = self
+            .sender
+            .send(RtcThreadEvent::SetDescription(which, desc, cb));
+    }
+    pub fn create_description(&self, ty: SdpType, cb: ResultCallback<SessionDescription>) {
+        let _ = self.sender.send(RtcThreadEvent::CreateDescription(ty, cb));
+    }
+
     /// This should not be invoked by clients
     pub fn internal_event(&self, event: InternalEvent) {
         let _ = self.sender.send(RtcThreadEvent::InternalEvent(event));
@@ -112,6 +168,20 @@ pub enum RtcThreadEvent {
     CloseDataChannel(DataChannelId),
     SendDataChannelMessage(DataChannelId, DataChannelMessage),
     InternalEvent(InternalEvent),
+    AddTransceiver(
+        TransceiverId,
+        MediaStreamType,
+        RtpDirection,
+        Option<MediaStreamId>,
+        AudioSource,
+        MediaStreamId,
+    ),
+    SetDirection(TransceiverId, RtpDirection),
+    StopTransceiver(TransceiverId),
+    ReplaceTrack(TransceiverId, Option<MediaStreamId>, ResultCallback<()>),
+    GetStats(Box<dyn FnOnce(Vec<RtpStats>) + Send + 'static>),
+    SetDescription(DescriptionType, SessionDescription, ResultCallback<()>),
+    CreateDescription(SdpType, ResultCallback<SessionDescription>),
     Quit,
 }
 
@@ -163,6 +233,17 @@ pub fn handle_rtc_event(
             controller.send_data_channel_message(&id, &message)
         },
         RtcThreadEvent::InternalEvent(e) => controller.internal_event(e),
+        RtcThreadEvent::AddTransceiver(id, kind, dir, send, receiver, track) => {
+            controller.add_transceiver(id, kind, dir, send, receiver, track)
+        },
+        RtcThreadEvent::SetDirection(id, dir) => controller.set_direction(id, dir),
+        RtcThreadEvent::StopTransceiver(id) => controller.stop_transceiver(id),
+        RtcThreadEvent::ReplaceTrack(id, track, cb) => controller.replace_track(id, track, cb),
+        RtcThreadEvent::GetStats(cb) => controller.get_stats(cb),
+        RtcThreadEvent::SetDescription(which, desc, cb) => {
+            controller.set_description(which, desc, cb)
+        },
+        RtcThreadEvent::CreateDescription(ty, cb) => controller.create_description(ty, cb),
         RtcThreadEvent::Quit => {
             controller.quit();
             return false;

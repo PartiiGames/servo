@@ -9,8 +9,14 @@
 //! - `<audio>`: [`player::NativePlayer`], audio only.
 //! - With no sound device (or `PARTII_AUDIO=null`) the output is a real-time null sink, so render
 //!   threads and players still run.
-//! - Video, capture, media streams and WebRTC behave like the dummy backend.
+//! - Cameras (`capture`, stream "capture"): getUserMedia({video}) on V4L2 / AVFoundation / the fake
+//!   camera, into the live video registry; `<video>.srcObject` plays them ([`stream_player`]).
+//! - Microphones (`capture::mic`): cpal input or the fake mic, into the live audio registry.
+//! - Live audio (stream voice): MediaStreamAudioSourceNode / DestinationNode through the live
+//!   registry (streams.rs), and RTCPeerConnection on str0m with Opus (webrtc.rs, the `webrtc`
+//!   feature); `<audio>.srcObject` plays live audio tracks ([`stream_player`]).
 
+mod capture;
 mod codecs;
 pub mod decoder;
 mod device;
@@ -19,8 +25,12 @@ pub mod player;
 pub mod queue;
 pub mod resample;
 pub mod sink;
+pub mod stream_player;
+pub mod streams;
 #[cfg(feature = "video")]
 mod webm;
+#[cfg(feature = "webrtc")]
+pub mod webrtc;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,7 +45,9 @@ use servo_media_audio::context::{AudioContext, AudioContextOptions};
 use servo_media_audio::decoder::AudioDecoder;
 use servo_media_audio::sink::AudioSinkError;
 use servo_media_audio::{AudioBackend, AudioStreamReader};
-use servo_media_dummy::{DummyBackend, DummyPlayer, DummyStreamReader, DummyWebRtcController};
+use servo_media_dummy::{DummyBackend, DummyStreamReader};
+#[cfg(not(feature = "webrtc"))]
+use servo_media_dummy::DummyWebRtcController;
 use servo_media_player::context::PlayerGLContext;
 use servo_media_player::{Player, PlayerEvent, StreamType, audio, video};
 use servo_media_streams::capture::MediaTrackConstraintSet;
@@ -78,6 +90,7 @@ impl BackendInit for NativeBackend {
                 }
             })
             .expect("Failed to spawn the media shutdown thread");
+        capture::start_stats();
         Box::new(NativeBackend {
             instances,
             next_instance_id: AtomicUsize::new(0),
@@ -217,8 +230,15 @@ impl Backend for NativeBackend {
     ) -> Arc<Mutex<dyn Player>> {
         let id = self.next_instance_id.fetch_add(1, Ordering::Relaxed);
         if stream_type == StreamType::Stream {
-            // MediaStream sources (srcObject) are unsupported, as in the dummy backend.
-            return Arc::new(Mutex::new(DummyPlayer));
+            // srcObject = a MediaStream: its video track plays from the live video registry.
+            let player = Arc::new(Mutex::new(stream_player::StreamPlayer::new(
+                id,
+                sender,
+                video_renderer,
+            )));
+            let weak: Weak<Mutex<stream_player::StreamPlayer>> = Arc::downgrade(&player);
+            self.register(context_id, id, weak);
+            return player;
         }
         let player = Arc::new(Mutex::new(player::NativePlayer::new(
             id,
@@ -261,15 +281,25 @@ impl Backend for NativeBackend {
         &self,
         ty: MediaStreamType,
     ) -> (Box<dyn MediaSocket>, MediaStreamId) {
-        DummyBackend.create_stream_and_socket(ty)
+        match ty {
+            // MediaStreamAudioDestinationNode: a live source the node renders into.
+            MediaStreamType::Audio => {
+                streams::destination_stream(self.preferred_sample_rate().round() as u32)
+            },
+            MediaStreamType::Video => DummyBackend.create_stream_and_socket(ty),
+        }
     }
 
     fn create_audioinput_stream(&self, set: MediaTrackConstraintSet) -> Option<MediaStreamId> {
-        DummyBackend.create_audioinput_stream(set)
+        capture::mic::open(&set)
     }
 
     fn create_videoinput_stream(&self, set: MediaTrackConstraintSet) -> Option<MediaStreamId> {
-        DummyBackend.create_videoinput_stream(set)
+        capture::open_video_track(&set)
+    }
+
+    fn set_capture_mocking(&self, mock: bool) {
+        capture::set_mocking(mock);
     }
 
     fn create_webrtc(&self, signaller: Box<dyn WebRtcSignaller>) -> WebRtcController {
@@ -293,7 +323,7 @@ impl Backend for NativeBackend {
     }
 
     fn get_device_monitor(&self) -> Box<dyn MediaDeviceMonitor> {
-        DummyBackend.get_device_monitor()
+        Box::new(capture::NativeDeviceMonitor)
     }
 
     fn preferred_sample_rate(&self) -> f32 {
@@ -332,13 +362,30 @@ impl AudioBackend for NativeBackend {
     }
 
     fn make_streamreader(
-        _id: MediaStreamId,
-        _sample_rate: f32,
+        id: MediaStreamId,
+        sample_rate: f32,
     ) -> Result<Box<dyn AudioStreamReader + Send>, AudioSinkError> {
-        Ok(Box::new(DummyStreamReader))
+        // A live track reads its source; anything else (a dummy stream) stays silent.
+        Ok(match streams::LiveStreamReader::new(id, sample_rate) {
+            Some(r) => Box::new(r),
+            None => Box::new(DummyStreamReader),
+        })
     }
 }
 
+#[cfg(feature = "webrtc")]
+impl WebRtcBackend for NativeBackend {
+    type Controller = webrtc::Str0mController;
+
+    fn construct_webrtc_controller(
+        signaller: Box<dyn WebRtcSignaller>,
+        thread: WebRtcController,
+    ) -> Self::Controller {
+        webrtc::Str0mController::new(signaller, thread)
+    }
+}
+
+#[cfg(not(feature = "webrtc"))]
 impl WebRtcBackend for NativeBackend {
     type Controller = DummyWebRtcController;
 

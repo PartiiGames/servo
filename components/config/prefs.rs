@@ -268,6 +268,9 @@ pub struct Preferences {
     pub dom_webgl2_enabled: bool,
     // feature: WebRTC | #41396 | Web/API/WebRTC_API
     pub dom_webrtc_enabled: bool,
+    /// Partii: navigator.mediaDevices (getUserMedia, enumerateDevices), MediaStreamTrack and
+    /// MediaDeviceInfo, on their own (RTCPeerConnection stays behind dom_webrtc_enabled).
+    pub dom_mediadevices_enabled: bool,
     // feature: WebRTC Transceiver | #41396 | Web/API/RTCRtpTransceiver
     pub dom_webrtc_transceiver_enabled: bool,
     pub dom_webxr_enabled: bool,
@@ -409,6 +412,9 @@ pub struct Preferences {
     pub media_glvideo_enabled: bool,
     /// Enable a non-standard event handler for verifying behavior of media elements during tests.
     pub media_testing_enabled: bool,
+    /// Partii: getUserMedia's only camera is the fake one (a test pattern; also
+    /// PARTII_FAKE_CAMERA=pattern), as Chrome's --use-fake-device-for-media-stream.
+    pub media_fake_video_input: bool,
     /// The default timeout set for establishing a network connection in seconds. This amount
     /// if for the entire process of connecting to an address. For instance, if a particular host is
     /// associated with multiple IP addresses, this timeout will be divided equally among
@@ -502,7 +508,7 @@ impl Preferences {
             dom_battery_enabled: false,
             dom_bluetooth_enabled: false,
             dom_bluetooth_testing_enabled: false,
-            dom_canvas_capture_enabled: false,
+            dom_canvas_capture_enabled: true,
             dom_canvas_text_enabled: true,
             dom_canvas_backend: String::new(),
             dom_canvas_msg_buffer_size: 16,
@@ -570,6 +576,7 @@ impl Preferences {
             dom_webgpu_enabled: false,
             dom_webgpu_wgpu_backend: String::new(),
             dom_webrtc_enabled: false,
+            dom_mediadevices_enabled: false,
             dom_webrtc_transceiver_enabled: false,
             dom_webxr_enabled: true,
             dom_webxr_first_person_observer_view: false,
@@ -660,6 +667,7 @@ impl Preferences {
             layout_writing_mode_enabled: false,
             media_glvideo_enabled: false,
             media_testing_enabled: false,
+            media_fake_video_input: false,
             network_connection_timeout: 15,
             network_enforce_tls_enabled: false,
             network_enforce_tls_localhost: false,

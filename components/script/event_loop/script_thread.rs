@@ -1284,6 +1284,9 @@ impl ScriptThread {
                 } else if document.has_active_request_animation_frame_callbacks() {
                     self.animation_frame_deferred.set(true);
                 }
+
+                // Partii: canvas.captureStream() frames, right after this frame's drawing.
+                document.capture_canvas_frames();
             }
 
             // Run the resize observer steps.

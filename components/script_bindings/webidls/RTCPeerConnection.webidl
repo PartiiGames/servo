@@ -21,7 +21,7 @@ interface RTCPeerConnection : EventTarget {
     readonly attribute RTCSignalingState      signalingState;
     readonly attribute RTCIceGatheringState   iceGatheringState;
     readonly attribute RTCIceConnectionState  iceConnectionState;
-    // readonly attribute RTCPeerConnectionState connectionState;
+    readonly attribute RTCPeerConnectionState connectionState;
     // readonly attribute boolean?               canTrickleIceCandidates;
     // static sequence<RTCIceServer>      getDefaultIceServers();
     // RTCConfiguration                   getConfiguration();
@@ -33,7 +33,7 @@ interface RTCPeerConnection : EventTarget {
              attribute EventHandler           onsignalingstatechange;
              attribute EventHandler           oniceconnectionstatechange;
              attribute EventHandler           onicegatheringstatechange;
-    //          attribute EventHandler           onconnectionstatechange;
+             attribute EventHandler           onconnectionstatechange;
 
     // removed from spec, but still shipped by browsers
     undefined addStream (MediaStream stream);
@@ -106,6 +106,15 @@ enum RTCIceConnectionState {
     "closed"
 };
 
+enum RTCPeerConnectionState {
+    "closed",
+    "failed",
+    "disconnected",
+    "new",
+    "connecting",
+    "connected"
+};
+
 enum RTCSignalingState {
     "stable",
     "have-local-offer",
@@ -132,14 +141,14 @@ dictionary RTCRtpTransceiverInit {
 };
 
 partial interface RTCPeerConnection {
-    // sequence<RTCRtpSender>      getSenders();
-    // sequence<RTCRtpReceiver>    getReceivers();
-    // sequence<RTCRtpTransceiver> getTransceivers();
-    // RTCRtpSender                addTrack(MediaStreamTrack track,
-    //                                      MediaStream... streams);
+    sequence<RTCRtpSender>      getSenders();
+    sequence<RTCRtpReceiver>    getReceivers();
+    sequence<RTCRtpTransceiver> getTransceivers();
+    // The spec's `MediaStream... streams` is left out: the bindings' codegen can't take a variadic
+    // interface argument here yet, and jam voice doesn't pass streams.
+    [Throws] RTCRtpSender       addTrack(MediaStreamTrack track);
     // void                        removeTrack(RTCRtpSender sender);
-    [Pref="dom_webrtc_transceiver_enabled"]
-    RTCRtpTransceiver           addTransceiver((MediaStreamTrack or DOMString) trackOrKind,
+    [Throws] RTCRtpTransceiver  addTransceiver((MediaStreamTrack or DOMString) trackOrKind,
                                                optional RTCRtpTransceiverInit init = {});
     attribute EventHandler ontrack;
 };
@@ -150,4 +159,10 @@ partial interface RTCPeerConnection {
   RTCDataChannel createDataChannel(USVString label,
                                    optional RTCDataChannelInit dataChannelDict = {});
   attribute EventHandler ondatachannel;
+};
+
+// https://w3c.github.io/webrtc-pc/#sec.stats-model
+// The report is a Map of stats id to stats object (RTCStatsReport is a readonly maplike).
+partial interface RTCPeerConnection {
+  Promise<any> getStats(optional MediaStreamTrack? selector = null);
 };
