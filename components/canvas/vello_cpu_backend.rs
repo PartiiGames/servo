@@ -56,6 +56,10 @@ pub(crate) struct VelloCPUDrawTarget {
     /// Partii: with each clip's fill rule, so a clip pushed back after a render keeps it.
     clips: Vec<(Path, kurbo::Affine, peniko::Fill)>,
     state: State,
+    /// Partii (clips): device pixels of image draws recorded since the last render. A canvas that
+    /// is drawn every frame but rarely read (jam clip's copy of the game) otherwise piles up
+    /// frames of draws that one read rasterizes at once, on the thread every 2D canvas shares.
+    pending_image_px: f64,
 }
 
 impl VelloCPUDrawTarget {
@@ -122,6 +126,7 @@ impl VelloCPUDrawTarget {
                 self_.ctx.render(&mut self_.pixmap, &mut self_.resources);
                 self_.ctx.reset();
                 self_.state = State::Rendered;
+                self_.pending_image_px = 0.0;
             });
         }
 
@@ -196,6 +201,29 @@ impl VelloCPUDrawTarget {
             self.is_viewport_cleared(rect, *transform)
     }
 
+    /// Partii (clips): whether drawing `surface` into `dest` replaces every pixel of the canvas, so
+    /// what is under it (the old pixmap and everything still queued) can be dropped: 'copy', or
+    /// 'source-over' of a fully opaque image (every pixel's alpha 255: a canvas made with
+    /// alpha:true usually isn't), at global alpha 1, axis-aligned, covering the whole canvas
+    /// (its edges outside it, so no antialiased border) and no clip that leaves part of it out.
+    fn image_covers_canvas(
+        &mut self,
+        surface: &vello_cpu::Pixmap,
+        dest: &Rect<f64>,
+        composition_options: &CompositionOptions,
+        transform: &Transform2D<f64>,
+    ) -> bool {
+        let op = composition_options.composition_operation;
+        let copy = op == CompositionOrBlending::Composition(CompositionStyle::Copy);
+        let over = op == CompositionOrBlending::Composition(CompositionStyle::SourceOver);
+        (copy || over) &&
+            composition_options.alpha == 1.0 &&
+            transform.m12 == 0.0 &&
+            transform.m21 == 0.0 &&
+            self.is_viewport_cleared(&dest.cast(), *transform) &&
+            (copy || all_opaque(surface.data_as_u8_slice()))
+    }
+
     fn is_viewport_cleared(&mut self, rect: &Rect<f32>, transform: Transform2D<f64>) -> bool {
         let transformed_rect = transform.outer_transformed_rect(&rect.cast());
         if transformed_rect.is_empty() {
@@ -213,6 +241,9 @@ impl VelloCPUDrawTarget {
             unclipped // viewport is not clipped
     }
 }
+
+/// Partii (clips): image draws (in canvas areas) a canvas may queue before it renders them.
+const PENDING_IMAGE_CANVASES: f64 = 8.0;
 
 fn worker_thread_count(size: &Size2D<u16>) -> u16 {
     // TODO: Somewhat arbitrary chosen, should be based on a benchmark,
@@ -243,6 +274,7 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
             pixmap: vello_cpu::Pixmap::new(size.width, size.height),
             clips: Vec::new(),
             state: State::Rendered,
+            pending_image_px: 0.0,
         }
     }
 
@@ -331,7 +363,23 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
         composition_options: CompositionOptions,
         transform: Transform2D<f64>,
     ) {
-        self.ensure_drawing();
+        if self.image_covers_canvas(&surface, &dest, &composition_options, &transform) {
+            // Partii (clips): nothing under this draw shows: drop the old content and the queue.
+            self.ignore_clips(|self_| self_.ctx.reset());
+            self.state = State::Drawing;
+            self.pending_image_px = 0.0;
+        } else {
+            self.ensure_drawing();
+            // Partii (clips): bound what one read has to rasterize: past ~8 canvases of image
+            // draws, render now (the same work, spread out instead of in one stall).
+            let viewport = self.size().width as f64 * self.size().height as f64;
+            if self.pending_image_px > PENDING_IMAGE_CANVASES * viewport {
+                self.pixmap();
+                self.ensure_drawing();
+            }
+        }
+        let area = transform.outer_transformed_rect(&dest).size.area();
+        self.pending_image_px += area.min(self.size().width as f64 * self.size().height as f64);
         let scale_up = dest.size.width > source.size.width || dest.size.height > source.size.height;
         if composition_options.alpha != 1.0 {
             Arc::get_mut(&mut surface)
@@ -514,6 +562,7 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
             // whole previous frame as an image under this fill (ensure_drawing).
             self.ignore_clips(|self_| self_.ctx.reset());
             self.state = State::Drawing;
+            self.pending_image_px = 0.0;
         } else {
             self.ensure_drawing();
         }
