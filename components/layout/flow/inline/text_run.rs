@@ -26,6 +26,7 @@ use style::font_face::FontLanguageOverride;
 use style::properties::ComputedValues;
 use style::values::computed::{
     FontFeatureSettings, FontVariantEastAsian, FontVariantLigatures, FontVariantNumeric,
+    OverflowWrap,
 };
 use unicode_bidi::Level;
 use unicode_script::Script;
@@ -271,6 +272,15 @@ impl TextRunSegment {
             soft_wrap_policy = SegmentStartSoftWrapPolicy::Force;
         }
 
+        let can_cut_words = matches!(
+            text_run
+                .inline_styles()
+                .style
+                .borrow()
+                .get_inherited_text()
+                .overflow_wrap,
+            OverflowWrap::Anywhere | OverflowWrap::BreakWord
+        );
         let mut character_range_start = self.character_range.start;
         for (run_index, run) in self.runs.iter().enumerate() {
             let new_character_range_end = character_range_start + run.character_count();
@@ -282,6 +292,35 @@ impl TextRunSegment {
             }
 
             let run_start = text_run.run_data.character_range_in_ifc_text.start;
+
+            // Partii (ui-fix-3): `overflow-wrap: anywhere | break-word` lets a word wider than a whole
+            // line break between its characters (css-text-3 §5.5). Only such a word is cut, here at
+            // layout time, so text that fits is laid out exactly as before.
+            if can_cut_words &&
+                !run.is_whitespace() &&
+                ifc.word_wider_than_a_line(run.total_advance())
+            {
+                let pieces = run.split_at_characters();
+                if !pieces.is_empty() {
+                    let mut piece_start = character_range_start;
+                    for (piece_index, piece) in pieces.into_iter().enumerate() {
+                        if piece_index != 0 {
+                            ifc.process_emergency_wrap_opportunity(piece.total_advance());
+                        }
+                        let piece_end = piece_start + piece.character_count();
+                        ifc.push_glyph_store_to_unbreakable_segment(
+                            piece,
+                            text_run,
+                            &self.info,
+                            piece_start - run_start..piece_end - run_start,
+                        );
+                        piece_start = piece_end;
+                    }
+                    character_range_start = new_character_range_end;
+                    continue;
+                }
+            }
+
             ifc.push_glyph_store_to_unbreakable_segment(
                 run.clone(),
                 text_run,

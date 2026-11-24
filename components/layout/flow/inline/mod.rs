@@ -1830,6 +1830,24 @@ impl InlineFormattingContextLayout<'_> {
         self.commit_current_segment_to_line();
     }
 
+    /// Partii (ui-fix-3): whether a word of `advance`, added to what the unbreakable segment holds,
+    /// is wider than a whole line (so `overflow-wrap: anywhere | break-word` may cut it).
+    pub(super) fn word_wider_than_a_line(&self, advance: Au) -> bool {
+        self.text_wrap_mode != TextWrapMode::Nowrap &&
+            self.current_line_segment.inline_size + advance >
+                self.line_break_inline_size
+                    .unwrap_or(self.containing_block().size.inline)
+    }
+
+    /// Partii (ui-fix-3): an emergency wrap opportunity inside a word (`overflow-wrap: anywhere |
+    /// break-word`): taken only when the word so far plus its next piece would be wider than a whole
+    /// line, so a word is cut only where no line could hold it, never instead of an ordinary break.
+    pub(super) fn process_emergency_wrap_opportunity(&mut self, next_piece_advance: Au) {
+        if self.word_wider_than_a_line(next_piece_advance) {
+            self.process_soft_wrap_opportunity();
+        }
+    }
+
     /// Commit the current unbreakable segment to the current line. In addition, this will
     /// place all floats in the unbreakable segment and expand the line dimensions.
     fn commit_current_segment_to_line(&mut self) {

@@ -623,6 +623,53 @@ impl ShapedTextSlice {
     pub fn glyphs(&self) -> impl DoubleEndedIterator<Item = GlyphInfo<'_>> + use<'_> {
         self.shaped_text.glyph_slice(self.glyph_range.clone())
     }
+
+    /// Partii (ui-fix-3): this slice cut before every glyph that starts a new character (a glyph
+    /// that spans zero characters stays with the one before it; a glyph spanning several characters,
+    /// a ligature, is never cut), for `overflow-wrap: anywhere | break-word` when a word is wider than
+    /// a whole line. Right-to-left text is returned whole (not cut).
+    pub fn split_at_characters(&self) -> Vec<Arc<ShapedTextSlice>> {
+        if self.shaped_text.is_rtl || self.glyph_range.len() < 2 {
+            return Vec::new();
+        }
+        let mut pieces = Vec::new();
+        let mut start = self.glyph_range.start;
+        let mut advance = Au::zero();
+        let mut characters = Utf32CodeUnits(0);
+        let mut separators = 0;
+        let push = |pieces: &mut Vec<Arc<ShapedTextSlice>>,
+                        start: usize,
+                        end: usize,
+                        advance: Au,
+                        characters: Utf32CodeUnits,
+                        separators: usize| {
+            pieces.push(Arc::new(ShapedTextSlice {
+                shaped_text: self.shaped_text.clone(),
+                glyph_range: start..end,
+                total_advance: advance,
+                character_count: characters,
+                total_word_separators: separators,
+                slice_type: ShapedTextSliceType::Word,
+            }))
+        };
+        for (index, glyph) in self.glyphs().enumerate() {
+            let glyph_index = self.glyph_range.start + index;
+            if glyph_index > start && glyph.character_count().0 > 0 {
+                push(&mut pieces, start, glyph_index, advance, characters, separators);
+                start = glyph_index;
+                advance = Au::zero();
+                characters = Utf32CodeUnits(0);
+                separators = 0;
+            }
+            advance += glyph.advance();
+            characters += glyph.character_count();
+            if glyph.char_is_word_separator() {
+                separators += 1;
+            }
+        }
+        push(&mut pieces, start, self.glyph_range.end, advance, characters, separators);
+        pieces
+    }
 }
 
 /// A data structure used to efficiently slice up a [`ShapedText`] into [`ShapedTextSlice`]s.
