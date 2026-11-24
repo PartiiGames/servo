@@ -575,7 +575,13 @@ fn bind_udp(ip: IpAddr) -> Option<UdpSocket> {
         Some((a.parse::<u16>().ok()?, b.parse::<u16>().ok()?))
     });
     match range {
-        Some((lo, hi)) => (lo..=hi).find_map(|p| UdpSocket::bind((ip, p)).ok()),
+        // Every pinned port taken (another job sharing the block): an ephemeral one rather than none.
+        Some((lo, hi)) => (lo..=hi)
+            .find_map(|p| UdpSocket::bind((ip, p)).ok())
+            .or_else(|| {
+                rtc_dbg!("PARTII_WEBRTC_PORTS {lo}-{hi} all taken: an ephemeral port");
+                UdpSocket::bind((ip, 0)).ok()
+            }),
         None => UdpSocket::bind((ip, 0)).ok(),
     }
 }
