@@ -9,10 +9,15 @@
 //! Permission: the app's Info.plist needs NSCameraUsageDescription (the launcher has it) and a
 //! hardened runtime needs the camera entitlement. The first open asks the OS
 //! (requestAccessForMediaType) and waits for the answer.
+//!
+//! `PARTII_CAPTURE_LOG=1`: one stderr line when a session starts ("avf: session started ..."), one a second while it
+//! runs (frames AVFoundation delivered and frames copied to readers), and one when it stops: what the attended
+//! camera check reads to know the frames are the device's.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -39,6 +44,12 @@ use super::{Camera, CameraInfo, CameraSettings, CaptureError, FrameSink, Want};
 
 struct Ivars {
     sink: Arc<dyn FrameSink>,
+    /// Sample buffers AVFoundation delivered, and the ones copied to readers (PARTII_CAPTURE_LOG).
+    counts: Arc<(AtomicU64, AtomicU64)>,
+}
+
+fn capture_log() -> bool {
+    std::env::var("PARTII_CAPTURE_LOG").as_deref() == Ok("1")
 }
 
 define_class!(
@@ -58,16 +69,18 @@ define_class!(
             _connection: &AVCaptureConnection,
         ) {
             let sink = &self.ivars().sink;
+            self.ivars().counts.0.fetch_add(1, Ordering::Relaxed);
             if sink.live() && sink.has_readers() {
                 copy_frame(sample, &**sink);
+                self.ivars().counts.1.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 );
 
 impl Delegate {
-    fn new(sink: Arc<dyn FrameSink>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(Ivars { sink });
+    fn new(sink: Arc<dyn FrameSink>, counts: Arc<(AtomicU64, AtomicU64)>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(Ivars { sink, counts });
         // SAFETY: NSObject's init.
         unsafe { msg_send![super(this), init] }
     }
@@ -279,6 +292,7 @@ pub(super) fn open(
         & !1;
     let frame_rate = want.frame_rate.unwrap_or(30.);
 
+    let counts = Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
     // SAFETY: the usual AVCaptureSession setup, all objects alive for the calls.
     let running = unsafe {
         let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device)
@@ -317,7 +331,7 @@ pub(super) fn open(
         );
         output.setVideoSettings(Some(&settings));
         output.setAlwaysDiscardsLateVideoFrames(true);
-        let delegate = Delegate::new(sink.clone());
+        let delegate = Delegate::new(sink.clone(), counts.clone());
         let queue = DispatchQueue::new("partii.camera", None);
         output.setSampleBufferDelegate_queue(
             Some(ProtocolObject::from_ref(&*delegate)),
@@ -340,14 +354,32 @@ pub(super) fn open(
         }
     };
     debug!("camera {}: {width}x{height} 32BGRA", info.label);
+    let log_on = capture_log();
+    if log_on {
+        // SAFETY: property reads.
+        let (running_now, model) = unsafe { (running.session.isRunning(), running.device.modelID().to_string()) };
+        eprintln!(
+            "avf: session started {:?} uniqueID {} model {model} {width}x{height} running={running_now}",
+            info.label, info.handle
+        );
+    }
+    let label = info.label.clone();
 
     thread::Builder::new()
         .name("PartiiCamera".to_owned())
         .spawn(move || {
             let running = running;
             let mut lost = false;
+            let (mut last, mut seen, mut copied) = (Instant::now(), 0, 0);
             while sink.live() {
                 thread::sleep(Duration::from_millis(200));
+                if log_on && last.elapsed() >= Duration::from_secs(1) {
+                    let (d, c) = (counts.0.load(Ordering::Relaxed), counts.1.load(Ordering::Relaxed));
+                    // SAFETY: a property read.
+                    let on = unsafe { running.session.isRunning() };
+                    eprintln!("avf: {label:?} running={on} frames/s delivered {} copied {}", d - seen, c - copied);
+                    (last, seen, copied) = (Instant::now(), d, c);
+                }
                 // SAFETY: property read.
                 if !unsafe { running.device.isConnected() } {
                     lost = true;
@@ -356,6 +388,12 @@ pub(super) fn open(
             }
             // SAFETY: stops the session started above.
             unsafe { running.session.stopRunning() };
+            if log_on {
+                eprintln!(
+                    "avf: session stopped {label:?} (frames delivered {}, lost device {lost})",
+                    counts.0.load(Ordering::Relaxed)
+                );
+            }
             drop(running);
             if lost {
                 sink.end();
