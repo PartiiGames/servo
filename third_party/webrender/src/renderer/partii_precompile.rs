@@ -20,6 +20,15 @@
 //! `PARTII_WR_PRECOMPILE=0` turns it off; `PARTII_WR_PRECOMPILE_FRAME_MS` is the per-frame
 //! budget of the in-renderer replay (default 4; one state at least per frame).
 //!
+//! Bounded (batch 4, 2026-11-24): on a cold Mesa cache some replayed states still compile in the renderer's
+//! context (clips a2c52130: 120-148 ms single-state frames 10-14 s into 2d/bench/glitterfall, their 10 s-end
+//! max 119-133 ms vs 52-54 without the precompile; a smaller per-frame budget can't help, one state is the
+//! unit). So a replayed state that takes `PARTII_WR_PRECOMPILE_SLOW_MS` (default 16) or more ends that
+//! frame's replay, and after `PARTII_WR_PRECOMPILE_SLOW_MAX` (default 2) such states the rest are dropped:
+//! the cache is missing in this context, and replaying on only moves compiles into frames the page may never
+//! need. `PARTII_WR_PRECOMPILE_SLOW_MAX=0`: no limit (the old replay). `PARTII_WR_PRECOMPILE_REPLAY=0`: the
+//! background compile only (fills Mesa's disk cache), no in-renderer replay.
+//!
 //! Deferred (app stream, 2026-11-24): on a cold Mesa cache the compile ran from WebRender's start through the
 //! app's first contentful frame (8.4 s, 146 of 225 states, on a 2-CPU farm job) and slowed that frame (the
 //! launcher's first paint 2514 vs 1824 ms without it). Now the thread waits until the first frame plus
@@ -152,6 +161,18 @@ pub(crate) struct PartiiPrecompile {
     frames: usize,
     max_frame_ms: f64,
     started: Instant,
+    /// False: background compile only (`PARTII_WR_PRECOMPILE_REPLAY=0`).
+    replay: bool,
+    /// A replayed state this slow or slower counts as a compile in the renderer's context.
+    slow_ms: f64,
+    /// Slow states after which the rest are dropped (0: no limit).
+    slow_max: usize,
+    slow: usize,
+    dropped: usize,
+}
+
+fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 impl PartiiPrecompile {
@@ -223,6 +244,11 @@ impl PartiiPrecompile {
             frames: 0,
             max_frame_ms: 0.0,
             started: Instant::now(),
+            replay: std::env::var("PARTII_WR_PRECOMPILE_REPLAY").as_deref() != Ok("0"),
+            slow_ms: env_num("PARTII_WR_PRECOMPILE_SLOW_MS", 16.0),
+            slow_max: env_num("PARTII_WR_PRECOMPILE_SLOW_MAX", 2),
+            slow: 0,
+            dropped: 0,
         })
     }
 
@@ -252,6 +278,15 @@ impl PartiiPrecompile {
             },
             _ => {},
         }
+        if !self.replay {
+            eprintln!(
+                "partii-wr-precompile: background compile done {:.0} ms after start; in-renderer replay off",
+                self.started.elapsed().as_secs_f64() * 1000.0
+            );
+            // Nothing was drawn with the scratch: no GL objects to free.
+            self.scratch = None;
+            return false;
+        }
         let t0 = Instant::now();
         let mut scratch = self.scratch.take().unwrap_or_default();
         let mut drawn = false;
@@ -260,11 +295,27 @@ impl PartiiPrecompile {
                 break;
             }
             let entry = self.pending.pop_front().unwrap();
+            let s0 = Instant::now();
             if let Some(kind) = shaders.partii_bind(&entry.program, device) {
                 device.partii_warm_draw(&entry, &vaos[kind], &mut scratch);
                 self.replayed += 1;
             }
             drawn = true;
+            let state_ms = s0.elapsed().as_secs_f64() * 1000.0;
+            if state_ms >= self.slow_ms {
+                // A compile in this context: no more replay this frame.
+                self.slow += 1;
+                if self.slow_max > 0 && self.slow >= self.slow_max {
+                    self.dropped = self.pending.len();
+                    self.pending.clear();
+                    eprintln!(
+                        "partii-wr-precompile: {} replays took {:.0} ms or more (the last {:.1} ms): the renderer's \
+                         context misses the cache, so the other {} states are dropped",
+                        self.slow, self.slow_ms, state_ms, self.dropped
+                    );
+                }
+                break;
+            }
         }
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.frames += 1;
@@ -272,11 +323,13 @@ impl PartiiPrecompile {
         if self.pending.is_empty() {
             device.partii_warm_finish(scratch);
             eprintln!(
-                "partii-wr-precompile: replayed {} of {} states in {} frames (longest {:.1} ms), done {:.0} ms after start",
+                "partii-wr-precompile: replayed {} of {} states in {} frames (longest {:.1} ms, {} slow, {} dropped), done {:.0} ms after start",
                 self.replayed,
                 self.total,
                 self.frames,
                 self.max_frame_ms,
+                self.slow,
+                self.dropped,
                 self.started.elapsed().as_secs_f64() * 1000.0,
             );
             return false;
