@@ -112,7 +112,7 @@ use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
 use style::properties::ComputedValues;
 use style::properties::style_structs::InheritedText;
-use style::values::computed::BaselineShift;
+use style::values::computed::{BaselineShift, OverflowWrap};
 use style::values::generics::box_::BaselineShiftKeyword;
 use style::values::generics::font::LineHeight;
 use style::values::specified::box_::BaselineSource;
@@ -3149,6 +3149,21 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
             }
 
             self.commit_pending_whitespace();
+
+            // Partii (ui-fix-3): `overflow-wrap: anywhere` makes every character a soft wrap
+            // opportunity for min-content sizes (css-text-3 §5.5; `break-word` does not).
+            if can_wrap && style_text.overflow_wrap == OverflowWrap::Anywhere {
+                let pieces = run.split_at_characters();
+                if !pieces.is_empty() {
+                    for (piece_index, piece) in pieces.iter().enumerate() {
+                        if piece_index != 0 {
+                            self.line_break_opportunity();
+                        }
+                        self.add_inline_size(piece.total_advance());
+                    }
+                    continue;
+                }
+            }
             self.add_inline_size(advance);
 
             // Typically whitespace glyphs are placed in a separate store,
