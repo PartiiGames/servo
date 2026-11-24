@@ -85,6 +85,8 @@ impl Output {
         for s in out.iter_mut() {
             *s = s.clamp(-1., 1.);
         }
+        // The far end for the microphones' echo cancellation (nothing to do when none is open).
+        crate::aec::feed_render(out, channels, rate);
     }
 
     fn start() -> Arc<Output> {
