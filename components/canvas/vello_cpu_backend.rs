@@ -213,6 +213,9 @@ impl VelloCPUDrawTarget {
         composition_options: &CompositionOptions,
         transform: &Transform2D<f64>,
     ) -> bool {
+        if !canvas_cover() {
+            return false;
+        }
         let op = composition_options.composition_operation;
         let copy = op == CompositionOrBlending::Composition(CompositionStyle::Copy);
         let over = op == CompositionOrBlending::Composition(CompositionStyle::SourceOver);
@@ -373,7 +376,7 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
             // Partii (clips): bound what one read has to rasterize: past ~8 canvases of image
             // draws, render now (the same work, spread out instead of in one stall).
             let viewport = self.size().width as f64 * self.size().height as f64;
-            if self.pending_image_px > PENDING_IMAGE_CANVASES * viewport {
+            if canvas_cover() && self.pending_image_px > PENDING_IMAGE_CANVASES * viewport {
                 self.pixmap();
                 self.ensure_drawing();
             }
@@ -747,6 +750,13 @@ fn all_opaque(pixels: &[u8]) -> bool {
     words
         .chunks(1024)
         .all(|chunk| chunk.iter().fold(alpha, |acc, w| acc & w) & alpha == alpha)
+}
+
+/// Partii (clips): `PARTII_CANVAS_COVER=0` turns off both the covering-drawImage queue drop and the
+/// queued-image cap (an A/B of 9347e06 in one binary).
+fn canvas_cover() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("PARTII_CANVAS_COVER").as_deref(), Ok("0")))
 }
 
 fn canvas_opaque_scan() -> bool {
