@@ -65,6 +65,14 @@ fn main() {
         }
     });
 
+    // Partii (clips): generic-gnu on x86_64 is plain C, no SSE2/SSSE3/AVX2: the VP8 encoder runs ~4x
+    // slower (18-21 ms a 640x360 frame on the farm, which has no nasm). Say so loudly: a build that
+    // ships needs nasm (or yasm) on the builder.
+    if target == "generic-gnu" && arch == "x86_64" {
+        println!(
+            "cargo:warning=libvpx: no nasm/yasm, building generic C (no SIMD): VP8 encode ~4x slower. Install nasm."
+        );
+    }
     let compiler = cc::Build::new().opt_level(2).pic(true).get_compiler();
     let ar = cc::Build::new().get_archiver();
     std::fs::create_dir_all(&build).unwrap();
