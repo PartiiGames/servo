@@ -39,6 +39,35 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
 
 /// Opus at 48 kHz: 20 ms frames.
+/// PARTII_WEBRTC_DEBUG=1: one stderr line per ICE/DTLS step, the candidates and the SDP's ICE lines,
+/// and packet counters every 2 s (farm e2e diagnostics; nothing secret: no keys, no media).
+fn rtc_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBRTC_DEBUG").is_ok_and(|v| v == "1"))
+}
+
+macro_rules! rtc_dbg {
+    ($($t:tt)*) => {
+        if rtc_debug() {
+            eprintln!("partii-webrtc: {}", format_args!($($t)*));
+        }
+    };
+}
+
+/// The SDP lines that decide ICE and DTLS (candidates, ice-lite, setup, ufrag), for rtc_dbg.
+fn sdp_ice_lines(sdp: &str) -> String {
+    sdp.lines()
+        .filter(|l| {
+            l.starts_with("a=candidate") ||
+                l.starts_with("a=ice-lite") ||
+                l.starts_with("a=setup") ||
+                l.starts_with("a=ice-ufrag") ||
+                l.starts_with("m=")
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 const FRAME: usize = 960;
 const RATE: u32 = 48_000;
 
@@ -546,7 +575,13 @@ fn bind_udp(ip: IpAddr) -> Option<UdpSocket> {
         Some((a.parse::<u16>().ok()?, b.parse::<u16>().ok()?))
     });
     match range {
-        Some((lo, hi)) => (lo..=hi).find_map(|p| UdpSocket::bind((ip, p)).ok()),
+        // Every pinned port taken (another job sharing the block): an ephemeral one rather than none.
+        Some((lo, hi)) => (lo..=hi)
+            .find_map(|p| UdpSocket::bind((ip, p)).ok())
+            .or_else(|| {
+                rtc_dbg!("PARTII_WEBRTC_PORTS {lo}-{hi} all taken: an ephemeral port");
+                UdpSocket::bind((ip, 0)).ok()
+            }),
         None => UdpSocket::bind((ip, 0)).ok(),
     }
 }
@@ -569,6 +604,12 @@ struct Peer {
     closed: bool,
     encoded: Vec<u8>,
     decoded: Vec<f32>,
+    /// rtc_dbg counters: datagrams received, accepted by str0m, sent, send errors.
+    n_in: u64,
+    n_accepted: u64,
+    n_out: u64,
+    n_send_err: u64,
+    last_dbg: Instant,
 }
 
 impl Peer {
@@ -599,6 +640,11 @@ impl Peer {
             closed: false,
             encoded: vec![0; 1500],
             decoded: vec![0.; 5760],
+            n_in: 0,
+            n_accepted: 0,
+            n_out: 0,
+            n_send_err: 0,
+            last_dbg: Instant::now(),
         };
         for ip in host_addresses() {
             let Some(sock) = bind_udp(ip) else {
@@ -611,9 +657,11 @@ impl Peer {
                 continue;
             };
             let Ok(c) = Candidate::host(addr, "udp") else {
+                rtc_dbg!("local candidate {addr} refused by Candidate::host");
                 continue;
             };
-            peer.rtc.add_local_candidate(c);
+            let added = peer.rtc.add_local_candidate(c).is_some();
+            rtc_dbg!("local candidate {addr} (added: {added})");
             peer.drain();
             let _ = reader.set_read_timeout(Some(Duration::from_millis(250)));
             let tx = tx.clone();
@@ -647,6 +695,7 @@ impl Peer {
             peer.sockets.push((addr, sock));
         }
         if peer.sockets.is_empty() {
+            rtc_dbg!("no UDP socket could be bound (PARTII_WEBRTC_PORTS {:?})", std::env::var("PARTII_WEBRTC_PORTS").ok());
             warn!("webrtc: no UDP socket could be bound");
         }
         peer
@@ -676,6 +725,20 @@ impl Peer {
             next = self.drain();
             self.send_audio();
             self.check_liveness();
+            if rtc_debug() && now.duration_since(self.last_dbg) >= Duration::from_secs(2) {
+                self.last_dbg = now;
+                rtc_dbg!(
+                    "packets in {} (accepted {}) out {} send errors {}; ice {} dtls {} pc {:?} alive {}",
+                    self.n_in,
+                    self.n_accepted,
+                    self.n_out,
+                    self.n_send_err,
+                    self.ice_connected,
+                    self.dtls_connected,
+                    self.pc_state,
+                    self.rtc.is_alive()
+                );
+            }
         }
         self.close();
     }
@@ -692,11 +755,22 @@ impl Peer {
                         .find(|(a, _)| *a == t.source)
                         .or(self.sockets.first());
                     if let Some((_, s)) = sock {
-                        let _ = s.send_to(&t.contents, t.destination);
+                        match s.send_to(&t.contents, t.destination) {
+                            Ok(_) => self.n_out += 1,
+                            Err(e) => {
+                                if self.n_send_err == 0 {
+                                    rtc_dbg!("send {} -> {}: {e}", t.source, t.destination);
+                                }
+                                self.n_send_err += 1;
+                            },
+                        }
+                    } else {
+                        self.n_send_err += 1;
                     }
                 },
                 Ok(Output::Event(e)) => self.event(e),
                 Err(e) => {
+                    rtc_dbg!("poll_output error: {e:?} (alive {})", self.rtc.is_alive());
                     warn!("webrtc: {e:?}");
                     return Instant::now() + Duration::from_millis(50);
                 },
@@ -715,12 +789,14 @@ impl Peer {
                     S::Completed => IceConnectionState::Completed,
                     S::Disconnected => IceConnectionState::Disconnected,
                 };
+                rtc_dbg!("ice state {s:?}");
                 self.ice_connected = matches!(s, S::Connected | S::Completed);
                 self.disconnected_at = (s == S::Disconnected).then(Instant::now);
                 self.signaller.update_ice_connection_state(ice);
                 self.update_pc_state();
             },
             Event::Connected => {
+                rtc_dbg!("dtls connected");
                 self.dtls_connected = true;
                 self.update_pc_state();
             },
@@ -974,10 +1050,15 @@ impl Peer {
                         contents,
                     },
                 );
+                self.n_in += 1;
                 if self.rtc.accepts(&input) {
+                    self.n_accepted += 1;
                     if let Err(e) = self.rtc.handle_input(input) {
+                        rtc_dbg!("input from {source}: {e:?}");
                         debug!("webrtc: input: {e:?}");
                     }
+                } else if self.n_in - self.n_accepted <= 3 {
+                    rtc_dbg!("not accepted: {} bytes from {source} to {destination}", data.len());
                 }
             },
             Msg::Create(ty, cb) => {
@@ -1135,6 +1216,7 @@ impl Peer {
         }
         match (which, desc.type_) {
             (DescriptionType::Local, SdpType::Offer) => {
+                rtc_dbg!("local offer: {}", sdp_ice_lines(&desc.sdp));
                 // Our own offer (from createOffer): its mids are now the transceivers'.
                 if self.pending.is_none() {
                     return Err("InvalidModificationError: no offer was created".into());
@@ -1160,6 +1242,7 @@ impl Peer {
                 Ok(())
             },
             (DescriptionType::Remote, SdpType::Answer) => {
+                rtc_dbg!("remote answer: {}", sdp_ice_lines(&desc.sdp));
                 let Some((pending, added)) = self.pending.take() else {
                     return Err("InvalidStateError: no local offer".into());
                 };
@@ -1167,6 +1250,7 @@ impl Peer {
                     .map_err(|e| format!("OperationError: {e:?}"))?;
                 let r = self.rtc.sdp_api().accept_answer(pending, answer);
                 if let Err(e) = r {
+                    rtc_dbg!("accept_answer: {e:?}");
                     self.drain();
                     return Err(format!("OperationError: {e:?}"));
                 }
@@ -1185,6 +1269,7 @@ impl Peer {
                 Ok(())
             },
             (DescriptionType::Remote, SdpType::Offer) => {
+                rtc_dbg!("remote offer: {}", sdp_ice_lines(&desc.sdp));
                 let offer = SdpOffer::from_sdp_string(&desc.sdp)
                     .map_err(|e| format!("OperationError: {e:?}"))?;
                 // A remote offer rolls back an unanswered local one.
