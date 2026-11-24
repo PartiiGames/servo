@@ -576,12 +576,22 @@ fn bind_udp(ip: IpAddr) -> Option<UdpSocket> {
     });
     match range {
         // Every pinned port taken (another job sharing the block): an ephemeral one rather than none.
-        Some((lo, hi)) => (lo..=hi)
-            .find_map(|p| UdpSocket::bind((ip, p)).ok())
-            .or_else(|| {
-                rtc_dbg!("PARTII_WEBRTC_PORTS {lo}-{hi} all taken: an ephemeral port");
-                UdpSocket::bind((ip, 0)).ok()
-            }),
+        // Start one past the last port used, so a new connection (a rejoin) doesn't take the 5-tuple
+        // its predecessor just had (an SFU may still route that to the old session), as browsers'
+        // random ports don't either.
+        Some((lo, hi)) if lo <= hi => {
+            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = u32::from(hi - lo) + 1;
+            let start = NEXT.fetch_add(1, Ordering::Relaxed) % n;
+            (0..n)
+                .map(|k| lo + ((start + k) % n) as u16)
+                .find_map(|p| UdpSocket::bind((ip, p)).ok())
+                .or_else(|| {
+                    rtc_dbg!("PARTII_WEBRTC_PORTS {lo}-{hi} all taken: an ephemeral port");
+                    UdpSocket::bind((ip, 0)).ok()
+                })
+        },
+        Some(_) => UdpSocket::bind((ip, 0)).ok(),
         None => UdpSocket::bind((ip, 0)).ok(),
     }
 }
