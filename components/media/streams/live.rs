@@ -274,8 +274,12 @@ pub fn track_info(id: &MediaStreamId) -> Option<TrackInfo> {
 
 /// Tell `f` about this track's mute, unmute and end (the source's, or its own stop). Called on the
 /// producer's thread: forward to the script thread. One watcher per track; a new one replaces it.
-/// Audio tracks only for now (live_video has no watcher yet).
+/// Video ids go to live_video::watch_video_track. Audio: `stop_track` itself fires nothing
+/// (the spec's track.stop() fires no `ended`); the source's end fires `Ended` on every track.
 pub fn watch_track(id: &MediaStreamId, f: Box<dyn Fn(TrackEvent) + Send + Sync>) {
+    if live_video::is_video_track(id) {
+        return live_video::watch_video_track(id, f);
+    }
     let Some(t) = track(id) else { return };
     let mut w = t.source.watchers.lock().unwrap();
     w.retain(|(x, _)| x != id);
