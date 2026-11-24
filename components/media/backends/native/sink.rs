@@ -18,6 +18,8 @@ use servo_media_streams::MediaSocket;
 
 use crate::output::{OutputSource, add_stereo, output};
 use crate::queue::FrameQueue;
+use crate::streams::{LiveSocket, push_block};
+use servo_media_streams::live::AudioSource;
 
 /// Minimum FIFO level (context-rate frames) before the render thread may block.
 pub(crate) const MIN_TARGET_FRAMES: usize = 1024;
@@ -85,9 +87,9 @@ impl OutputSource for SinkShared {
 
 pub struct NativeAudioSink {
     shared: Arc<SinkShared>,
-    /// A MediaStreamDestinationNode sink: no output, data is dropped (media streams are
-    /// unsupported, like the dummy backend).
+    /// A MediaStreamDestinationNode sink: no device output; blocks go to its live source.
     stream_only: AtomicBool,
+    stream: Mutex<Option<(AudioSource, Vec<f32>)>>,
 }
 
 impl NativeAudioSink {
@@ -105,6 +107,7 @@ impl NativeAudioSink {
                 underrun_frames: AtomicU64::new(0),
             }),
             stream_only: AtomicBool::new(false),
+            stream: Mutex::new(None),
         }
     }
 }
@@ -132,10 +135,13 @@ impl AudioSink for NativeAudioSink {
         &self,
         _channels: u8,
         sample_rate: f32,
-        _socket: Box<dyn MediaSocket>,
+        socket: Box<dyn MediaSocket>,
     ) -> Result<(), AudioSinkError> {
         *self.shared.sample_rate.lock().unwrap() = sample_rate;
         self.stream_only.store(true, Ordering::Relaxed);
+        if let Some(s) = socket.as_any().downcast_ref::<LiveSocket>() {
+            *self.stream.lock().unwrap() = Some((s.0.clone(), Vec::new()));
+        }
         Ok(())
     }
 
@@ -167,6 +173,13 @@ impl AudioSink for NativeAudioSink {
 
     fn push_data(&self, chunk: Chunk) -> Result<(), AudioSinkError> {
         if self.stream_only.load(Ordering::Relaxed) {
+            if let Some((src, scratch)) = self.stream.lock().unwrap().as_mut() {
+                let rate = *self.shared.sample_rate.lock().unwrap();
+                match chunk.blocks.first() {
+                    Some(block) => push_block(src, block, rate, scratch),
+                    None => push_block(src, &Default::default(), rate, scratch),
+                }
+            }
             return Ok(());
         }
         let n = servo_media_audio::block::FRAMES_PER_BLOCK_USIZE;

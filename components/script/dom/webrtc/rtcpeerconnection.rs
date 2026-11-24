@@ -15,10 +15,15 @@ use script_bindings::reflector::reflect_weak_referenceable_dom_object_with_proto
 use servo_media::ServoMedia;
 use servo_media::streams::MediaStreamType;
 use servo_media::streams::registry::MediaStreamId;
+use js::jsval::{ObjectValue, UndefinedValue};
+use js::rust::wrappers2::{JS_ParseJSON, MapSet, NewMapObject};
+use js::conversions::ToJSValConvertible;
+use servo_media::streams::live::{self, AudioFormat};
 use servo_media::webrtc::{
-    BundlePolicy, DataChannelEvent, DataChannelId, DataChannelState, GatheringState, IceCandidate,
-    IceConnectionState, SdpType, SessionDescription, SignalingState, WebRtcController,
-    WebRtcSignaller,
+    BundlePolicy, DataChannelEvent, DataChannelId, DataChannelState, DescriptionType,
+    GatheringState, IceCandidate, IceConnectionState, PeerConnectionState, RtpDirection,
+    RtpStats, SdpType, SessionDescription, SignalingState, TransceiverId, TransceiverState,
+    WebRtcController, WebRtcSignaller,
 };
 
 use crate::conversions::Convert;
@@ -26,9 +31,11 @@ use crate::dom::bindings::codegen::Bindings::RTCDataChannelBinding::RTCDataChann
 use crate::dom::bindings::codegen::Bindings::RTCIceCandidateBinding::RTCIceCandidateInit;
 use crate::dom::bindings::codegen::Bindings::RTCPeerConnectionBinding::{
     RTCAnswerOptions, RTCBundlePolicy, RTCConfiguration, RTCIceConnectionState,
-    RTCIceGatheringState, RTCOfferOptions, RTCPeerConnectionMethods, RTCRtpTransceiverInit,
-    RTCSignalingState,
+    RTCIceGatheringState, RTCOfferOptions, RTCPeerConnectionMethods, RTCPeerConnectionState,
+    RTCRtpTransceiverInit, RTCSignalingState,
 };
+use crate::dom::bindings::codegen::Bindings::MediaStreamTrackBinding::MediaStreamTrackMethods;
+use crate::dom::bindings::codegen::Bindings::RTCRtpTransceiverBinding::RTCRtpTransceiverDirection;
 use crate::dom::bindings::codegen::Bindings::RTCSessionDescriptionBinding::{
     RTCSdpType, RTCSessionDescriptionInit,
 };
@@ -47,7 +54,9 @@ use crate::dom::rtcdatachannel::RTCDataChannel;
 use crate::dom::rtcdatachannelevent::RTCDataChannelEvent;
 use crate::dom::rtcicecandidate::RTCIceCandidate;
 use crate::dom::rtcpeerconnectioniceevent::RTCPeerConnectionIceEvent;
-use crate::dom::rtcrtptransceiver::RTCRtpTransceiver;
+use crate::dom::rtcrtpreceiver::RTCRtpReceiver;
+use crate::dom::rtcrtpsender::RTCRtpSender;
+use crate::dom::rtcrtptransceiver::{self, RTCRtpTransceiver};
 use crate::dom::rtcsessiondescription::RTCSessionDescription;
 use crate::dom::rtctrackevent::RTCTrackEvent;
 use crate::dom::window::Window;
@@ -72,6 +81,8 @@ pub(crate) struct RTCPeerConnection {
     gathering_state: Cell<RTCIceGatheringState>,
     ice_connection_state: Cell<RTCIceConnectionState>,
     signaling_state: Cell<RTCSignalingState>,
+    connection_state: Cell<RTCPeerConnectionState>,
+    transceivers: DomRefCell<Vec<Dom<RTCRtpTransceiver>>>,
     #[ignore_malloc_size_of = "defined in servo-media"]
     data_channels: DomRefCell<FxHashMap<DataChannelId, Dom<RTCDataChannel>>>,
 }
@@ -155,6 +166,23 @@ impl WebRtcSignaller for RTCSignaller {
     fn close(&self) {
         // do nothing
     }
+
+    fn on_transceivers(&self, states: Vec<TransceiverState>) {
+        let this = self.trusted.clone();
+        self.task_source.queue(task!(on_transceivers: move |cx| {
+            let this = this.root();
+            this.on_transceivers(cx, states);
+        }));
+    }
+
+    fn update_connection_state(&self, state: PeerConnectionState) {
+        let this = self.trusted.clone();
+        self.task_source
+            .queue(task!(update_connection_state: move |cx| {
+                let this = this.root();
+                this.update_connection_state(cx, state);
+            }));
+    }
 }
 
 impl RTCPeerConnection {
@@ -171,6 +199,8 @@ impl RTCPeerConnection {
             gathering_state: Cell::new(RTCIceGatheringState::New),
             ice_connection_state: Cell::new(RTCIceConnectionState::New),
             signaling_state: Cell::new(RTCSignalingState::Stable),
+            connection_state: Cell::new(RTCPeerConnectionState::New),
+            transceivers: DomRefCell::new(vec![]),
             data_channels: DomRefCell::new(FxHashMap::default()),
         }
     }
@@ -265,16 +295,161 @@ impl RTCPeerConnection {
         if self.closed.get() {
             return;
         }
-        let track = MediaStreamTrack::new(cx, &self.global(), id, ty);
+        // Legacy backends (stream based): a receiver and transceiver just for the event.
+        let global = self.global();
+        let track = MediaStreamTrack::new(cx, &global, id, ty);
+        let receiver = RTCRtpReceiver::new(cx, &global, &track);
+        let sender = RTCRtpSender::new(cx, &global, None);
+        let transceiver = RTCRtpTransceiver::new(
+            cx,
+            &global,
+            self,
+            TransceiverId::new(),
+            RTCRtpTransceiverDirection::Recvonly,
+            &sender,
+            &receiver,
+        );
         let event = RTCTrackEvent::new(
             cx,
-            self.global().as_window(),
+            global.as_window(),
             atom!("track"),
             false,
             false,
             &track,
+            &receiver,
+            &transceiver,
         );
         event.upcast::<Event>().fire(cx, self.upcast());
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.get()
+    }
+
+    pub(crate) fn controller(&self) -> Option<WebRtcController> {
+        self.controller.borrow().clone()
+    }
+
+    /// The backend's transceivers after a negotiation step: mids, directions, the ones a remote
+    /// offer added, then `track` for each that starts receiving.
+    fn on_transceivers(&self, cx: &mut JSContext, states: Vec<TransceiverState>) {
+        if self.closed.get() {
+            return;
+        }
+        let global = self.global();
+        let mut fire = vec![];
+        for st in states {
+            let existing = self
+                .transceivers
+                .borrow()
+                .iter()
+                .find(|t| t.id() == st.id)
+                .map(|t| DomRoot::from_ref(&**t));
+            let t = match existing {
+                Some(t) => t,
+                None if st.added_by_remote => {
+                    let track =
+                        MediaStreamTrack::new(cx, &global, st.receiver_track, st.kind);
+                    let receiver = RTCRtpReceiver::new(cx, &global, &track);
+                    let sender = RTCRtpSender::new(cx, &global, None);
+                    let t = RTCRtpTransceiver::new(
+                        cx,
+                        &global,
+                        self,
+                        st.id,
+                        RTCRtpTransceiverDirection::Recvonly,
+                        &sender,
+                        &receiver,
+                    );
+                    self.transceivers.borrow_mut().push(Dom::from_ref(&*t));
+                    t
+                },
+                None => continue,
+            };
+            t.update(st.mid, st.direction, st.current_direction);
+            if st.fire_track {
+                fire.push(t);
+            }
+        }
+        for t in fire {
+            let receiver = t.receiver();
+            let track = receiver.Track();
+            let event = RTCTrackEvent::new(
+                cx,
+                global.as_window(),
+                atom!("track"),
+                false,
+                false,
+                &track,
+                &receiver,
+                &t,
+            );
+            event.upcast::<Event>().fire(cx, self.upcast());
+        }
+    }
+
+    /// <https://w3c.github.io/webrtc-pc/#rtcpeerconnectionstate-enum>
+    fn update_connection_state(&self, cx: &mut JSContext, state: PeerConnectionState) {
+        if self.closed.get() {
+            return;
+        }
+        let state = match state {
+            PeerConnectionState::New => RTCPeerConnectionState::New,
+            PeerConnectionState::Connecting => RTCPeerConnectionState::Connecting,
+            PeerConnectionState::Connected => RTCPeerConnectionState::Connected,
+            PeerConnectionState::Disconnected => RTCPeerConnectionState::Disconnected,
+            PeerConnectionState::Failed => RTCPeerConnectionState::Failed,
+            PeerConnectionState::Closed => RTCPeerConnectionState::Closed,
+        };
+        if state == self.connection_state.get() {
+            return;
+        }
+        self.connection_state.set(state);
+        let event = Event::new(
+            cx,
+            &self.global(),
+            atom!("connectionstatechange"),
+            EventBubbles::DoesNotBubble,
+            EventCancelable::NotCancelable,
+        );
+        event.upcast::<Event>().fire(cx, self.upcast());
+    }
+
+    /// `addTransceiver` and `addTrack`: the DOM objects at once, the backend told after.
+    fn add_transceiver(
+        &self,
+        cx: &mut JSContext,
+        kind: MediaStreamType,
+        track: Option<&MediaStreamTrack>,
+        direction: RTCRtpTransceiverDirection,
+    ) -> DomRoot<RTCRtpTransceiver> {
+        let global = self.global();
+        // The receiver's track exists from the start (muted until media arrives): a live
+        // source the backend fills with the decoded remote audio.
+        let (recv_id, recv_src) = live::create_audio_source(
+            AudioFormat {
+                sample_rate: 48_000,
+                channels: 1,
+            },
+            "remote audio",
+        );
+        let recv_track = MediaStreamTrack::new(cx, &global, recv_id, kind);
+        let receiver = RTCRtpReceiver::new(cx, &global, &recv_track);
+        let sender = RTCRtpSender::new(cx, &global, track);
+        let id = TransceiverId::new();
+        let t = RTCRtpTransceiver::new(cx, &global, self, id, direction, &sender, &receiver);
+        self.transceivers.borrow_mut().push(Dom::from_ref(&*t));
+        if let Some(c) = self.controller.borrow().as_ref() {
+            c.add_transceiver(
+                id,
+                kind,
+                rtcrtptransceiver::from_dom(direction),
+                track.map(|t| t.id()),
+                recv_src,
+                recv_id,
+            );
+        }
+        t
     }
 
     fn on_data_channel_event(
@@ -441,65 +616,142 @@ impl RTCPeerConnection {
         event.upcast::<Event>().fire(cx, self.upcast());
     }
 
-    fn create_offer(&self) {
-        let generation = self.offer_answer_generation.get();
+    /// createOffer / createAnswer: each call resolves with the backend's description, or
+    /// rejects with its error.
+    fn create_description(&self, ty: SdpType, p: &Promise) {
         let task_source = self
             .global()
             .task_manager()
             .networking_task_source()
             .to_sendable();
-        let this = Trusted::new(self);
+        let promise = TrustedPromise::from(p);
         self.controller
-            .borrow_mut()
+            .borrow()
             .as_ref()
             .unwrap()
-            .create_offer(Box::new(move |desc: SessionDescription| {
-                task_source.queue(task!(offer_created: move |cx| {
-                    let this = this.root();
-                    if this.offer_answer_generation.get() != generation {
-                        // the state has changed since we last created the offer,
-                        // create a fresh one
-                        this.create_offer();
-                    } else {
-                        let init: RTCSessionDescriptionInit = desc.convert();
-                        for promise in this.offer_promises.borrow().iter() {
-                            promise.resolve_native(cx, &init);
+            .create_description(
+                ty,
+                Box::new(move |r| {
+                    task_source.queue(task!(description_created: move |cx| {
+                        let promise = promise.root(cx);
+                        match r {
+                            Ok(desc) => {
+                                let init: RTCSessionDescriptionInit = desc.convert();
+                                promise.resolve_native(cx, &init);
+                            },
+                            Err(e) => promise.reject_error(cx, description_error(e)),
                         }
-                        this.offer_promises.safe_borrow_mut(cx.no_gc()).clear();
-                    }
-                }));
-            }));
+                    }));
+                }),
+            );
     }
 
-    fn create_answer(&self) {
-        let generation = self.offer_answer_generation.get();
+    /// setLocalDescription / setRemoteDescription.
+    fn set_description(&self, which: DescriptionType, desc: SessionDescription, p: &Promise) {
+        let this = Trusted::new(self);
+        let promise = TrustedPromise::from(p);
         let task_source = self
             .global()
             .task_manager()
             .networking_task_source()
             .to_sendable();
-        let this = Trusted::new(self);
         self.controller
-            .borrow_mut()
+            .borrow()
             .as_ref()
             .unwrap()
-            .create_answer(Box::new(move |desc: SessionDescription| {
-                task_source.queue(task!(answer_created: move |cx| {
-                    let this = this.root();
-                    if this.offer_answer_generation.get() != generation {
-                        // the state has changed since we last created the offer,
-                        // create a fresh one
-                        this.create_answer();
-                    } else {
-                        let init: RTCSessionDescriptionInit = desc.convert();
-                        for promise in this.answer_promises.borrow().iter() {
-                            promise.resolve_native(cx, &init);
+            .set_description(
+                which,
+                desc.clone(),
+                Box::new(move |r| {
+                    task_source.queue(task!(description_set: move |cx| {
+                        let this = this.root();
+                        let promise = promise.root(cx);
+                        if let Err(e) = r {
+                            promise.reject_error(cx, description_error(e));
+                            return;
                         }
-                        this.answer_promises.safe_borrow_mut(cx.no_gc()).clear();
-                    }
-                }));
-            }));
+                        let desc = desc.convert();
+                        let desc = RTCSessionDescription::new(
+                            cx,
+                            this.global().as_window(),
+                            None,
+                            desc.type_,
+                            desc.sdp,
+                        );
+                        match which {
+                            DescriptionType::Local => this.local_description.set(Some(&desc)),
+                            DescriptionType::Remote => this.remote_description.set(Some(&desc)),
+                        }
+                        promise.resolve_native(cx, &());
+                    }));
+                }),
+            );
     }
+}
+
+/// The backend's error text starts with the DOMException name when it has one.
+fn description_error(e: String) -> Error {
+    if e.starts_with("InvalidStateError") {
+        Error::InvalidState(Some(e))
+    } else if e.starts_with("InvalidModificationError") {
+        Error::InvalidModification(Some(e))
+    } else {
+        Error::Operation(Some(e))
+    }
+}
+
+/// getStats(): a Map of stats id to a plain stats object, as RTCStatsReport is.
+#[expect(unsafe_code)]
+fn resolve_stats(cx: &mut JSContext, promise: &Promise, stats: Vec<RtpStats>) {
+    let mut realm = enter_auto_realm(cx, promise);
+    let cx = &mut realm.current_realm();
+    rooted!(&in(cx) let map = unsafe { NewMapObject(cx) });
+    if map.is_null() {
+        promise.reject_error(cx, Error::Operation(None));
+        return;
+    }
+    for st in stats {
+        let json = stats_json(&st);
+        let json: Vec<u16> = json.encode_utf16().collect();
+        rooted!(&in(cx) let mut value = UndefinedValue());
+        // SAFETY: a well-formed JSON object made just above.
+        if !unsafe { JS_ParseJSON(cx, json.as_ptr(), json.len() as u32, value.handle_mut()) } {
+            continue;
+        }
+        rooted!(&in(cx) let mut key = UndefinedValue());
+        st.id.to_jsval(cx, key.handle_mut());
+        // SAFETY: the map and both values are rooted.
+        unsafe { MapSet(cx, map.handle(), key.handle(), value.handle()) };
+    }
+    rooted!(&in(cx) let value = ObjectValue(map.get()));
+    promise.resolve(cx, value.handle());
+}
+
+fn stats_json(st: &RtpStats) -> String {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut v = format!(
+        "{{\"id\":\"{}\",\"type\":\"{}\",\"kind\":\"{}\",\"timestamp\":{},\"ssrc\":{}",
+        esc(&st.id),
+        st.type_,
+        st.kind,
+        st.timestamp,
+        st.ssrc
+    );
+    if let Some(mid) = &st.mid {
+        v += &format!(",\"mid\":\"{}\"", esc(mid));
+    }
+    if st.type_ == "inbound-rtp" {
+        v += &format!(
+            ",\"bytesReceived\":{},\"packetsReceived\":{},\"packetsLost\":{},\"jitter\":{},\"audioLevel\":{}",
+            st.bytes, st.packets, st.packets_lost, st.jitter, st.audio_level
+        );
+    } else {
+        v += &format!(",\"bytesSent\":{},\"packetsSent\":{}", st.bytes, st.packets);
+        if let Some(rtt) = st.round_trip_time {
+            v += &format!(",\"roundTripTime\":{rtt}");
+        }
+    }
+    v + "}"
 }
 
 impl RTCPeerConnectionMethods<crate::DomTypeHolder> for RTCPeerConnection {

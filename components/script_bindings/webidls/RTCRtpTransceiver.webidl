@@ -4,15 +4,14 @@
 
 // https://w3c.github.io/webrtc-pc/#rtcrtptransceiver-interface
 
-[Exposed=Window, Pref="dom_webrtc_transceiver_enabled"]
+[Exposed=Window, Pref="dom_webrtc_enabled"]
 interface RTCRtpTransceiver {
-  //readonly attribute DOMString? mid;
+  readonly attribute DOMString? mid;
   [SameObject] readonly attribute RTCRtpSender sender;
-  //[SameObject] readonly attribute RTCRtpReceiver receiver;
-  attribute RTCRtpTransceiverDirection direction;
-  //readonly attribute RTCRtpTransceiverDirection? currentDirection;
-  //void stop();
-  //void setCodecPreferences(sequence<RTCRtpCodecCapability> codecs);
+  [SameObject] readonly attribute RTCRtpReceiver receiver;
+  [SetterThrows] attribute RTCRtpTransceiverDirection direction;
+  readonly attribute RTCRtpTransceiverDirection? currentDirection;
+  undefined stop();
 };
 
 enum RTCRtpTransceiverDirection {

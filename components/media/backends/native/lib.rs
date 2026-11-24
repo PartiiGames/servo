@@ -9,7 +9,10 @@
 //! - `<audio>`: [`player::NativePlayer`], audio only.
 //! - With no sound device (or `PARTII_AUDIO=null`) the output is a real-time null sink, so render
 //!   threads and players still run.
-//! - Video, capture, media streams and WebRTC behave like the dummy backend.
+//! - Live audio (Partii, stream voice): MediaStreamAudioSourceNode / DestinationNode through the
+//!   live registry (streams.rs), and RTCPeerConnection on str0m with Opus (webrtc.rs, the
+//!   `webrtc` feature). The microphone (and PARTII_FAKE_MIC) is the capture stream's.
+//! - Video capture and other media streams behave like the dummy backend.
 
 mod codecs;
 pub mod decoder;
@@ -19,6 +22,9 @@ pub mod player;
 pub mod queue;
 pub mod resample;
 pub mod sink;
+pub mod streams;
+#[cfg(feature = "webrtc")]
+pub mod webrtc;
 #[cfg(feature = "video")]
 mod webm;
 
@@ -261,7 +267,13 @@ impl Backend for NativeBackend {
         &self,
         ty: MediaStreamType,
     ) -> (Box<dyn MediaSocket>, MediaStreamId) {
-        DummyBackend.create_stream_and_socket(ty)
+        match ty {
+            // MediaStreamAudioDestinationNode: a live source the node renders into.
+            MediaStreamType::Audio => {
+                streams::destination_stream(self.preferred_sample_rate().round() as u32)
+            },
+            MediaStreamType::Video => DummyBackend.create_stream_and_socket(ty),
+        }
     }
 
     fn create_audioinput_stream(&self, set: MediaTrackConstraintSet) -> Option<MediaStreamId> {
@@ -332,13 +344,30 @@ impl AudioBackend for NativeBackend {
     }
 
     fn make_streamreader(
-        _id: MediaStreamId,
-        _sample_rate: f32,
+        id: MediaStreamId,
+        sample_rate: f32,
     ) -> Result<Box<dyn AudioStreamReader + Send>, AudioSinkError> {
-        Ok(Box::new(DummyStreamReader))
+        // A live track reads its source; anything else (a dummy stream) stays silent.
+        Ok(match streams::LiveStreamReader::new(id, sample_rate) {
+            Some(r) => Box::new(r),
+            None => Box::new(DummyStreamReader),
+        })
     }
 }
 
+#[cfg(feature = "webrtc")]
+impl WebRtcBackend for NativeBackend {
+    type Controller = webrtc::Str0mController;
+
+    fn construct_webrtc_controller(
+        signaller: Box<dyn WebRtcSignaller>,
+        thread: WebRtcController,
+    ) -> Self::Controller {
+        webrtc::Str0mController::new(signaller, thread)
+    }
+}
+
+#[cfg(not(feature = "webrtc"))]
 impl WebRtcBackend for NativeBackend {
     type Controller = DummyWebRtcController;
 

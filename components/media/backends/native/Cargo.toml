@@ -36,6 +36,10 @@ partii-libvpx-sys = { path = "libvpx-sys", optional = true }
 # which the build nodes don't have).
 rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
 libc = { workspace = true, optional = true }
+# RTCPeerConnection (stream voice, webrtc.rs): str0m, sans-IO WebRTC (MIT OR Apache-2.0), with its
+# aws-lc-rs crypto (DTLS through dimpl), and libopus (the same bundled build as opus above).
+str0m = { version = "0.25.0", default-features = false, features = ["aws-lc-rs"], optional = true }
+opusic-sys = { version = "0.7.7", optional = true }
 
 # cpal's own ALSA binding: to keep alsa-lib's probe errors off stderr when there's no sound card.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
@@ -54,6 +58,8 @@ video = ["dep:matroska-demuxer"]
 vpx = ["video", "dep:partii-libvpx-sys"]
 # AV1 through rav1d (pure Rust).
 av1 = ["video", "dep:rav1d", "dep:libc"]
+# RTCPeerConnection: str0m + Opus (webrtc.rs).
+webrtc = ["dep:str0m", "dep:opusic-sys"]
 
 [lints]
 workspace = true
