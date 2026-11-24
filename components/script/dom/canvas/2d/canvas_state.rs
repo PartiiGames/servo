@@ -2289,6 +2289,7 @@ impl CanvasState {
         };
 
         // Step 7.
+        let prof = servo_base::partii_prof::start();
         let snapshot =
             imagedata.get_snapshot_rect(no_gc, Rect::new(src_rect.origin, dst_rect.size));
         // Flushing is not required for correctness, but optimization heuristics for heavy command.
@@ -2296,6 +2297,7 @@ impl CanvasState {
             dst_rect,
             snapshot.to_shared(),
         ));
+        servo_base::partii_prof::stop(servo_base::partii_prof::Counter::PutScript, prof);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage>

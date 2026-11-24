@@ -3356,7 +3356,13 @@ impl Document {
         // the canvases below.
         for (image_key, canvas_epoch) in placeholder_frames {
             phases.insert(ReflowPhasesRun::UpdatedImageData);
-            self.waiting_on_canvas_image_updates.set(true);
+            // Partii (perf, experiment): PARTII_PLACEHOLDER_NOBLOCK=1 lets the page keep running
+            // its rendering updates (rAF) while the painter waits for a worker's image; the
+            // painter still holds the frame until that image arrives.
+            if !partii_placeholder_noblock() {
+                self.waiting_on_canvas_image_updates.set(true);
+                partii_doc_wait_start();
+            }
             self.window().paint_api().delay_new_frame_for_canvas(
                 self.webview_id(),
                 self.window().pipeline_id(),
@@ -3371,6 +3377,7 @@ impl Document {
         if !image_keys.is_empty() {
             phases.insert(ReflowPhasesRun::UpdatedImageData);
             self.waiting_on_canvas_image_updates.set(true);
+            partii_doc_wait_start();
             self.window().paint_api().delay_new_frame_for_canvas(
                 self.webview_id(),
                 self.window().pipeline_id(),
@@ -3393,6 +3400,12 @@ impl Document {
 
     pub(crate) fn handle_no_longer_waiting_on_asynchronous_image_updates(&self) {
         self.waiting_on_canvas_image_updates.set(false);
+        if let Some(since) = PARTII_DOC_WAIT.with(|c| c.take()) {
+            servo_base::partii_prof::record(
+                servo_base::partii_prof::Counter::DocWait,
+                since.elapsed().as_nanos() as u64,
+            );
+        }
     }
 
     pub(crate) fn waiting_on_canvas_image_updates(&self) -> bool {
@@ -7770,4 +7783,26 @@ impl Iterator for SameOriginDescendantNavigablesIterator {
         }
         None
     }
+}
+
+thread_local! {
+    /// Partii (perf, PARTII_PROF): when this script thread's document started waiting on canvas
+    /// image updates.
+    static PARTII_DOC_WAIT: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn partii_doc_wait_start() {
+    if servo_base::partii_prof::enabled() {
+        PARTII_DOC_WAIT.with(|c| {
+            if c.get().is_none() {
+                c.set(Some(std::time::Instant::now()));
+            }
+        });
+    }
+}
+
+fn partii_placeholder_noblock() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_PLACEHOLDER_NOBLOCK").as_deref() == Ok("1"))
 }

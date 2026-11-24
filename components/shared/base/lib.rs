@@ -14,6 +14,7 @@ pub mod frame_trace;
 pub mod generic_channel;
 #[macro_use]
 pub mod id;
+pub mod partii_prof;
 pub mod print_tree;
 mod rope;
 pub mod text;

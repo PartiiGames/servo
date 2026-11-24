@@ -307,11 +307,15 @@ impl CanvasPaintThread {
                 }
             },
             CanvasCommand::PutImageData(rect, snapshot) => {
+                let prof = servo_base::partii_prof::start();
                 self.canvas(canvas_id)
                     .put_image_data(snapshot.to_owned(), rect);
+                servo_base::partii_prof::stop(servo_base::partii_prof::Counter::PutCanvas, prof);
             },
             CanvasCommand::UpdateImage(canvas_epoch) => {
+                let prof = servo_base::partii_prof::start();
                 self.canvas(canvas_id).update_image_rendering(canvas_epoch);
+                servo_base::partii_prof::stop(servo_base::partii_prof::Counter::UpdateCanvas, prof);
             },
             CanvasCommand::PopClips(clips) => self.canvas(canvas_id).pop_clips(clips),
             CanvasCommand::ProcessBatchMessages(messages) => {

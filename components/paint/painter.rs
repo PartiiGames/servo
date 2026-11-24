@@ -1256,10 +1256,17 @@ impl Painter {
                     self.animation_image_cache.remove(&key);
                 },
                 ImageUpdate::UpdateImage(key, desc, data, epoch) => {
+                    let prof = servo_base::partii_prof::start();
                     if let Some(epoch) = epoch {
                         self.frame_delayer.update_image(key, epoch);
                     }
-                    txn.update_image(key, desc, data.into(), &DirtyRect::All)
+                    txn.update_image(key, desc, data.into(), &DirtyRect::All);
+                    if epoch.is_some() {
+                        servo_base::partii_prof::stop(
+                            servo_base::partii_prof::Counter::UpdatePaint,
+                            prof,
+                        );
+                    }
                 },
                 ImageUpdate::UpdateImageForAnimation(image_key, desc) => {
                     let Some(image) = self.animation_image_cache.get(&image_key) else {
@@ -1702,6 +1709,8 @@ pub(crate) struct FrameDelayer {
     /// (its worker closed) before the request arrives; such a wait would never end.
     /// Image keys are never reused, so a deleted key can be skipped for good.
     deleted_canvas_images: FxHashSet<ImageKey>,
+    /// Partii (perf, PARTII_PROF): when each pending canvas image started being waited for.
+    pending_since: FxHashMap<ImageKey, std::time::Instant>,
 }
 
 impl FrameDelayer {
@@ -1710,6 +1719,7 @@ impl FrameDelayer {
             self.deleted_canvas_images.insert(image_key);
         }
         self.pending_canvas_images.remove(&image_key);
+        self.pending_since.remove(&image_key);
     }
 
     pub(crate) fn update_image(&mut self, image_key: ImageKey, epoch: Epoch) {
@@ -1719,6 +1729,12 @@ impl FrameDelayer {
         };
         if *entry.get() <= epoch {
             entry.remove();
+            if let Some(since) = self.pending_since.remove(&image_key) {
+                servo_base::partii_prof::record(
+                    servo_base::partii_prof::Counter::DelayWait,
+                    since.elapsed().as_nanos() as u64,
+                );
+            }
         }
     }
 
@@ -1742,6 +1758,11 @@ impl FrameDelayer {
                 continue;
             }
             self.pending_canvas_images.insert(image_key, canvas_epoch);
+            if servo_base::partii_prof::enabled() {
+                self.pending_since
+                    .entry(image_key)
+                    .or_insert_with(std::time::Instant::now);
+            }
         }
         self.waiting_pipelines.insert(pipeline_id);
     }

@@ -452,6 +452,12 @@ impl OffscreenCanvas {
     /// Sends the bitmap to the renderer as the placeholder's image, then tells the
     /// placeholder (on its own thread) to show that frame at its next rendering update.
     fn commit_to_placeholder(&self, cx: &mut js::context::JSContext) {
+        let prof = servo_base::partii_prof::start();
+        self.commit_to_placeholder_inner(cx);
+        servo_base::partii_prof::stop(servo_base::partii_prof::Counter::Commit, prof);
+    }
+
+    fn commit_to_placeholder_inner(&self, cx: &mut js::context::JSContext) {
         self.commit_queued.set(false);
         let epoch = Epoch(self.commit_epoch.get().wrapping_add(1));
         let committed = match self.context.borrow().as_ref() {
@@ -491,9 +497,14 @@ impl OffscreenCanvas {
             .then(|| Size2D::new(self.width.get(), self.height.get()));
         if let Some(remote) = self.remote_placeholder.borrow().as_ref() {
             let canvas = remote.canvas.clone();
+            let queued = servo_base::partii_prof::start();
             remote
                 .task_source
                 .queue(task!(placeholder_frame_committed: move |cx| {
+                    servo_base::partii_prof::stop(
+                        servo_base::partii_prof::Counter::CommitToPage,
+                        queued,
+                    );
                     canvas.root().placeholder_frame_committed(cx, epoch, size);
                 }));
         }
