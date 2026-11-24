@@ -136,6 +136,13 @@ fn open_device(device_id: Option<&str>) -> Option<MediaStreamId> {
         f.sample_rate as usize * f.channels.max(1) as usize
     }
 
+    // macOS: the OS's microphone prompt first (waits for the player's answer, as the camera's does); a "no" or a
+    // restriction is NotReadableError here, as before.
+    #[cfg(target_os = "macos")]
+    if !super::avf::mic_authorized() {
+        warn!("microphone: the OS denied access (System Settings > Privacy & Security > Microphone)");
+        return None;
+    }
     // Opened on its own thread: a cpal stream isn't Send on every host, and it lives until unused.
     let (tx, rx) = mpsc::channel::<Option<MediaStreamId>>();
     let wanted = device_id.map(str::to_owned);
