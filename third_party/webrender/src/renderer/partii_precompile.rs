@@ -20,6 +20,13 @@
 //! `PARTII_WR_PRECOMPILE=0` turns it off; `PARTII_WR_PRECOMPILE_FRAME_MS` is the per-frame
 //! budget of the in-renderer replay (default 4; one state at least per frame).
 //!
+//! Deferred (app stream, 2026-11-24): on a cold Mesa cache the compile ran from WebRender's start through the
+//! app's first contentful frame (8.4 s, 146 of 225 states, on a 2-CPU farm job) and slowed that frame (the
+//! launcher's first paint 2514 vs 1824 ms without it). Now the thread waits until the first frame plus
+//! `PARTII_WR_PRECOMPILE_DELAY_MS` (default 2000), or until the embedder says the app is usable
+//! (`Renderer::partii_precompile_go`), whichever comes first, and compiles at idle priority (Linux
+//! SCHED_IDLE, else nice 19). `PARTII_WR_PRECOMPILE_DEFER=0`: the old start (at once, normal priority).
+//!
 //! At shutdown a thread still compiling is stopped and waited for (`PartiiPrecompile::stop`, from
 //! `Renderer::deinit` and on drop): it checks a flag between draws, releases its programs and drops
 //! its context. Left running, it was still inside Mesa when the app tore GL down and exited, and
@@ -34,7 +41,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Makes and makes current a GL context on the calling (background) thread for the precompile:
@@ -53,6 +60,68 @@ const STOP_WAIT: Duration = Duration::from_secs(3);
 
 pub(crate) fn enabled() -> bool {
     std::env::var("PARTII_WR_PRECOMPILE").as_deref() != Ok("0")
+}
+
+fn deferred() -> bool {
+    std::env::var("PARTII_WR_PRECOMPILE_DEFER").as_deref() != Ok("0")
+}
+
+/// When the background compile may start: the first frame's time (plus the delay), or the embedder's go.
+#[derive(Default)]
+struct Gate {
+    first_frame: Option<Instant>,
+    go: bool,
+}
+
+type SharedGate = Arc<(Mutex<Gate>, Condvar)>;
+
+/// The thread's wait: until `go`, or the first frame plus `delay`, or the stop. False: stopped.
+fn wait_gate(gate: &SharedGate, delay: Duration, stop: &AtomicBool) -> bool {
+    let (lock, cv) = &**gate;
+    let mut g = lock.lock().unwrap();
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return false;
+        }
+        if g.go || g.first_frame.is_some_and(|t| t.elapsed() >= delay) {
+            return true;
+        }
+        // Short waits: the stop flag isn't signalled through the condvar.
+        let step = match g.first_frame {
+            Some(t) => delay.saturating_sub(t.elapsed()).min(Duration::from_millis(50)),
+            None => Duration::from_millis(50),
+        };
+        g = cv.wait_timeout(g, step.max(Duration::from_millis(1))).unwrap().0;
+    }
+}
+
+/// The calling thread at idle priority: it runs on CPU no other thread of the machine wants.
+#[cfg(target_os = "linux")]
+fn idle_priority() -> &'static str {
+    #[repr(C)]
+    struct SchedParam {
+        sched_priority: i32,
+    }
+    extern "C" {
+        fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
+        fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+    }
+    const SCHED_IDLE: i32 = 5;
+    const PRIO_PROCESS: i32 = 0;
+    let p = SchedParam { sched_priority: 0 };
+    // pid 0 / who 0: the calling thread (Linux schedules and nices threads one by one).
+    if unsafe { sched_setscheduler(0, SCHED_IDLE, &p) } == 0 {
+        "idle"
+    } else if unsafe { setpriority(PRIO_PROCESS, 0, 19) } == 0 {
+        "nice 19"
+    } else {
+        "normal"
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn idle_priority() -> &'static str {
+    "normal"
 }
 
 /// What the background device is built with: the renderer's options that change shader sources or
@@ -77,6 +146,7 @@ pub(crate) struct PartiiPrecompile {
     pending: VecDeque<WarmEntry>,
     scratch: Option<WarmScratch>,
     budget: Duration,
+    gate: SharedGate,
     total: usize,
     replayed: usize,
     frames: usize,
@@ -99,9 +169,30 @@ impl PartiiPrecompile {
         let thread_state = state.clone();
         let thread_stop = stop.clone();
         let thread_entries = entries.clone();
+        let gate: SharedGate = Arc::default();
+        let thread_gate = gate.clone();
+        let defer = deferred();
+        let delay = Duration::from_millis(
+            std::env::var("PARTII_WR_PRECOMPILE_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2000),
+        );
         let spawned = std::thread::Builder::new()
             .name("WRPrecompile".to_owned())
             .spawn(move || {
+                let t0 = Instant::now();
+                if defer {
+                    if !wait_gate(&thread_gate, delay, &thread_stop) {
+                        thread_state.store(STOPPED, Ordering::Release);
+                        return;
+                    }
+                    let prio = idle_priority();
+                    eprintln!(
+                        "partii-wr-precompile: starting {:.0} ms after WebRender ({prio} priority)",
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
                 let ok = compile(thread_entries, make_context, config, &thread_stop);
                 let end = if thread_stop.load(Ordering::Acquire) {
                     STOPPED
@@ -127,6 +218,7 @@ impl PartiiPrecompile {
             pending: entries.into(),
             scratch: Some(WarmScratch::default()),
             budget: Duration::from_millis(budget_ms),
+            gate,
             replayed: 0,
             frames: 0,
             max_frame_ms: 0.0,
@@ -142,6 +234,15 @@ impl PartiiPrecompile {
         shaders: &mut Shaders,
         vaos: &vertex::RendererVAOs,
     ) -> bool {
+        {
+            // This frame's start: the deferred compile counts its delay from the first one.
+            let (lock, cv) = &*self.gate;
+            let mut g = lock.lock().unwrap();
+            if g.first_frame.is_none() {
+                g.first_frame = Some(Instant::now());
+                cv.notify_all();
+            }
+        }
         match self.state.load(Ordering::Acquire) {
             RUNNING => return true,
             STOPPED => return false,
@@ -187,6 +288,13 @@ impl PartiiPrecompile {
 }
 
 impl PartiiPrecompile {
+    /// The embedder's "the app is usable": a deferred compile starts now instead of at its delay.
+    pub(crate) fn go(&self) {
+        let (lock, cv) = &*self.gate;
+        lock.lock().unwrap().go = true;
+        cv.notify_all();
+    }
+
     /// Shutdown: tells a thread still compiling to stop after its current draw and waits (at most
     /// `STOP_WAIT`) for it to release its programs and context, so it is out of GL before the
     /// renderer and the embedder tear GL down. Idempotent; a finished thread is just joined.

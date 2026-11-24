@@ -920,6 +920,14 @@ impl From<std::io::Error> for RendererError {
 }
 
 impl Renderer {
+    /// Partii (app stream): the app is usable; a deferred background precompile
+    /// (renderer/partii_precompile.rs) starts now rather than at its delay. A no-op without one.
+    pub fn partii_precompile_go(&self) {
+        if let Some(pre) = self.partii_precompile.as_ref() {
+            pre.go();
+        }
+    }
+
     pub fn device_size(&self) -> Option<DeviceIntSize> {
         self.device_size
     }
