@@ -177,26 +177,25 @@ pub fn can_play_type(media_type: &str) -> SupportsMediaType {
     });
     let container_ok = matches!(
         essence.as_str(),
-        "audio/ogg"
-            | "application/ogg"
-            | "audio/vorbis"
-            | "audio/mpeg"
-            | "audio/mp3"
-            | "audio/mpeg3"
-            | "audio/x-mpeg"
-            | "audio/wav"
-            | "audio/wave"
-            | "audio/x-wav"
-            | "audio/vnd.wave"
-            | "audio/flac"
-            | "audio/x-flac"
-            | "audio/mp4"
-            | "audio/x-m4a"
-            | "audio/m4a"
-            | "audio/webm"
-            | "audio/x-matroska"
-    ) || (video_containers()
-        && matches!(essence.as_str(), "video/webm" | "video/x-matroska"));
+        "audio/ogg" |
+            "application/ogg" |
+            "audio/vorbis" |
+            "audio/mpeg" |
+            "audio/mp3" |
+            "audio/mpeg3" |
+            "audio/x-mpeg" |
+            "audio/wav" |
+            "audio/wave" |
+            "audio/x-wav" |
+            "audio/vnd.wave" |
+            "audio/flac" |
+            "audio/x-flac" |
+            "audio/mp4" |
+            "audio/x-m4a" |
+            "audio/m4a" |
+            "audio/webm" |
+            "audio/x-matroska"
+    ) || (video_containers() && matches!(essence.as_str(), "video/webm" | "video/x-matroska"));
     if !container_ok {
         return SupportsMediaType::No;
     }
