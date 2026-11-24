@@ -215,7 +215,7 @@ impl HTMLCanvasElement {
                 }
             });
             if let Ok(callback) = callback {
-                context.read_pixels_to_callback(callback);
+                let _ = context.read_pixels_to_callback(callback);
             }
             return keep;
         }
@@ -783,12 +783,10 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
         // Step 3. If this canvas element's bitmap has pixels (i.e., neither its horizontal dimension
         // nor its vertical dimension is zero),
         // then set result to a copy of this canvas element's bitmap.
-        let result = if self.Width() == 0 || self.Height() == 0 {
-            None
-        } else {
-            self.get_image_data()
-        };
-
+        // Partii: the copy and the serialization happen off the script thread: a 2D canvas is read back
+        // on its canvas thread, the image is encoded on a short-lived thread, and only making the Blob and
+        // calling back run here (they were a sync readback and a JPEG/PNG encode on the script thread:
+        // tens of ms for a 640x360 frame, a stall in jam clips' mid-recording poster).
         let this = Trusted::new(self);
         let callback_id = self.callback_id.get().wrapping_add(1);
         self.callback_id.set(callback_id);
@@ -798,48 +796,71 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
             .insert(callback_id, callback.to_traced());
         let quality = Self::maybe_quality(quality);
         let image_type = EncodedImageType::from(&mime_type.str() as &str);
+        let task_source = self.global().task_manager().canvas_blob_task_source().to_sendable();
 
-        self.global()
-            .task_manager()
-            .canvas_blob_task_source()
-            .queue(task!(to_blob: move |cx| {
-                let this = this.root();
-                let Some(callback) = this.blob_callbacks.borrow_mut().remove(&callback_id) else {
-                    return error!("Expected blob callback, but found none!");
-                };
-                // Partii: the callback is off the traced map, and making the Blob below can run a
-                // GC slice: shade it for a GC already marking and root it for one that marks its
-                // roots later, or an incremental GC could free it first.
-                script_bindings::incremental_gc::barrier_traceable(&callback);
-                rooted!(&in(cx) let callback = callback);
-
-                let Some(mut snapshot) = result else {
-                    let _ = callback.Call__(cx, None, ExceptionHandling::Report);
-                    return;
-                };
-
+        let encode_and_answer = move |result: Option<Snapshot>| {
+            let work = move || {
                 // Step 4.1: If result is non-null, then set result to a serialization of
                 // result as a file with type and quality if given.
+                let encoded = result.and_then(|mut snapshot| {
+                    let mut encoded: Vec<u8> = vec![];
+                    snapshot
+                        .encode_for_mime_type(&image_type, quality, &mut encoded)
+                        .ok()
+                        .map(|_| (encoded, image_type.as_mime_type().to_owned()))
+                });
                 // Step 4.2: Queue an element task on the canvas blob serialization task
                 // source given the canvas element to run these steps:
-                let mut encoded: Vec<u8> = vec![];
-                let blob_impl;
-                let blob;
-                let result = match snapshot.encode_for_mime_type(&image_type, quality, &mut encoded) {
-                   Ok(..) => {
-                       // Step 4.2.1: If result is non-null, then set result to a new Blob
-                       // object, created in the relevant realm of this canvas element,
-                       // representing result. [FILEAPI]
-                       blob_impl = BlobImpl::new_from_bytes(encoded, image_type.as_mime_type().to_owned());
-                       blob = Blob::new(cx, &this.global(), blob_impl);
-                       Some(&*blob)
-                   }
-                   Err(..) => None,
-                };
+                task_source.queue(task!(to_blob: move |cx| {
+                    let this = this.root();
+                    let Some(callback) = this.blob_callbacks.borrow_mut().remove(&callback_id) else {
+                        return error!("Expected blob callback, but found none!");
+                    };
+                    // Partii: the callback is off the traced map, and making the Blob below can run a
+                    // GC slice: shade it for a GC already marking and root it for one that marks its
+                    // roots later, or an incremental GC could free it first.
+                    script_bindings::incremental_gc::barrier_traceable(&callback);
+                    rooted!(&in(cx) let callback = callback);
+                    // Step 4.2.1: If result is non-null, then set result to a new Blob
+                    // object, created in the relevant realm of this canvas element,
+                    // representing result. [FILEAPI]
+                    let blob = encoded.map(|(bytes, mime)| {
+                        Blob::new(cx, &this.global(), BlobImpl::new_from_bytes(bytes, mime))
+                    });
+                    // Step 4.2.2: Invoke callback with « result » and "report".
+                    let _ = callback.Call__(cx, blob.as_deref(), ExceptionHandling::Report);
+                }));
+            };
+            if std::thread::Builder::new().name("CanvasToBlob".into()).spawn(work).is_err() {
+                error!("toBlob: couldn't start the encoder thread");
+            }
+        };
 
-                // Step 4.2.2: Invoke callback with « result » and "report".
-                let _ = callback.Call__(cx, result, ExceptionHandling::Report);
-            }));
+        // Step 2. Let result be null.
+        // Step 3. If this canvas element's bitmap has pixels (i.e., neither its horizontal dimension
+        // nor its vertical dimension is zero),
+        // then set result to a copy of this canvas element's bitmap.
+        if self.Width() == 0 || self.Height() == 0 {
+            encode_and_answer(None);
+        } else if let Some(RenderingContext::Context2d(context)) = self.context_mode.borrow().as_ref() {
+            let mut answer = Some(encode_and_answer);
+            let callback = GenericCallback::new(move |snapshot: Result<SharedSnapshot, _>| {
+                if let Some(answer) = answer.take() {
+                    answer(snapshot.ok().map(|s| s.to_owned()));
+                }
+            });
+            match callback {
+                Ok(callback) => {
+                    // No bitmap yet: a cleared one, as get_image_data gives.
+                    if let Err(callback) = context.read_pixels_to_callback(callback) {
+                        let _ = callback.send(SharedSnapshot::cleared(self.get_size()));
+                    }
+                },
+                Err(_) => error!("toBlob: no readback callback"),
+            }
+        } else {
+            encode_and_answer(self.get_image_data());
+        }
 
         Ok(())
     }
