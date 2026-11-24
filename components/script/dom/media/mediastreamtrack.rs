@@ -166,11 +166,13 @@ impl MediaStreamTrack {
             .task_manager()
             .media_element_task_source()
             .to_sendable();
+        // The registry wants a Sync listener; the sendable task source is only Send.
+        let task_source = Mutex::new(task_source);
         let f = Box::new(move |event: TrackEvent| {
             let Some(this) = handle.lock().unwrap().clone() else {
                 return;
             };
-            task_source.queue(task!(media_stream_track_event: move |cx| {
+            task_source.lock().unwrap().queue(task!(media_stream_track_event: move |cx| {
                 let this = this.root();
                 let name = match event {
                     TrackEvent::Muted => {

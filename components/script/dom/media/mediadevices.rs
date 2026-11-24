@@ -261,7 +261,7 @@ impl MediaDevicesMethods<crate::DomTypeHolder> for MediaDevices {
                         DOMString::from(msg),
                         DOMString::from_static("OverconstrainedError"),
                     )),
-                    &self.global(),
+                    &*self.global(),
                 );
                 p.reject_native(cx, &e);
             },
