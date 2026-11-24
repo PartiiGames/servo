@@ -237,10 +237,13 @@ impl Default for TimerRefreshDriver {
     }
 }
 
-/// Partii (perf): PARTII_REFRESH_GRID=0 restarts the frame grid at a late request, as before.
+/// Partii (perf, experiment, off by default): PARTII_REFRESH_GRID=1 keeps the frame grid at a
+/// late request. It brought worker-canvas pages from 59.6 to 60 Hz, but GPU-bound pages then got
+/// their next frame sooner after a slow one and did worse (3d p95 20.5 -> 34.7 ms, rocket-to-heaven
+/// 59.2 -> 58.8 fps, corpus job 4a7083e7), so the old restart stays the default.
 fn keep_grid() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PARTII_REFRESH_GRID").as_deref() != Ok("0"))
+    *ON.get_or_init(|| std::env::var("PARTII_REFRESH_GRID").as_deref() == Ok("1"))
 }
 
 /// Partii: one frame at `shell_refresh_rate_hz` (default 60).
