@@ -612,11 +612,23 @@ impl GridItem {
         let padding_border_size = (padding + border).sum_axes();
         let box_sizing_adjustment =
             if self.box_sizing == BoxSizing::ContentBox { padding_border_size } else { Size::ZERO };
-        self.size
-            .maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis))
-            .maybe_apply_aspect_ratio(self.aspect_ratio)
-            .maybe_add(box_sizing_adjustment)
-            .get(axis)
+        // Partii (ui-fix-1): a preferred size that depends on the containing block and can't be resolved yet
+        // (a percentage against an indefinite grid area) "behaves as auto" here: the minimum contribution comes from
+        // the min size / automatic minimum below. Before, the aspect ratio transferred the other axis' size into
+        // this one (img width: 100%; height: 100% with width/height attributes in a 44 px grid cell: a 78 px
+        // column from 44 * 16/9), skipping the compressible-replaced cap that makes it 0.
+        let preferred_depends_on_unknown_cb =
+            self.size.get(axis).0.uses_percentage() && grid_area_size.get(axis).is_none();
+        let preferred_size = if preferred_depends_on_unknown_cb {
+            None
+        } else {
+            self.size
+                .maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis))
+                .maybe_apply_aspect_ratio(self.aspect_ratio)
+                .maybe_add(box_sizing_adjustment)
+                .get(axis)
+        };
+        preferred_size
             .or_else(|| {
                 self.min_size
                     .maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis))
