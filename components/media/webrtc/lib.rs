@@ -119,14 +119,20 @@ pub trait WebRtcControllerBackend: Send {
         cb: ResultCallback<()>,
     ) -> WebRtcResult {
         match which {
-            DescriptionType::Local => self.set_local_description(desc, Box::new(move || cb(Ok(())))),
+            DescriptionType::Local => {
+                self.set_local_description(desc, Box::new(move || cb(Ok(()))))
+            },
             DescriptionType::Remote => {
                 self.set_remote_description(desc, Box::new(move || cb(Ok(()))))
             },
         }
     }
     /// createOffer / createAnswer with an error path.
-    fn create_description(&mut self, ty: SdpType, cb: ResultCallback<SessionDescription>) -> WebRtcResult {
+    fn create_description(
+        &mut self,
+        ty: SdpType,
+        cb: ResultCallback<SessionDescription>,
+    ) -> WebRtcResult {
         if ty == SdpType::Offer {
             self.create_offer(Box::new(move |d| cb(Ok(d))))
         } else {

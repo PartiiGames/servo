@@ -770,7 +770,7 @@ impl Peer {
                     let n = dec.decode(None, decoded);
                     t.recv.push(&decoded[..n], Instant::now());
                 }
-                let n = dec.decode(Some(&d.data), decoded);
+                let n = dec.decode(Some(&d.data[..]), decoded);
                 if n > 0 {
                     let pcm = &decoded[..n];
                     let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / n as f32).sqrt();

@@ -141,8 +141,8 @@ impl RTCRtpTransceiverMethods<crate::DomTypeHolder> for RTCRtpTransceiver {
         }
         if direction != self.direction.get() {
             self.direction.set(direction);
-            if let Some(pc) = self.pc.get() &&
-                let Some(c) = pc.controller()
+            if let Some(pc) = self.pc.get()
+                && let Some(c) = pc.controller()
             {
                 c.set_direction(self.id, from_dom(direction));
             }
@@ -168,8 +168,8 @@ impl RTCRtpTransceiverMethods<crate::DomTypeHolder> for RTCRtpTransceiver {
         if self.stopped.get() {
             return;
         }
-        if let Some(pc) = self.pc.get() &&
-            let Some(c) = pc.controller()
+        if let Some(pc) = self.pc.get()
+            && let Some(c) = pc.controller()
         {
             c.stop_transceiver(self.id);
         }

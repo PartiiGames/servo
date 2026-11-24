@@ -112,7 +112,9 @@ impl WebRtcController {
         ));
     }
     pub fn set_direction(&self, id: TransceiverId, direction: RtpDirection) {
-        let _ = self.sender.send(RtcThreadEvent::SetDirection(id, direction));
+        let _ = self
+            .sender
+            .send(RtcThreadEvent::SetDirection(id, direction));
     }
     pub fn stop_transceiver(&self, id: TransceiverId) {
         let _ = self.sender.send(RtcThreadEvent::StopTransceiver(id));
