@@ -1156,8 +1156,14 @@ fn do_initial_flex_line_layout<'items>(
         return vec![construct_line((items, outer_hypothetical_main_sizes_sum))];
     }
 
+    // Partii (ui-fix-2): `line_size_so_far` includes the main gaps (they decide where a line breaks), but
+    // `resolve_flexible_lengths` compares the items' outer hypothetical sizes with the container size *minus*
+    // the gaps, as the single-line path above does. Passing the size with gaps counted them twice: a line whose
+    // items fit (positive free space) chose the shrink factor and was shrunk by that free space, so each item
+    // ended below its max-content and wrapped inside (the launcher's card head: title + chips, two lines each).
     let mut lines = Vec::new();
     let mut line_size_so_far = Au::zero();
+    let mut items_size_so_far = Au::zero();
     let mut line_so_far_is_empty = true;
     let mut index = 0;
 
@@ -1170,6 +1176,7 @@ fn do_initial_flex_line_layout<'items>(
         let item_fits = line_size_would_be <= container_main_size;
         if item_fits || line_so_far_is_empty {
             line_size_so_far = line_size_would_be;
+            items_size_so_far += item_size;
             line_so_far_is_empty = false;
             index += 1;
             continue;
@@ -1177,16 +1184,17 @@ fn do_initial_flex_line_layout<'items>(
 
         // We found something that doesn’t fit. This line ends *before* this item.
         let remaining = items.split_off(index);
-        lines.push((items, line_size_so_far));
+        lines.push((items, items_size_so_far));
         items = remaining;
 
         // The next line has this item.
         line_size_so_far = item_size;
+        items_size_so_far = item_size;
         index = 1;
     }
 
     // We didn't reach the end of the last line, so add all remaining items there.
-    lines.push((items, line_size_so_far));
+    lines.push((items, items_size_so_far));
 
     let job_sizes = lines
         .iter()
