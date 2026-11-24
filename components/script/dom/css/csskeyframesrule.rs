@@ -70,13 +70,15 @@ impl CSSKeyframesRule {
     fn rulelist(&self, cx: &mut JSContext) -> DomRoot<CSSRuleList> {
         self.rule_list.or_init(|| {
             let parent_stylesheet = &self.upcast::<CSSRule>().parent_stylesheet();
-            CSSRuleList::new(
+            let list = CSSRuleList::new(
                 cx,
                 self.global().as_window(),
                 None,
                 parent_stylesheet,
                 RulesSource::Keyframes(self.keyframes_rule.borrow().clone()),
-            )
+            );
+            list.set_keyframes_owner(self);
+            list
         })
     }
 

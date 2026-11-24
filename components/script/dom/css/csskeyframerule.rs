@@ -13,6 +13,7 @@ use style::stylesheets::CssRuleType;
 use style::stylesheets::keyframes_rule::Keyframe;
 
 use super::cssrule::{CSSRule, SpecificCSSRule};
+use super::csskeyframesrule::CSSKeyframesRule;
 use super::cssstyledeclaration::{CSSModificationAccess, CSSStyleDeclaration, CSSStyleOwner};
 use super::cssstylesheet::CSSStyleSheet;
 use crate::dom::bindings::codegen::Bindings::CSSKeyframeRuleBinding::CSSKeyframeRuleMethods;
@@ -30,6 +31,9 @@ pub(crate) struct CSSKeyframeRule {
     #[no_trace]
     keyframe_rule: RefCell<Arc<Locked<Keyframe>>>,
     style_declaration: MutNullableDom<CSSStyleDeclaration>,
+    /// The @keyframes rule this keyframe belongs to. CSSRule's parent_rule only holds grouping rules,
+    /// and CSSKeyframesRule isn't one, so parentRule reads it from here (Partii, 11-24).
+    parent_keyframes: Option<Dom<CSSKeyframesRule>>,
 }
 
 impl CSSKeyframeRule {
@@ -37,11 +41,13 @@ impl CSSKeyframeRule {
         parent_rule: Option<&CSSGroupingRule>,
         parent_stylesheet: &CSSStyleSheet,
         keyframerule: Arc<Locked<Keyframe>>,
+        parent_keyframes: Option<&CSSKeyframesRule>,
     ) -> CSSKeyframeRule {
         CSSKeyframeRule {
             css_rule: CSSRule::new_inherited(parent_rule, parent_stylesheet),
             keyframe_rule: RefCell::new(keyframerule),
             style_declaration: Default::default(),
+            parent_keyframes: parent_keyframes.map(Dom::from_ref),
         }
     }
 
@@ -51,6 +57,7 @@ impl CSSKeyframeRule {
         parent_rule: Option<&CSSGroupingRule>,
         parent_stylesheet: &CSSStyleSheet,
         keyframerule: Arc<Locked<Keyframe>>,
+        parent_keyframes: Option<&CSSKeyframesRule>,
     ) -> DomRoot<CSSKeyframeRule> {
         reflect_dom_object(
             cx,
@@ -58,9 +65,14 @@ impl CSSKeyframeRule {
                 parent_rule,
                 parent_stylesheet,
                 keyframerule,
+                parent_keyframes,
             )),
             window,
         )
+    }
+
+    pub(crate) fn parent_keyframes(&self) -> Option<DomRoot<CSSKeyframesRule>> {
+        self.parent_keyframes.as_deref().map(DomRoot::from_ref)
     }
 
     pub(crate) fn update_rule(

@@ -19,6 +19,7 @@ use style::stylesheets::{
 };
 
 use super::csskeyframerule::CSSKeyframeRule;
+use super::csskeyframesrule::CSSKeyframesRule;
 use super::cssrule::CSSRule;
 use super::cssstylesheet::CSSStyleSheet;
 use crate::conversions::Convert;
@@ -56,6 +57,8 @@ pub(crate) struct CSSRuleList {
     #[ignore_malloc_size_of = "Stylo"]
     rules: RefCell<RulesSource>,
     dom_rules: DomRefCell<Vec<MutNullableDom<CSSRule>>>,
+    /// For a keyframes list: the @keyframes rule that owns it, the keyframes' parentRule.
+    keyframes_owner: MutNullableDom<CSSKeyframesRule>,
 }
 
 pub(crate) enum RulesSource {
@@ -92,6 +95,7 @@ impl CSSRuleList {
             parent_stylesheet: Dom::from_ref(parent_stylesheet),
             rules: RefCell::new(rules),
             dom_rules: DomRefCell::new(dom_rules),
+            keyframes_owner: Default::default(),
         }
     }
 
@@ -239,6 +243,10 @@ impl CSSRuleList {
         }
     }
 
+    pub(crate) fn set_keyframes_owner(&self, owner: &CSSKeyframesRule) {
+        self.keyframes_owner.set(Some(owner));
+    }
+
     /// Remove parent stylesheets from all children
     pub(crate) fn deparent_all(&self) {
         for rule in self.dom_rules.borrow().iter() {
@@ -278,6 +286,7 @@ impl CSSRuleList {
                             self.created_by_rule.as_deref(),
                             parent_stylesheet,
                             rule,
+                            self.keyframes_owner.get().as_deref(),
                         ))
                     },
                 }

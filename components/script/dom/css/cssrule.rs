@@ -323,9 +323,13 @@ impl CSSRuleMethods<crate::DomTypeHolder> for CSSRule {
 
     /// <https://drafts.csswg.org/cssom/#dom-cssrule-parentrule>
     fn GetParentRule(&self) -> Option<DomRoot<CSSRule>> {
-        self.parent_rule
-            .as_ref()
-            .map(|rule| DomRoot::from_ref(rule.upcast::<CSSRule>()))
+        if let Some(rule) = self.parent_rule.as_ref() {
+            return Some(DomRoot::from_ref(rule.upcast::<CSSRule>()));
+        }
+        // A keyframe's parent is its @keyframes rule, which isn't a CSSGroupingRule.
+        self.downcast::<CSSKeyframeRule>()
+            .and_then(|kf| kf.parent_keyframes())
+            .map(DomRoot::upcast)
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-cssrule-parentstylesheet>
