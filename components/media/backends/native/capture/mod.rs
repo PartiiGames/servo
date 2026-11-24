@@ -355,10 +355,17 @@ fn device_microphones() -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default();
+    // macOS: Continuity microphones (an iPhone's) go last, even when the system made one the default, so the phone
+    // is only opened (and woken) when a page asks for its deviceId (Sterling, 11-24).
+    #[cfg(target_os = "macos")]
+    let continuity = avf::continuity_mic_names();
+    #[cfg(not(target_os = "macos"))]
+    let continuity: Vec<String> = vec![];
+    // Stable sorts: the others keep the host's order.
     if let Some(default_id) = default_id {
-        // Stable: the others keep the host's order.
         mics.sort_by_key(|(id, _)| *id != default_id);
     }
+    mics.sort_by_key(|(_, name)| continuity.contains(name));
     mics
 }
 

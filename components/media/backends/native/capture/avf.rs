@@ -149,8 +149,59 @@ fn info_of(device: &AVCaptureDevice) -> CameraInfo {
     }
 }
 
+/// kIOAudioDeviceTransportType* (IOAudioTypes.h): built-in, and Continuity (an iPhone, wired or wireless).
+const TRANSPORT_BUILT_IN: i32 = i32::from_be_bytes(*b"bltn");
+const TRANSPORT_CONTINUITY_WIRED: i32 = i32::from_be_bytes(*b"ccwd");
+const TRANSPORT_CONTINUITY_WIRELESS: i32 = i32::from_be_bytes(*b"ccwl");
+
+fn is_continuity(device: &AVCaptureDevice) -> bool {
+    // SAFETY: a property read.
+    let t = unsafe { device.transportType() };
+    t == TRANSPORT_CONTINUITY_WIRED || t == TRANSPORT_CONTINUITY_WIRELESS
+}
+
+/// The cameras, in the order getUserMedia without a deviceId picks from: the system default (unless it is a
+/// Continuity iPhone, which macOS may make the default when it is near), then built-in cameras, the others, and
+/// Continuity cameras last, so a phone is opened only when a page asks for its deviceId (Sterling, 11-24).
+/// Listing reads properties only; no device is opened.
 pub(super) fn list() -> Vec<CameraInfo> {
-    devices().iter().map(|d| info_of(&d)).collect()
+    // SAFETY: a class method returning the default video device, if any.
+    let default = unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media_type_video()) }
+        .filter(|d| !is_continuity(d))
+        .map(|d| unsafe { d.uniqueID() }.to_string());
+    let mut cams: Vec<(u8, CameraInfo)> = devices()
+        .iter()
+        .map(|d| {
+            let info = info_of(&d);
+            // SAFETY: a property read.
+            let rank = if default.as_deref() == Some(info.handle.as_str()) {
+                0
+            } else if unsafe { d.transportType() } == TRANSPORT_BUILT_IN {
+                1
+            } else if is_continuity(&d) {
+                3
+            } else {
+                2
+            };
+            (rank, info)
+        })
+        .collect();
+    cams.sort_by_key(|(rank, _)| *rank);
+    cams.into_iter().map(|(_, c)| c).collect()
+}
+
+/// The names of Continuity microphones (an iPhone's), as AVFoundation lists them: capture/mod.rs puts them last.
+#[allow(deprecated)]
+pub(super) fn continuity_mic_names() -> Vec<String> {
+    // SAFETY: an AVFoundation constant and a class method returning the connected audio devices.
+    let Some(audio) = (unsafe { AVMediaTypeAudio }) else {
+        return vec![];
+    };
+    let all = unsafe { AVCaptureDevice::devicesWithMediaType(audio) };
+    all.iter()
+        .filter(|d| is_continuity(d))
+        .map(|d| unsafe { d.localizedName() }.to_string())
+        .collect()
 }
 
 /// Asks the OS for camera access (once per app; later calls answer at once).
