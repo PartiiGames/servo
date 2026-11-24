@@ -890,6 +890,9 @@ impl CanvasState {
         }
 
         let smoothing_enabled = self.state.borrow().image_smoothing_enabled;
+        // Partii: whether the destination is a canvas.captureStream source (see the WebGL arms below).
+        #[cfg(feature = "webgl")]
+        let capture_dest = htmlcanvas.is_some_and(|canvas| canvas.has_captures());
 
         if let Some(context) = canvas.context() {
             match *context {
@@ -1006,10 +1009,12 @@ impl CanvasState {
                         },
                     }
                 },
-                // Partii: WebGL and WebGL2: the canvas thread waits for the drawing buffer's readback,
-                // not the script thread (jam clips copy the game's WebGL canvas every frame).
+                // Partii: WebGL and WebGL2 into a canvas.captureStream source (jam clips copy the game's
+                // WebGL canvas every frame): the canvas thread waits for the drawing buffer's readback,
+                // not the script thread. Any other destination takes the plain path below (a sync
+                // readback): the deferred one slowed games that draw WebGL into 2D (perf, rth-drv).
                 #[cfg(feature = "webgl")]
-                RenderingContext::WebGL(ref context) => {
+                RenderingContext::WebGL(ref context) if capture_dest => {
                     let Some(readback) = context.read_pixels_pending() else {
                         return Ok(());
                     };
@@ -1024,7 +1029,7 @@ impl CanvasState {
                     ));
                 },
                 #[cfg(feature = "webgl")]
-                RenderingContext::WebGL2(ref context) => {
+                RenderingContext::WebGL2(ref context) if capture_dest => {
                     let Some(readback) = context.base_context().read_pixels_pending() else {
                         return Ok(());
                     };
@@ -1038,8 +1043,8 @@ impl CanvasState {
                         self.state.borrow().transform,
                     ));
                 },
-                // WebGPU canvases: draw a copy of their image contents (the current texture), as for
-                // the contexts above.
+                // WebGPU canvases, and WebGL into a canvas that isn't captured: draw a copy of their
+                // image contents (the current texture / drawing buffer), as for the contexts above.
                 ref other => {
                     let Some(snapshot) = other.get_image_data() else {
                         return Ok(());

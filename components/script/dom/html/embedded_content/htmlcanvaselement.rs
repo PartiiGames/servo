@@ -170,6 +170,12 @@ impl HTMLCanvasElement {
         }
     }
 
+    /// Partii: whether this canvas has live `captureStream()` captures (until the idle drop in
+    /// `capture_frames`).
+    pub(crate) fn has_captures(&self) -> bool {
+        !self.captures.borrow().is_empty()
+    }
+
     /// Partii: pushes a frame to each `captureStream()` source that's due and read, from one readback.
     /// Returns whether this canvas still has captures (Document keeps it in its list while it does).
     pub(crate) fn capture_frames(&self, now: Instant) -> bool {
