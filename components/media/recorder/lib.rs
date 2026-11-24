@@ -166,6 +166,7 @@ struct Encoder {
     last_key: i64,
     next_slice: Option<Instant>,
     encode_time: Duration,
+    encode_max: Duration,
 }
 
 impl Encoder {
@@ -191,6 +192,7 @@ impl Encoder {
             last_key: i64::MIN / 2,
             next_slice,
             encode_time: Duration::ZERO,
+            encode_max: Duration::ZERO,
         }
     }
 
@@ -245,12 +247,19 @@ impl Encoder {
         self.flush();
         self.hand_out();
         if let Some(w) = &self.webm {
-            log::debug!(
-                "MediaRecorder: {} frames, {} ms, encode {:?} total",
+            let line = format!(
+                "PARTII_REC frames={} ms={} encode_avg_us={} encode_max_us={} thread=MediaRecorder",
                 w.frames,
                 w.last_pts,
-                self.encode_time
+                self.encode_time.as_micros() as u64 / w.frames.max(1),
+                self.encode_max.as_micros()
             );
+            // PARTII_CLIP_STATS=1: on stderr for the clips harness.
+            if std::env::var_os("PARTII_CLIP_STATS").is_some() {
+                eprintln!("{line}");
+            } else {
+                log::debug!("{line}");
+            }
         }
         (self.sink)(RecorderEvent::Stopped { by_track });
     }
@@ -300,7 +309,9 @@ impl Encoder {
             return Err(self.error());
         }
         self.drain();
-        self.encode_time += started.elapsed();
+        let took = started.elapsed();
+        self.encode_time += took;
+        self.encode_max = self.encode_max.max(took);
         Ok(())
     }
 
