@@ -114,7 +114,7 @@ impl RTCRtpSenderMethods<crate::DomTypeHolder> for RTCRtpSender {
             .to_sendable();
         let this = Trusted::new(self);
         let track = with_track.map(Trusted::new);
-        let promise = TrustedPromise::from(&p);
+        let promise = TrustedPromise::new(&p);
         let Some(controller) = pc.controller() else {
             p.reject_error(current_realm, Error::InvalidState(None));
             return p;

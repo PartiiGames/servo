@@ -611,13 +611,13 @@ impl RTCPeerConnection {
 
     /// createOffer / createAnswer: each call resolves with the backend's description, or
     /// rejects with its error.
-    fn create_description(&self, ty: SdpType, p: &Promise) {
+    fn create_description(&self, ty: SdpType, p: &RootedPromise) {
         let task_source = self
             .global()
             .task_manager()
             .networking_task_source()
             .to_sendable();
-        let promise = TrustedPromise::from(p);
+        let promise = TrustedPromise::new(p);
         self.controller
             .borrow()
             .as_ref()
@@ -640,9 +640,9 @@ impl RTCPeerConnection {
     }
 
     /// setLocalDescription / setRemoteDescription.
-    fn set_description(&self, which: DescriptionType, desc: SessionDescription, p: &Promise) {
+    fn set_description(&self, which: DescriptionType, desc: SessionDescription, p: &RootedPromise) {
         let this = Trusted::new(self);
-        let promise = TrustedPromise::from(p);
+        let promise = TrustedPromise::new(p);
         let task_source = self
             .global()
             .task_manager()
@@ -1077,7 +1077,7 @@ impl RTCPeerConnectionMethods<crate::DomTypeHolder> for RTCPeerConnection {
             p.reject_error(current_realm, Error::InvalidState(None));
             return p;
         };
-        let promise = TrustedPromise::from(&p);
+        let promise = TrustedPromise::new(&p);
         let task_source = self
             .global()
             .task_manager()
