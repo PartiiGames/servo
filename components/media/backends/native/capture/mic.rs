@@ -92,7 +92,7 @@ fn open_device(device_id: Option<&str>) -> Option<MediaStreamId> {
     use std::sync::mpsc;
 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use cpal::{FromSample, SampleFormat, SizedSample};
+    use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 
     fn build<T>(
         device: &cpal::Device,
@@ -192,7 +192,10 @@ fn open_device(device_id: Option<&str>) -> Option<MediaStreamId> {
                 SampleFormat::I8 => build::<i8>(&device, &config, source.clone(), stop.clone()),
                 other => Err(format!("unsupported sample format {other:?}")),
             };
-            let stream = match stream.and_then(|s| s.play().map(|_| s).map_err(|e| e.to_string())) {
+            let stream = match stream.and_then(|s| match s.play() {
+                Ok(()) => Ok(s),
+                Err(e) => Err(e.to_string()),
+            }) {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("microphone {label}: {e}");
