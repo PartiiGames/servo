@@ -8,6 +8,12 @@
 //! errors pages test for: TypeError (nothing asked), NotFoundError (no such device),
 //! OverconstrainedError (an exact deviceId that doesn't exist), NotAllowedError (denied),
 //! NotReadableError (the device didn't start).
+//!
+//! enumerateDevices exposes device names and ids only after this document got a microphone or camera from
+//! getUserMedia (the spec's "device information can be exposed", as Chrome and WebKit): before that, one entry per
+//! kind with an empty deviceId and label, so a page can't read the player's device names without asking.
+
+use std::cell::Cell;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -20,6 +26,7 @@ use servo_media::streams::capture::{Constrain, ConstrainRange, MediaTrackConstra
 use servo_media::streams::device_monitor::MediaDeviceKind as BackendDeviceKind;
 
 use crate::conversions::Convert;
+use crate::dom::bindings::codegen::Bindings::MediaDeviceInfoBinding::MediaDeviceKind;
 use crate::dom::bindings::codegen::Bindings::MediaDevicesBinding::{
     MediaDevicesMethods, MediaStreamConstraints, MediaTrackConstraintSet as JsConstraintSet,
     MediaTrackSupportedConstraints,
@@ -50,12 +57,18 @@ use crate::dom::promise::{Promise, RootedPromise};
 #[dom_struct]
 pub(crate) struct MediaDevices {
     eventtarget: EventTarget,
+    /// This document got a microphone (audioinput and audiooutput details exposed).
+    mic_exposed: Cell<bool>,
+    /// This document got a camera (videoinput details exposed).
+    camera_exposed: Cell<bool>,
 }
 
 impl MediaDevices {
     pub(crate) fn new_inherited() -> MediaDevices {
         MediaDevices {
             eventtarget: EventTarget::new_inherited(),
+            mic_exposed: Cell::new(false),
+            camera_exposed: Cell::new(false),
         }
     }
 
@@ -217,6 +230,7 @@ impl MediaDevices {
                 MediaStreamTrack::new_capture(cx, &global, id, MediaStreamType::Audio, r.capture);
             stream.add_track(&track);
             opened.push(track);
+            self.mic_exposed.set(true);
         }
         if let Some(r) = video {
             let Some(id) = media.create_videoinput_stream(r.set) else {
@@ -228,6 +242,7 @@ impl MediaDevices {
             let track =
                 MediaStreamTrack::new_capture(cx, &global, id, MediaStreamType::Video, r.capture);
             stream.add_track(&track);
+            self.camera_exposed.set(true);
         }
         Ok(stream)
     }
@@ -283,21 +298,36 @@ impl MediaDevicesMethods<crate::DomTypeHolder> for MediaDevices {
         let media = ServoMedia::get();
         media.set_capture_mocking(pref!(media_fake_video_input));
         let device_monitor = media.get_device_monitor();
+        let (mic, camera) = (self.mic_exposed.get(), self.camera_exposed.get());
+        let mut hidden_kinds = vec![];
         let result_list = device_monitor
             .enumerate_devices()
             .map(|devices| {
                 devices
                     .iter()
-                    .map(|device| {
+                    .filter_map(|device| {
+                        let kind: MediaDeviceKind = device.kind.convert();
+                        let exposed = match kind {
+                            MediaDeviceKind::Videoinput => camera,
+                            MediaDeviceKind::Audioinput | MediaDeviceKind::Audiooutput => mic,
+                        };
+                        if !exposed {
+                            // Not exposed: one entry for the kind, no id and no name.
+                            if hidden_kinds.contains(&kind) {
+                                return None;
+                            }
+                            hidden_kinds.push(kind);
+                            return Some(MediaDeviceInfo::new(cx, &self.global(), "", kind, "", ""));
+                        }
                         // XXX The media backend has no way to group devices yet.
-                        MediaDeviceInfo::new(
+                        Some(MediaDeviceInfo::new(
                             cx,
                             &self.global(),
                             &device.device_id,
-                            device.kind.convert(),
+                            kind,
                             &device.label,
                             "",
-                        )
+                        ))
                     })
                     .collect::<Vec<_>>()
             })
