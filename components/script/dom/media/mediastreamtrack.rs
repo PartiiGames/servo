@@ -8,13 +8,13 @@
 //! dummy streams) behave as before.
 
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 use dom_struct::dom_struct;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use servo_media::streams::MediaStreamType;
 use servo_media::streams::live::{self, TrackEvent};
-use servo_media::streams::live_video;
 use servo_media::streams::registry::MediaStreamId;
 use stylo_atoms::Atom;
 
@@ -70,7 +70,14 @@ pub(crate) struct MediaStreamTrack {
     muted: Cell<bool>,
     capture: DomRefCell<CaptureSettings>,
     droppable: DroppableTrack,
+    /// The registry watcher's handle on this track: emptied when the track stops or ends, so the
+    /// watcher (which the registry may keep) no longer keeps the track alive.
+    #[ignore_malloc_size_of = "a Trusted"]
+    #[no_trace]
+    watcher: DomRefCell<Option<WatchRef>>,
 }
+
+type WatchRef = Arc<Mutex<Option<Trusted<MediaStreamTrack>>>>;
 
 /// Frees the registry entry when the track is collected (and stops the source when no other track
 /// uses it). Canvas captureStream tracks (clips) rely on this too.
@@ -98,6 +105,7 @@ impl MediaStreamTrack {
             muted: Cell::new(false),
             capture: DomRefCell::new(CaptureSettings::default()),
             droppable: DroppableTrack { id },
+            watcher: DomRefCell::new(None),
         }
     }
 
@@ -144,21 +152,24 @@ impl MediaStreamTrack {
         }
     }
 
-    /// mute / unmute / ended from the registry, as events on the script thread. Only getUserMedia
-    /// tracks (and their clones) watch: the watcher keeps the track alive until it ends or stops,
-    /// as a live capture track should be.
+    /// mute / unmute / ended from the registry, as events on the script thread. Only the tracks
+    /// getUserMedia returns watch: the watcher keeps its track alive until it ends or stops (a live
+    /// capture track that can still fire `ended`).
     fn watch(&self) {
         if !live::is_live(&self.id) {
             return;
         }
-        let this = Trusted::new(self);
+        let handle: WatchRef = Arc::new(Mutex::new(Some(Trusted::new(self))));
+        *self.watcher.borrow_mut() = Some(handle.clone());
         let task_source = self
             .global()
             .task_manager()
             .media_element_task_source()
             .to_sendable();
         let f = Box::new(move |event: TrackEvent| {
-            let this = this.clone();
+            let Some(this) = handle.lock().unwrap().clone() else {
+                return;
+            };
             task_source.queue(task!(media_stream_track_event: move |cx| {
                 let this = this.root();
                 let name = match event {
@@ -171,7 +182,9 @@ impl MediaStreamTrack {
                         "unmute"
                     },
                     TrackEvent::Ended => {
-                        // stop() ends a track without an event (the spec's "ended" is for the source).
+                        // stop() ends a track without an event (the spec's "ended" is for the
+                        // source); live_video still reports one after stop(): ignored here.
+                        this.release_watcher();
                         if this.ended.replace(true) {
                             return;
                         }
@@ -181,10 +194,12 @@ impl MediaStreamTrack {
                 this.upcast::<EventTarget>().fire_event(cx, Atom::from(name));
             }));
         });
-        if live_video::is_video_track(&self.id) {
-            live_video::watch_video_track(&self.id, f);
-        } else {
-            live::watch_track(&self.id, f);
+        live::watch_track(&self.id, f);
+    }
+
+    fn release_watcher(&self) {
+        if let Some(handle) = self.watcher.borrow_mut().take() {
+            handle.lock().unwrap().take();
         }
     }
 }
@@ -247,9 +262,8 @@ impl MediaStreamTrackMethods<crate::DomTypeHolder> for MediaStreamTrack {
         };
         let track = MediaStreamTrack::new(cx, &self.global(), id, self.ty);
         *track.capture.borrow_mut() = self.capture.borrow().clone();
-        if !self.capture.borrow().device_id.is_empty() {
-            track.watch();
-        }
+        // Clones don't watch (no mute/unmute/ended events): a watcher keeps its track alive until it
+        // ends, and a page may drop clones without stopping them (voice-client's level probe).
         track.SetEnabled(self.enabled.get());
         if self.ended.get() {
             track.Stop();
@@ -261,6 +275,7 @@ impl MediaStreamTrackMethods<crate::DomTypeHolder> for MediaStreamTrack {
     fn Stop(&self) {
         self.ended.set(true);
         live::stop_track(&self.id);
+        self.release_watcher();
     }
 
     /// <https://w3c.github.io/mediacapture-main/#dom-mediastreamtrack-getcapabilities>

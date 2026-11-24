@@ -564,3 +564,8 @@ mod tests {
         assert!(r.stats().dropped_frames >= 800);
     }
 }
+
+/// How many audio track ids are registered (leak checks: PARTII_LIVE_STATS).
+pub fn audio_track_count() -> usize {
+    TRACKS.lock().unwrap().len()
+}

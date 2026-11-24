@@ -474,3 +474,8 @@ mod tests {
         assert_eq!(*events.lock().unwrap(), vec![TrackEvent::Muted, TrackEvent::Unmuted]);
     }
 }
+
+/// How many video track ids are registered (leak checks: PARTII_LIVE_STATS).
+pub fn video_track_count() -> usize {
+    VIDEO_TRACKS.lock().unwrap().len()
+}

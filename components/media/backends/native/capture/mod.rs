@@ -278,6 +278,30 @@ pub(crate) fn open_video_track(set: &MediaTrackConstraintSet) -> Option<MediaStr
     }
 }
 
+/// `PARTII_LIVE_STATS=1`: print the live registry's track counts to stderr when they change
+/// ("partii-live: video=N audio=M"), for the capture checks' leak test.
+pub(crate) fn start_stats() {
+    if !std::env::var("PARTII_LIVE_STATS").is_ok_and(|v| !v.is_empty() && v != "0") {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("PartiiLiveStats".to_owned())
+        .spawn(|| {
+            let mut last = (usize::MAX, usize::MAX);
+            loop {
+                let now = (
+                    live_video::video_track_count(),
+                    servo_media_streams::live::audio_track_count(),
+                );
+                if now != last {
+                    eprintln!("partii-live: video={} audio={}", now.0, now.1);
+                    last = now;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+}
+
 /// Testing the "no microphone" path: `PARTII_NO_MIC=1`.
 fn no_mic() -> bool {
     std::env::var("PARTII_NO_MIC").is_ok_and(|v| !v.is_empty() && v != "0")

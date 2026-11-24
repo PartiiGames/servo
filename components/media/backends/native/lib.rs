@@ -83,6 +83,7 @@ impl BackendInit for NativeBackend {
                 }
             })
             .expect("Failed to spawn the media shutdown thread");
+        capture::start_stats();
         Box::new(NativeBackend {
             instances,
             next_instance_id: AtomicUsize::new(0),
