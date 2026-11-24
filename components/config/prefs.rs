@@ -498,7 +498,7 @@ impl Preferences {
             dom_battery_enabled: false,
             dom_bluetooth_enabled: false,
             dom_bluetooth_testing_enabled: false,
-            dom_canvas_capture_enabled: false,
+            dom_canvas_capture_enabled: true,
             dom_canvas_text_enabled: true,
             dom_canvas_backend: String::new(),
             dom_canvas_msg_buffer_size: 16,

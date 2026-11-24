@@ -4,6 +4,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dom_struct::dom_struct;
 use euclid::default::Size2D;
@@ -12,7 +14,7 @@ use js::context::NoGC;
 use js::error::throw_type_error;
 use js::rust::{HandleObject, HandleValue};
 use layout_api::HTMLCanvasData;
-use pixels::{EncodedImageType, Snapshot};
+use pixels::{EncodedImageType, Snapshot, SnapshotPixelFormat};
 use rustc_hash::FxHashMap;
 use script_bindings::cell::{DomRefCell, Ref};
 #[cfg(feature = "webgl")]
@@ -25,6 +27,7 @@ use servo_constellation_traits::BlobImpl;
 #[cfg(feature = "webgpu")]
 use servo_constellation_traits::ScriptToConstellationMessage;
 use servo_media::streams::MediaStreamType;
+use servo_media::streams::live_video::{self, VideoFormat, VideoFrame, VideoSource};
 use servo_media::streams::registry::MediaStreamId;
 use style::attr::AttrValue;
 use webrender_api::ImageKey;
@@ -103,7 +106,28 @@ pub(crate) struct HTMLCanvasElement {
     /// that has not yet been part of "update the rendering".
     #[no_trace]
     pending_placeholder_frame: Cell<Option<Epoch>>,
+    /// Partii: this canvas's `captureStream()` sources (live_video), fed after each frame's rAF callbacks
+    /// while something reads them (Document::capture_canvas_frames).
+    #[no_trace]
+    #[ignore_malloc_size_of = "live_video sources (their frames are shared)"]
+    captures: RefCell<Vec<CanvasCapture>>,
 }
+
+/// One `captureStream(frameRequestRate)` of a canvas.
+struct CanvasCapture {
+    track: MediaStreamId,
+    source: VideoSource,
+    /// None: a frame every rendering update; Some(ZERO): no frames (requestFrame is not implemented).
+    interval: Option<Duration>,
+    next: Option<Instant>,
+    /// Last time it had a reader (or was made).
+    used: Instant,
+}
+
+/// A capture nobody has read for this long, or whose track the DOM collected, is dropped.
+const CAPTURE_IDLE_DROP: Duration = Duration::from_secs(30);
+/// Frame callbacks come at the display's rate: a frame due within this much counts as due now.
+const CAPTURE_SLACK: Duration = Duration::from_millis(4);
 
 impl HTMLCanvasElement {
     fn new_inherited(
@@ -119,7 +143,58 @@ impl HTMLCanvasElement {
             image_key: Default::default(),
             placeholder_image_key: Default::default(),
             pending_placeholder_frame: Default::default(),
+            captures: Default::default(),
         }
+    }
+
+    /// Partii: pushes a frame to each `captureStream()` source that's due and read, from one readback.
+    /// Returns whether this canvas still has captures (Document keeps it in its list while it does).
+    pub(crate) fn capture_frames(&self, now: Instant) -> bool {
+        let mut captures = self.captures.borrow_mut();
+        captures.retain(|c| {
+            if c.source.has_readers() {
+                return true;
+            }
+            live_video::is_video_track(&c.track) && now.duration_since(c.used) < CAPTURE_IDLE_DROP
+        });
+        let due = |c: &CanvasCapture| {
+            c.source.has_readers() &&
+                c.interval != Some(Duration::ZERO) &&
+                c.next.is_none_or(|t| now + CAPTURE_SLACK >= t)
+        };
+        if !captures.iter().any(due) {
+            return !captures.is_empty();
+        }
+        let Some(snapshot) = self.get_image_data() else {
+            return !captures.is_empty();
+        };
+        let size = snapshot.size();
+        let format = match snapshot.format() {
+            SnapshotPixelFormat::RGBA => VideoFormat::Rgba8,
+            SnapshotPixelFormat::BGRA => VideoFormat::Bgra8,
+        };
+        let bytes = snapshot.as_raw_bytes();
+        if size.width == 0 || size.height == 0 || bytes.len() < (size.width * size.height * 4) as usize {
+            return true;
+        }
+        let pixels: Arc<[u8]> = Arc::from(bytes);
+        let frame = VideoFrame::packed(size.width, size.height, format, size.width * 4, pixels, now);
+        for c in captures.iter_mut() {
+            if c.source.has_readers() {
+                c.used = now;
+            }
+            if !due(&*c) {
+                continue;
+            }
+            c.source.push(frame.clone());
+            // The next frame one interval after this one's slot, or after now when it fell behind (late
+            // frame callbacks skip frames, never burst).
+            c.next = c.interval.map(|i| {
+                let slot = c.next.unwrap_or(now) + i;
+                if slot <= now { now + i } else { slot }
+            });
+        }
+        true
     }
 
     pub(crate) fn new(
@@ -785,12 +860,27 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
     fn CaptureStream(
         &self,
         cx: &mut js::context::JSContext,
-        _frame_request_rate: Option<Finite<f64>>,
+        frame_request_rate: Option<Finite<f64>>,
     ) -> DomRoot<MediaStream> {
+        // Partii: a live_video source fed from this canvas after each frame's drawing (rAF callbacks), at
+        // most frame_request_rate times a second, and only while something (a MediaRecorder) reads it.
         let global = self.global();
+        let (id, source) = live_video::create_video_source("canvas");
+        let rate = frame_request_rate.map(|r| (*r).max(0.0));
+        source.set_frame_rate(rate.unwrap_or(0.0));
+        let interval = rate.map(|r| {
+            if r > 0.0 { Duration::from_secs_f64(1.0 / r.min(1000.0)) } else { Duration::ZERO }
+        });
+        self.captures.borrow_mut().push(CanvasCapture {
+            track: id,
+            source,
+            interval,
+            next: None,
+            used: Instant::now(),
+        });
+        self.owner_document().add_capturing_canvas(self);
         let stream = MediaStream::new(cx, &global);
-        let track =
-            MediaStreamTrack::new(cx, &global, MediaStreamId::new(), MediaStreamType::Video);
+        let track = MediaStreamTrack::new(cx, &global, id, MediaStreamType::Video);
         stream.AddTrack(&track);
         stream
     }

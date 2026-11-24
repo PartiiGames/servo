@@ -609,6 +609,8 @@ pub(crate) struct Document {
     /// A set of dirty HTML canvas elements that need their WebRender images updated the
     /// next time the rendering is updated.
     dirty_canvases: DomRefCell<Vec<Dom<HTMLCanvasElement>>>,
+    /// Partii: canvases with `captureStream()` sources, fed after each frame's rAF callbacks.
+    capturing_canvases: DomRefCell<Vec<Dom<HTMLCanvasElement>>>,
     /// Whether or not animated images need to have their contents updated.
     has_pending_animated_image_update: Cell<bool>,
     /// <https://w3c.github.io/slection-api/#dfn-selection>
@@ -3240,6 +3242,36 @@ impl Document {
         );
     }
 
+    /// Partii: `canvas.captureStream()`: feed its sources from now on (capture_canvas_frames).
+    pub(crate) fn add_capturing_canvas(&self, canvas: &HTMLCanvasElement) {
+        let mut canvases = self.capturing_canvases.borrow_mut();
+        if !canvases.iter().any(|c| std::ptr::eq(&**c, canvas)) {
+            canvases.push(Dom::from_ref(canvas));
+        }
+    }
+
+    /// Partii: one frame for each read `captureStream()` source that's due, right after this frame's
+    /// rAF callbacks drew. Canvases whose captures are gone leave the list (and can be collected).
+    pub(crate) fn capture_canvas_frames(&self) {
+        if self.capturing_canvases.borrow().is_empty() {
+            return;
+        }
+        let canvases: Vec<DomRoot<HTMLCanvasElement>> = self
+            .capturing_canvases
+            .borrow()
+            .iter()
+            .map(|c| DomRoot::from_ref(&**c))
+            .collect();
+        let now = std::time::Instant::now();
+        let keep: Vec<bool> = canvases.iter().map(|c| c.capture_frames(now)).collect();
+        capture_stats(now.elapsed());
+        let mut i = 0;
+        self.capturing_canvases.borrow_mut().retain(|_| {
+            i += 1;
+            keep.get(i - 1).copied().unwrap_or(true)
+        });
+    }
+
     pub(crate) fn mark_canvas_as_dirty(&self, canvas: &Dom<HTMLCanvasElement>) {
         let mut dirty_canvases = self.dirty_canvases.borrow_mut();
         if dirty_canvases
@@ -4415,6 +4447,7 @@ impl Document {
             shadow_roots_styles_changed: Cell::new(false),
             media_controls: DomRefCell::new(HashMap::new()),
             dirty_canvases: DomRefCell::new(Default::default()),
+            capturing_canvases: Default::default(),
             has_pending_animated_image_update: Cell::new(false),
             selection: MutNullableDom::new(None),
             timeline: Dom::from_ref(timeline),
@@ -7769,5 +7802,29 @@ impl Iterator for SameOriginDescendantNavigablesIterator {
             };
         }
         None
+    }
+}
+
+/// Partii: PARTII_CLIP_STATS=1 prints the main-thread time canvas capture takes, every 100 calls.
+fn capture_stats(took: std::time::Duration) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("PARTII_CLIP_STATS").is_some());
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    static TOTAL_US: AtomicU64 = AtomicU64::new(0);
+    static MAX_US: AtomicU64 = AtomicU64::new(0);
+    if !*ON {
+        return;
+    }
+    let us = took.as_micros() as u64;
+    TOTAL_US.fetch_add(us, Ordering::Relaxed);
+    MAX_US.fetch_max(us, Ordering::Relaxed);
+    let n = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % 100 == 0 {
+        eprintln!(
+            "PARTII_CLIP_STATS calls={n} avg_us={} max_us={}",
+            TOTAL_US.load(Ordering::Relaxed) / n,
+            MAX_US.load(Ordering::Relaxed)
+        );
     }
 }
