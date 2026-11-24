@@ -4,6 +4,7 @@
 
 pub mod capture;
 pub mod device_monitor;
+pub mod live_video;
 pub mod registry;
 
 use std::any::Any;
