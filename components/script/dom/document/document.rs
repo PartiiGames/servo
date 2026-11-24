@@ -3358,10 +3358,17 @@ impl Document {
             phases.insert(ReflowPhasesRun::UpdatedImageData);
             // Partii (perf, experiment): PARTII_PLACEHOLDER_NOBLOCK=1 lets the page keep running
             // its rendering updates (rAF) while the painter waits for a worker's image; the
-            // painter still holds the frame until that image arrives.
-            if !partii_placeholder_noblock() {
+            // painter still holds the frame until that image arrives. =2: after a placeholder's
+            // first frame, neither waits (the painter shows the latest image it has, as a
+            // compositor does with a worker's commits).
+            let noblock = partii_placeholder_noblock();
+            if noblock == 0 {
                 self.waiting_on_canvas_image_updates.set(true);
                 partii_doc_wait_start();
+            }
+            if noblock == 2 && !PARTII_SEEN_PLACEHOLDERS.with(|s| s.borrow_mut().insert(image_key))
+            {
+                continue;
             }
             self.window().paint_api().delay_new_frame_for_canvas(
                 self.webview_id(),
@@ -7802,7 +7809,18 @@ fn partii_doc_wait_start() {
     }
 }
 
-fn partii_placeholder_noblock() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PARTII_PLACEHOLDER_NOBLOCK").as_deref() == Ok("1"))
+fn partii_placeholder_noblock() -> u8 {
+    static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PARTII_PLACEHOLDER_NOBLOCK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+thread_local! {
+    /// Partii (perf, PARTII_PLACEHOLDER_NOBLOCK=2): placeholder images that had a first frame.
+    static PARTII_SEEN_PLACEHOLDERS: std::cell::RefCell<FxHashSet<webrender_api::ImageKey>> =
+        Default::default();
 }
