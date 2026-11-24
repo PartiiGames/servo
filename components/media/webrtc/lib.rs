@@ -172,7 +172,7 @@ pub enum RtpDirection {
 }
 
 /// What the DOM shows of a transceiver after a negotiation step.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TransceiverState {
     pub id: TransceiverId,
     pub mid: Option<String>,

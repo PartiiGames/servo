@@ -19,6 +19,7 @@ use servo_media::ServoMedia;
 use servo_media::streams::MediaStreamType;
 use servo_media::streams::live::{self, AudioFormat};
 use servo_media::streams::registry::MediaStreamId;
+use stylo_atoms::Atom;
 use servo_media::webrtc::{
     BundlePolicy, DataChannelEvent, DataChannelId, DataChannelState, DescriptionType,
     GatheringState, IceCandidate, IceConnectionState, PeerConnectionState, RtpStats, SdpType,
@@ -401,7 +402,7 @@ impl RTCPeerConnection {
         let event = Event::new(
             cx,
             &self.global(),
-            atom!("connectionstatechange"),
+            Atom::from("connectionstatechange"),
             EventBubbles::DoesNotBubble,
             EventCancelable::NotCancelable,
         );
@@ -1004,7 +1005,6 @@ impl RTCPeerConnectionMethods<crate::DomTypeHolder> for RTCPeerConnection {
         &self,
         cx: &mut JSContext,
         track: &MediaStreamTrack,
-        _streams: Vec<DomRoot<MediaStream>>,
     ) -> Fallible<DomRoot<RTCRtpSender>> {
         if self.closed.get() {
             return Err(Error::InvalidState(None));
