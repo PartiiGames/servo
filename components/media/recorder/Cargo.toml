@@ -15,6 +15,7 @@ name = "servo_media_recorder"
 path = "lib.rs"
 
 [dependencies]
+libc = { workspace = true }
 log = { workspace = true }
 partii-libvpx-sys = { path = "../backends/native/libvpx-sys" }
 servo-media-streams = { workspace = true }
