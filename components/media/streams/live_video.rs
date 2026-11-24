@@ -292,10 +292,8 @@ pub fn stop_video_track(id: &MediaStreamId) {
         let _latest = track.source.latest.lock().unwrap();
         track.source.newer.notify_all();
     }
-    if !track.source.ended.load(Ordering::SeqCst) {
-        track.source.notify(Some(id), TrackEvent::Ended);
-    }
-    // A stopped track hears nothing more (not the source's end either).
+    // track.stop() fires no event on the track itself (as in the spec and live::stop_track), and a stopped
+    // track hears nothing more (not the source's end either).
     track.source.watchers.lock().unwrap().retain(|(x, _)| x != id);
     if track.source.live_tracks.fetch_sub(1, Ordering::SeqCst) == 1 {
         if let Some(callback) = track.source.on_unused.lock().unwrap().as_ref() {
@@ -304,7 +302,7 @@ pub fn stop_video_track(id: &MediaStreamId) {
     }
 }
 
-/// Tells `f` about this track's mute, unmute and end (its source's end, or its own stop), as
+/// Tells `f` about this track's mute, unmute and end (its source's end; not its own stop), as
 /// live::watch_track does for audio. Called on the producer's thread (or the stopping one): forward to
 /// the script thread. One watcher per track; a new one replaces it. Forgotten with the track.
 pub fn watch_video_track(id: &MediaStreamId, f: Box<dyn Fn(TrackEvent) + Send + Sync>) {
@@ -472,9 +470,7 @@ mod tests {
         stop_video_track(&id2);
         assert!(hit.load(Ordering::SeqCst));
         drop(source);
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![TrackEvent::Muted, TrackEvent::Unmuted, TrackEvent::Ended]
-        );
+        // id2 was stopped before the source ended: no Ended for it.
+        assert_eq!(*events.lock().unwrap(), vec![TrackEvent::Muted, TrackEvent::Unmuted]);
     }
 }

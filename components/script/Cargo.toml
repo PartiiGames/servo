@@ -26,6 +26,9 @@ js_backtrace = []
 js_jit = ["js/jit"]
 profilemozjs = ['js/profilemozjs']
 testbinding = ["script_bindings/testbinding"]
+# Partii: MediaRecorder's encoder (VP8 WebM through the vendored libvpx). Without it MediaRecorder exists
+# but supports no type.
+media-recorder = ["dep:servo-media-recorder"]
 tracing = ["dep:tracing", "script_bindings/tracing"]
 
 # Enable webcrypto
@@ -188,6 +191,7 @@ servo-config = { workspace = true }
 servo-constellation-traits = { workspace = true }
 servo-geometry = { workspace = true }
 servo-media = { workspace = true }
+servo-media-recorder = { workspace = true, optional = true }
 servo-tracing = { workspace = true }
 servo-url = { workspace = true }
 servo-webvtt = { workspace = true }

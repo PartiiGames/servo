@@ -9245,6 +9245,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "servo-media-recorder"
+version = "0.7.0"
+dependencies = [
+ "cc",
+ "log",
+ "partii-libvpx-sys",
+ "servo-media-streams",
+]
+
+[[package]]
 name = "servo-media-streams"
 version = "0.7.0"
 dependencies = [
@@ -9649,6 +9659,7 @@ dependencies = [
  "servo-layout-api",
  "servo-malloc-size-of",
  "servo-media",
+ "servo-media-recorder",
  "servo-media-thread",
  "servo-metrics",
  "servo-net-traits",

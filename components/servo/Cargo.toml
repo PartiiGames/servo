@@ -66,7 +66,7 @@ media-native-device = ["media-native", "servo-media-native/device"]
 # Opus decoding in the native backend, through libopus (bundled, built with cmake).
 media-native-opus = ["media-native", "servo-media-native/opus"]
 # <video> in the native backend: WebM with VP8/VP9 (system libvpx) and AV1 (rav1d).
-media-native-vpx = ["media-native", "servo-media-native/vpx"]
+media-native-vpx = ["media-native", "servo-media-native/vpx", "script/media-recorder"]
 media-native-av1 = ["media-native", "servo-media-native/av1"]
 # RTCPeerConnection in the native backend: str0m + Opus (stream voice). Pages see it with the
 # dom_webrtc_enabled pref.
