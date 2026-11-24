@@ -11,7 +11,8 @@
 //!   threads and players still run.
 //! - Cameras (`capture`, stream "capture"): getUserMedia({video}) on V4L2 / AVFoundation / the fake
 //!   camera, into the live video registry; `<video>.srcObject` plays them ([`stream_player`]).
-//! - Audio capture, audio media streams and WebRTC behave like the dummy backend.
+//! - Microphones (`capture::mic`): cpal input or the fake mic, into the live audio registry.
+//! - Other audio media streams and WebRTC behave like the dummy backend.
 
 mod capture;
 mod codecs;
@@ -276,7 +277,7 @@ impl Backend for NativeBackend {
     }
 
     fn create_audioinput_stream(&self, set: MediaTrackConstraintSet) -> Option<MediaStreamId> {
-        DummyBackend.create_audioinput_stream(set)
+        capture::mic::open(&set)
     }
 
     fn create_videoinput_stream(&self, set: MediaTrackConstraintSet) -> Option<MediaStreamId> {

@@ -15,6 +15,7 @@
 #[cfg(target_os = "macos")]
 mod avf;
 pub(crate) mod fake;
+pub(crate) mod mic;
 #[cfg(target_os = "linux")]
 mod v4l2;
 
