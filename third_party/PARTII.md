@@ -63,3 +63,9 @@ Patches on top of webrender 0.70.0:
   and WebRender calls them around scene building (`process_transaction`), the render backend's document
   updates and frame builds, texture-cache uploads and shader compiles. Servo's paint sets them when
   `PARTII_FRAME_TRACE` is on (servo_base::frame_trace); unset, a span is one `OnceLock` load.
+
+## Taffy (third_party/taffy, 0.14.0 from crates.io)
+- `TrackSizingFunction::has_fixed_component` counts calc() as a fixed <length-percentage> (src/style/grid.rs).
+  Upstream only took plain lengths/percentages, so `repeat(auto-fill, minmax(min(100%, 260px), 1fr))` was an
+  invalid template (zero explicit tracks, one implicit auto column): the launcher's store, home and Make grids.
+  Px-only calc() simplifies to a length at computed-value time and was never affected.
