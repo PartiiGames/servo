@@ -24,6 +24,9 @@ pub(crate) struct CanvasStoreSizesPerType {
 pub(crate) trait GenericDrawTarget {
     type SourceSurface;
 
+    /// Partii (clips): the canvas is a captureStream source (only vello_cpu acts on it).
+    fn set_capture_source(&mut self, _on: bool) {}
+
     fn new(size: Size2D<u32>) -> Self;
     fn create_similar_draw_target(&self, size: &Size2D<i32>) -> Self;
     fn canvas_store_sizes(

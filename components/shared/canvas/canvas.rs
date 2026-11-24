@@ -743,6 +743,9 @@ pub enum CanvasCommand {
     ClearRect(Rect<f32>, Transform2D<f64>),
     ClipPath(Path, FillRule, Transform2D<f64>),
     PopClips(usize),
+    /// Partii (clips): this canvas is (true) or no longer is (false) a canvas.captureStream source: drawn
+    /// every frame and read only by the capture, so the vello_cpu backend bounds its queued draws.
+    SetCaptureSource(bool),
     FillPath(
         FillOrStrokeStyle,
         Path,

@@ -63,6 +63,10 @@ pub(crate) struct VelloCPUDrawTarget {
     /// Partii (clips): with PARTII_CLIP_STATS=1, how often this canvas hit each path of the cover/cap
     /// change: [cover scans (opacity scan ran), cover hits (queue dropped), cap renders].
     cover_stats: [u32; 3],
+    /// Partii (clips): a canvas.captureStream source. Only these (or every canvas with
+    /// PARTII_CANVAS_COVER=1) take the covering-drawImage queue drop and the queued-image cap, so a
+    /// game's canvases keep the plain path.
+    capture_source: bool,
 }
 
 impl Drop for VelloCPUDrawTarget {
@@ -244,6 +248,11 @@ impl VelloCPUDrawTarget {
             self.is_viewport_cleared(rect, *transform)
     }
 
+    /// Partii (clips): the cover drop and the cap apply to this canvas.
+    fn cover_on(&self) -> bool {
+        self.capture_source || canvas_cover()
+    }
+
     /// Partii (clips): whether drawing `surface` into `dest` replaces every pixel of the canvas, so
     /// what is under it (the old pixmap and everything still queued) can be dropped: 'copy', or
     /// 'source-over' of a fully opaque image (every pixel's alpha 255: a canvas made with
@@ -256,7 +265,7 @@ impl VelloCPUDrawTarget {
         composition_options: &CompositionOptions,
         transform: &Transform2D<f64>,
     ) -> bool {
-        if !canvas_cover() {
+        if !self.cover_on() {
             return false;
         }
         let op = composition_options.composition_operation;
@@ -314,6 +323,13 @@ fn worker_thread_count(size: &Size2D<u16>) -> u16 {
 impl GenericDrawTarget for VelloCPUDrawTarget {
     type SourceSurface = Arc<vello_cpu::Pixmap>;
 
+    fn set_capture_source(&mut self, on: bool) {
+        self.capture_source = on;
+        if !on {
+            self.pending_image_px = 0.0;
+        }
+    }
+
     fn new(size: Size2D<u32>) -> Self {
         let size = size.cast();
         let settings = RenderSettings {
@@ -329,6 +345,7 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
             state: State::Rendered,
             pending_image_px: 0.0,
             cover_stats: [0; 3],
+            capture_source: false,
         }
     }
 
@@ -405,7 +422,10 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
     }
 
     fn create_similar_draw_target(&self, size: &Size2D<i32>) -> Self {
-        Self::new(size.cast())
+        let mut target = Self::new(size.cast());
+        // A resize (CanvasData::recreate) keeps the canvas a capture source.
+        target.capture_source = self.capture_source;
+        target
     }
 
     fn draw_surface(
@@ -428,7 +448,7 @@ impl GenericDrawTarget for VelloCPUDrawTarget {
             // Partii (clips): bound what one read has to rasterize: past ~8 canvases of image
             // draws, render now (the same work, spread out instead of in one stall).
             let viewport = self.size().width as f64 * self.size().height as f64;
-            if canvas_cover() && self.pending_image_px > PENDING_IMAGE_CANVASES * viewport {
+            if self.cover_on() && self.pending_image_px > PENDING_IMAGE_CANVASES * viewport {
                 note_cover(&mut self.cover_stats, 2);
                 self.pixmap();
                 self.ensure_drawing();

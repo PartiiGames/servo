@@ -174,6 +174,7 @@ impl HTMLCanvasElement {
     /// Returns whether this canvas still has captures (Document keeps it in its list while it does).
     pub(crate) fn capture_frames(&self, now: Instant) -> bool {
         let mut captures = self.captures.borrow_mut();
+        let had = !captures.is_empty();
         captures.retain(|c| {
             if c.source.has_readers() {
                 return true;
@@ -203,6 +204,13 @@ impl HTMLCanvasElement {
         }
         let keep = !captures.is_empty();
         drop(captures);
+        if had && !keep {
+            // The last capture is gone: the canvas goes back to the plain path.
+            if let Some(RenderingContext::Context2d(context)) = self.context_mode.borrow().as_ref()
+            {
+                context.set_capture_source(false);
+            }
+        }
         if sources.is_empty() {
             return keep;
         }
@@ -368,6 +376,9 @@ impl HTMLCanvasElement {
         };
         let context =
             CanvasRenderingContext2D::new(cx, window.as_global_scope(), self, size, &settings)?;
+        if !self.captures.borrow().is_empty() {
+            context.set_capture_source(true);
+        }
         self.set_rendering_context(cx.no_gc(), || {
             RenderingContext::Context2d(Dom::from_ref(&*context))
         });
@@ -928,6 +939,9 @@ impl HTMLCanvasElementMethods<crate::DomTypeHolder> for HTMLCanvasElement {
             used: Instant::now(),
         });
         self.owner_document().add_capturing_canvas(self);
+        if let Some(RenderingContext::Context2d(context)) = self.context_mode.borrow().as_ref() {
+            context.set_capture_source(true);
+        }
         let stream = MediaStream::new(cx, &global);
         let track = MediaStreamTrack::new(cx, &global, id, MediaStreamType::Video);
         stream.AddTrack(&track);

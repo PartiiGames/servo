@@ -60,6 +60,12 @@ pub(crate) struct CanvasRenderingContext2D {
 impl CanvasRenderingContext2D {
     const RGBA8_BYTES_PER_PIXEL: usize = 4;
 
+    /// Partii (clips): tells the canvas thread this canvas is (or no longer is) a captureStream source.
+    pub(crate) fn set_capture_source(&self, on: bool) {
+        self.canvas_state
+            .send_canvas_command(CanvasCommand::SetCaptureSource(on));
+    }
+
     /// Partii: the whole canvas to `callback`, called on the canvas thread after the drawing sent so
     /// far (canvas.captureStream, toBlob: the script thread doesn't wait). Gives the callback back when
     /// there's no bitmap to read.

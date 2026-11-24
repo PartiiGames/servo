@@ -364,6 +364,7 @@ impl CanvasPaintThread {
                 servo_base::partii_prof::stop(servo_base::partii_prof::Counter::UpdateCanvas, prof);
             },
             CanvasCommand::PopClips(clips) => self.canvas(canvas_id).pop_clips(clips),
+            CanvasCommand::SetCaptureSource(on) => self.canvas(canvas_id).set_capture_source(on),
             CanvasCommand::ProcessBatchMessages(messages) => {
                 for message in messages {
                     self.process_command_timed(message, canvas_id);
@@ -433,6 +434,14 @@ impl Canvas {
             #[cfg(feature = "vello")]
             Canvas::Vello(canvas_data) => canvas_data.set_image_key(image_key),
             Canvas::VelloCPU(canvas_data) => canvas_data.set_image_key(image_key),
+        }
+    }
+
+    fn set_capture_source(&mut self, on: bool) {
+        match self {
+            #[cfg(feature = "vello")]
+            Canvas::Vello(canvas_data) => canvas_data.set_capture_source(on),
+            Canvas::VelloCPU(canvas_data) => canvas_data.set_capture_source(on),
         }
     }
 

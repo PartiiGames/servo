@@ -560,6 +560,11 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         }
     }
 
+    /// Partii (clips): see CanvasCommand::SetCaptureSource.
+    pub(crate) fn set_capture_source(&mut self, on: bool) {
+        self.draw_target.set_capture_source(on);
+    }
+
     pub(crate) fn pop_clips(&mut self, clips: usize) {
         for _ in 0..clips {
             self.draw_target.pop_clip();
