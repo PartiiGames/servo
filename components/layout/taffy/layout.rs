@@ -131,7 +131,11 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
         // - The reference we create here has a lifetime that does not escape this function, so it does
         //   not matter if the pointer is later destroyed.
         let calc = unsafe { &*(val as *const CalcLengthPercentage) };
-        calc.resolve(CSSPixelLength::new(basis)).px()
+        let out = calc.resolve(CSSPixelLength::new(basis)).px();
+        if std::env::var_os("PARTII_DEBUG_GRID_CALC").is_some() {
+            eprintln!("[grid-calc] basis {basis} -> {out} ({calc:?})");
+        }
+        out
     }
 
     fn compute_child_layout(
