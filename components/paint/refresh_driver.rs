@@ -257,15 +257,29 @@ impl TimerRefreshDriver {
 impl RefreshDriver for TimerRefreshDriver {
     fn observe_next_frame(&self, new_start_frame_callback: Box<dyn Fn() + Send + 'static>) {
         let now = Instant::now();
+        let period = frame_period();
         let start = match self.next_frame_start.get() {
             // A frame is already due: this request joins it.
             Some(start) if start > now => start,
-            // The next slot on the grid, or now if we're behind (a slow frame).
-            Some(start) => (start + frame_period()).max(now),
+            // Partii (perf): the next slot on the grid, kept on the grid even when this request
+            // comes a little late (it then starts at once). Restarting the grid at `now` made a
+            // page whose request arrives just after its slot (a worker canvas's page: the
+            // request follows the painter's frame) run at ~59.6 Hz instead of 60. Whole missed
+            // periods are skipped, so a long frame never makes a burst of catch-up frames.
+            Some(start) => {
+                let mut next = start + period;
+                while next + period <= now {
+                    next += period;
+                }
+                next
+            },
             None => now,
         };
         self.next_frame_start.set(Some(start));
-        self.queue_timer(start - now, new_start_frame_callback);
+        self.queue_timer(
+            start.saturating_duration_since(now),
+            new_start_frame_callback,
+        );
     }
 }
 
