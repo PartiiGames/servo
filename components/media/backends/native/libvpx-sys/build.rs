@@ -71,6 +71,10 @@ fn main() {
     let stamp = build.join(".configured");
     let wanted = format!("{target} {:?} {}", compiler.path(), CONFIGURE.join(" "));
     if std::fs::read_to_string(&stamp).ok().as_deref() != Some(wanted.as_str()) {
+        // A reconfigure over an old tree keeps its old object list (the VP8 encoder never got built when
+        // it was turned on): start from an empty build directory.
+        let _ = std::fs::remove_dir_all(&build);
+        std::fs::create_dir_all(&build).unwrap();
         let status = Command::new("sh")
             .arg(src.join("configure"))
             .arg(format!("--target={target}"))
@@ -92,6 +96,11 @@ fn main() {
         .status()
         .expect("libvpx: can't run make");
     assert!(status.success(), "libvpx: make failed");
+    assert!(
+        build.join("vp8/vp8_cx_iface.c.o").exists(),
+        "libvpx: the VP8 encoder wasn't built (vp8/vp8_cx_iface.c.o missing in {})",
+        build.display()
+    );
     println!("cargo:rustc-link-search=native={}", build.display());
     println!("cargo:rustc-link-lib=static=vpx");
     println!("cargo:include={}", src.display());
