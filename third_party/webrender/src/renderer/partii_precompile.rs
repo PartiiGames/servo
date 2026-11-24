@@ -26,8 +26,12 @@
 //! unit). So a replayed state that takes `PARTII_WR_PRECOMPILE_SLOW_MS` (default 16) or more ends that
 //! frame's replay, and after `PARTII_WR_PRECOMPILE_SLOW_MAX` (default 2) such states the rest are dropped:
 //! the cache is missing in this context, and replaying on only moves compiles into frames the page may never
-//! need. `PARTII_WR_PRECOMPILE_SLOW_MAX=0`: no limit (the old replay). `PARTII_WR_PRECOMPILE_REPLAY=0`: the
-//! background compile only (fills Mesa's disk cache), no in-renderer replay.
+//! need. `PARTII_WR_PRECOMPILE_SLOW_MAX=0`: no limit (the old replay).
+//!
+//! Default since batch 4 (clips a1743c72, cold, 3 reps): background compile only (fills Mesa's disk cache), no
+//! in-renderer replay. Worst frame after 10 s: 2d 140 (old) / 34 (bounded) / 20 (no replay) / 19 (off) ms, bench
+//! 128 / 37 / 18 / 17; glitterfall, gl-worker ~19 under all four; rocket's first GAME OVER ~200 under all four
+//! (the replay's gain there didn't reproduce). `PARTII_WR_PRECOMPILE_REPLAY=1` turns the bounded replay back on.
 //!
 //! Deferred (app stream, 2026-11-24): on a cold Mesa cache the compile ran from WebRender's start through the
 //! app's first contentful frame (8.4 s, 146 of 225 states, on a 2-CPU farm job) and slowed that frame (the
@@ -161,7 +165,7 @@ pub(crate) struct PartiiPrecompile {
     frames: usize,
     max_frame_ms: f64,
     started: Instant,
-    /// False: background compile only (`PARTII_WR_PRECOMPILE_REPLAY=0`).
+    /// False (the default): background compile only. `PARTII_WR_PRECOMPILE_REPLAY=1`: the bounded replay.
     replay: bool,
     /// A replayed state this slow or slower counts as a compile in the renderer's context.
     slow_ms: f64,
@@ -244,7 +248,7 @@ impl PartiiPrecompile {
             frames: 0,
             max_frame_ms: 0.0,
             started: Instant::now(),
-            replay: std::env::var("PARTII_WR_PRECOMPILE_REPLAY").as_deref() != Ok("0"),
+            replay: std::env::var("PARTII_WR_PRECOMPILE_REPLAY").as_deref() == Ok("1"),
             slow_ms: env_num("PARTII_WR_PRECOMPILE_SLOW_MS", 16.0),
             slow_max: env_num("PARTII_WR_PRECOMPILE_SLOW_MAX", 2),
             slow: 0,
@@ -280,7 +284,7 @@ impl PartiiPrecompile {
         }
         if !self.replay {
             eprintln!(
-                "partii-wr-precompile: background compile done {:.0} ms after start; in-renderer replay off",
+                "partii-wr-precompile: background compile done {:.0} ms after start; in-renderer replay off (default)",
                 self.started.elapsed().as_secs_f64() * 1000.0
             );
             // Nothing was drawn with the scratch: no GL objects to free.
