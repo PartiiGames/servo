@@ -9,7 +9,7 @@ interface MediaStream : EventTarget {
     [Throws] constructor();
     [Throws] constructor(MediaStream stream);
     [Throws] constructor(sequence<MediaStreamTrack> tracks);
-    // readonly        attribute DOMString id;
+    readonly        attribute DOMString id;
     sequence<MediaStreamTrack> getAudioTracks();
     sequence<MediaStreamTrack> getVideoTracks();
     sequence<MediaStreamTrack> getTracks();
@@ -17,7 +17,7 @@ interface MediaStream : EventTarget {
     undefined addTrack(MediaStreamTrack track);
     undefined removeTrack(MediaStreamTrack track);
     MediaStream clone();
-    // readonly        attribute boolean active;
+    readonly        attribute boolean active;
     //                 attribute EventHandler onaddtrack;
     //                 attribute EventHandler onremovetrack;
 };
