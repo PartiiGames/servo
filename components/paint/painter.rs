@@ -266,6 +266,8 @@ impl Painter {
         // (program_cache.rs), when the driver can hand program binaries out.
         let cached_programs = {
             let mut formats = [0];
+            // gleam's glGetIntegerv: writes one GLint into `formats`.
+            #[allow(unsafe_code)]
             unsafe {
                 webrender_gl.get_integer_v(gleam::gl::NUM_PROGRAM_BINARY_FORMATS, &mut formats);
             }
