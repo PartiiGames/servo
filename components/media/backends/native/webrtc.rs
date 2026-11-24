@@ -121,7 +121,9 @@ impl OpusDecoder {
             FRAME.min(out.len())
         };
         // SAFETY: out is writable for `frames` mono samples; a null packet asks for concealment.
-        let n = unsafe { opusic_sys::opus_decode_float(self.0, ptr, len, out.as_mut_ptr(), frames as i32, 0) };
+        let n = unsafe {
+            opusic_sys::opus_decode_float(self.0, ptr, len, out.as_mut_ptr(), frames as i32, 0)
+        };
         n.max(0) as usize
     }
 }
@@ -206,7 +208,10 @@ impl WebRtcControllerBackend for Str0mController {
     }
     fn add_ice_candidate(&mut self, candidate: IceCandidate) -> WebRtcResult {
         // Candidates in the remote description are used; trickled ones are not (yet).
-        debug!("webrtc: ignoring trickled candidate {}", candidate.candidate);
+        debug!(
+            "webrtc: ignoring trickled candidate {}",
+            candidate.candidate
+        );
         Ok(())
     }
     fn create_offer(
@@ -239,7 +244,9 @@ impl WebRtcControllerBackend for Str0mController {
         self.send(Msg::AddStream(*stream))
     }
     fn create_data_channel(&mut self, _: &DataChannelInit) -> WebRtcDataChannelResult {
-        Err(WebRtcError::Backend("data channels are not supported".into()))
+        Err(WebRtcError::Backend(
+            "data channels are not supported".into(),
+        ))
     }
     fn close_data_channel(&mut self, _: &DataChannelId) -> WebRtcResult {
         Ok(())
@@ -249,7 +256,9 @@ impl WebRtcControllerBackend for Str0mController {
         _: &DataChannelId,
         _: &DataChannelMessage,
     ) -> WebRtcResult {
-        Err(WebRtcError::Backend("data channels are not supported".into()))
+        Err(WebRtcError::Backend(
+            "data channels are not supported".into(),
+        ))
     }
     fn internal_event(&mut self, _: InternalEvent) -> WebRtcResult {
         Ok(())
@@ -266,7 +275,14 @@ impl WebRtcControllerBackend for Str0mController {
         receiver: AudioSource,
         receiver_track: MediaStreamId,
     ) -> WebRtcResult {
-        self.send(Msg::AddTransceiver(id, kind, direction, send, receiver, receiver_track))
+        self.send(Msg::AddTransceiver(
+            id,
+            kind,
+            direction,
+            send,
+            receiver,
+            receiver_track,
+        ))
     }
     fn set_direction(&mut self, id: TransceiverId, direction: RtpDirection) -> WebRtcResult {
         self.send(Msg::SetDirection(id, direction))
@@ -500,7 +516,14 @@ fn remote_source() -> (MediaStreamId, AudioSource) {
 
 /// The host addresses to gather: the default route's address (found without sending anything),
 /// and loopback when there is none or PARTII_WEBRTC_LOOPBACK=1 (local tests).
+/// PARTII_WEBRTC_BIND=<ip> gathers that address only (a farm test binds 127.0.0.1).
 fn host_addresses() -> Vec<IpAddr> {
+    if let Some(ip) = std::env::var("PARTII_WEBRTC_BIND")
+        .ok()
+        .and_then(|v| v.parse::<IpAddr>().ok())
+    {
+        return vec![ip];
+    }
     let mut v = vec![];
     if let Ok(s) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) &&
         s.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).is_ok() &&
@@ -513,6 +536,19 @@ fn host_addresses() -> Vec<IpAddr> {
         v.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
     v
+}
+
+/// Bind a UDP socket on `ip`: any port, or the first free one of PARTII_WEBRTC_PORTS=<lo>-<hi>
+/// (a farm job's port block).
+fn bind_udp(ip: IpAddr) -> Option<UdpSocket> {
+    let range = std::env::var("PARTII_WEBRTC_PORTS").ok().and_then(|v| {
+        let (a, b) = v.split_once('-')?;
+        Some((a.parse::<u16>().ok()?, b.parse::<u16>().ok()?))
+    });
+    match range {
+        Some((lo, hi)) => (lo..=hi).find_map(|p| UdpSocket::bind((ip, p)).ok()),
+        None => UdpSocket::bind((ip, 0)).ok(),
+    }
 }
 
 struct Peer {
@@ -565,10 +601,18 @@ impl Peer {
             decoded: vec![0.; 5760],
         };
         for ip in host_addresses() {
-            let Ok(sock) = UdpSocket::bind((ip, 0)) else { continue };
-            let Ok(addr) = sock.local_addr() else { continue };
-            let Ok(reader) = sock.try_clone() else { continue };
-            let Ok(c) = Candidate::host(addr, "udp") else { continue };
+            let Some(sock) = bind_udp(ip) else {
+                continue;
+            };
+            let Ok(addr) = sock.local_addr() else {
+                continue;
+            };
+            let Ok(reader) = sock.try_clone() else {
+                continue;
+            };
+            let Ok(c) = Candidate::host(addr, "udp") else {
+                continue;
+            };
             peer.rtc.add_local_candidate(c);
             peer.drain();
             let _ = reader.set_read_timeout(Some(Duration::from_millis(250)));
@@ -715,7 +759,9 @@ impl Peer {
                 if t.decoder.is_none() {
                     t.decoder = OpusDecoder::new();
                 }
-                let Some(dec) = t.decoder.as_mut() else { return };
+                let Some(dec) = t.decoder.as_mut() else {
+                    return;
+                };
                 t.bytes_in += d.data.len() as u64;
                 t.packets_in += 1;
                 t.last_packet = Some(Instant::now());
@@ -768,17 +814,22 @@ impl Peer {
     /// Disconnected for 15 s, or str0m gave up: failed. Receivers with no packets for 1 s mute.
     fn check_liveness(&mut self) {
         let now = Instant::now();
-        if self.pc_state != PeerConnectionState::Failed &&
-            (self.disconnected_at.is_some_and(|t| now - t > Duration::from_secs(15)) ||
-                !self.rtc.is_alive())
+        if self.pc_state != PeerConnectionState::Failed
+            && (self
+                .disconnected_at
+                .is_some_and(|t| now - t > Duration::from_secs(15))
+                || !self.rtc.is_alive())
         {
             self.pc_state = PeerConnectionState::Failed;
-            self.signaller.update_connection_state(PeerConnectionState::Failed);
+            self.signaller
+                .update_connection_state(PeerConnectionState::Failed);
             self.signaller
                 .update_ice_connection_state(IceConnectionState::Failed);
         }
         for t in &mut self.trs {
-            let live = t.last_packet.is_some_and(|p| now - p < Duration::from_secs(1));
+            let live = t
+                .last_packet
+                .is_some_and(|p| now - p < Duration::from_secs(1));
             if live != t.receiving {
                 t.receiving = live;
                 t.recv.set_muted(!live);
@@ -791,7 +842,9 @@ impl Peer {
     fn send_audio(&mut self) {
         let connected = self.pc_state == PeerConnectionState::Connected;
         for t in &mut self.trs {
-            let Some(side) = t.send.as_mut() else { continue };
+            let Some(side) = t.send.as_mut() else {
+                continue;
+            };
             side.rate.pull(&mut side.reader, &mut side.pcm);
             if !(connected && t.negotiated && !t.stopped && sends(t.current)) {
                 side.pcm.clear();
@@ -823,21 +876,31 @@ impl Peer {
         let mut frame = [0f32; FRAME];
         for i in 0..self.trs.len() {
             let t = &mut self.trs[i];
-            let Some(side) = t.send.as_mut() else { continue };
-            if !(connected && t.negotiated && !t.stopped && sends(t.current)) ||
-                side.pcm.len() < FRAME
+            let Some(side) = t.send.as_mut() else {
+                continue;
+            };
+            if !(connected && t.negotiated && !t.stopped && sends(t.current))
+                || side.pcm.len() < FRAME
             {
                 continue;
             }
             let Some(mid) = t.mid else { continue };
             frame.copy_from_slice(&side.pcm[..FRAME]);
             side.pcm.drain(..FRAME);
-            let Some(enc) = t.encoder.as_mut() else { continue };
-            let Some(n) = enc.encode(&frame, &mut self.encoded) else { continue };
+            let Some(enc) = t.encoder.as_mut() else {
+                continue;
+            };
+            let Some(n) = enc.encode(&frame, &mut self.encoded) else {
+                continue;
+            };
             let time = MediaTime::new(t.samples_sent, Frequency::FORTY_EIGHT_KHZ);
             t.samples_sent += FRAME as u64;
-            let Some(writer) = self.rtc.writer(mid) else { continue };
-            let Some(pt) = writer.payload_params().next().map(|p| p.pt()) else { continue };
+            let Some(writer) = self.rtc.writer(mid) else {
+                continue;
+            };
+            let Some(pt) = writer.payload_params().next().map(|p| p.pt()) else {
+                continue;
+            };
             if writer
                 .write(pt, Instant::now(), time, self.encoded[..n].to_vec())
                 .is_ok()
@@ -873,7 +936,9 @@ impl Peer {
             if !t.negotiated {
                 continue;
             }
-            let Some(m) = self.rtc.media(mid) else { continue };
+            let Some(m) = self.rtc.media(mid) else {
+                continue;
+            };
             let was = t.current;
             if m.stopped() {
                 t.stopped = true;
@@ -897,7 +962,9 @@ impl Peer {
                 destination,
                 at,
             } => {
-                let Ok(contents) = data.as_slice().try_into() else { return };
+                let Ok(contents) = data.as_slice().try_into() else {
+                    return;
+                };
                 let input = Input::Receive(
                     at,
                     Receive {
@@ -1074,7 +1141,8 @@ impl Peer {
                 }
                 self.last_local = Some(desc);
                 self.set_signaling(SignalingState::HaveLocalOffer);
-                self.signaller.update_gathering_state(GatheringState::Complete);
+                self.signaller
+                    .update_gathering_state(GatheringState::Complete);
                 self.report(&[]);
                 Ok(())
             },
@@ -1086,7 +1154,8 @@ impl Peer {
                 self.answer = None;
                 let fire = self.refresh_directions();
                 self.set_signaling(SignalingState::Stable);
-                self.signaller.update_gathering_state(GatheringState::Complete);
+                self.signaller
+                    .update_gathering_state(GatheringState::Complete);
                 self.report(&fire);
                 Ok(())
             },
@@ -1094,7 +1163,8 @@ impl Peer {
                 let Some((pending, added)) = self.pending.take() else {
                     return Err("InvalidStateError: no local offer".into());
                 };
-                let answer = SdpAnswer::from_sdp_string(&desc.sdp).map_err(|e| format!("OperationError: {e:?}"))?;
+                let answer = SdpAnswer::from_sdp_string(&desc.sdp)
+                    .map_err(|e| format!("OperationError: {e:?}"))?;
                 let r = self.rtc.sdp_api().accept_answer(pending, answer);
                 if let Err(e) = r {
                     self.drain();
@@ -1115,7 +1185,8 @@ impl Peer {
                 Ok(())
             },
             (DescriptionType::Remote, SdpType::Offer) => {
-                let offer = SdpOffer::from_sdp_string(&desc.sdp).map_err(|e| format!("OperationError: {e:?}"))?;
+                let offer = SdpOffer::from_sdp_string(&desc.sdp)
+                    .map_err(|e| format!("OperationError: {e:?}"))?;
                 // A remote offer rolls back an unanswered local one.
                 if let Some((_, added)) = self.pending.take() {
                     for t in &mut self.trs {
@@ -1205,7 +1276,8 @@ impl Peer {
         self.set_signaling(SignalingState::Closed);
         if self.pc_state != PeerConnectionState::Closed {
             self.pc_state = PeerConnectionState::Closed;
-            self.signaller.update_connection_state(PeerConnectionState::Closed);
+            self.signaller
+                .update_connection_state(PeerConnectionState::Closed);
         }
         self.signaller.close();
     }
