@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::live::TrackEvent;
 use crate::registry::MediaStreamId;
 
 /// The pixel layout of a frame.
@@ -117,6 +118,7 @@ pub struct VideoTrackInfo {
 }
 
 type UnusedCallback = Box<dyn Fn() + Send + Sync>;
+type Watcher = Arc<dyn Fn(TrackEvent) + Send + Sync>;
 
 struct Source {
     label: String,
@@ -129,14 +131,34 @@ struct Source {
     live_tracks: AtomicUsize,
     frame_rate: Mutex<f64>,
     on_unused: Mutex<Option<UnusedCallback>>,
+    watchers: Mutex<Vec<(MediaStreamId, Watcher)>>,
 }
 
 impl Source {
+    /// Calls the watchers (of `only`, or every track), outside the lock.
+    fn notify(&self, only: Option<&MediaStreamId>, event: TrackEvent) {
+        let watchers: Vec<Watcher> = self
+            .watchers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| only.is_none_or(|o| o == id))
+            .map(|(_, w)| w.clone())
+            .collect();
+        for w in watchers {
+            w(event);
+        }
+    }
+
     fn end(&self) {
-        self.ended.store(true, Ordering::SeqCst);
-        // Take the lock so a reader between its check and its wait still sees the notification.
-        let _latest = self.latest.lock().unwrap();
+        if self.ended.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Drop the last frame (tracks outlive their source in the map until the DOM collects them), under
+        // the lock, so a reader between its check and its wait still sees the notification.
+        *self.latest.lock().unwrap() = None;
         self.newer.notify_all();
+        self.notify(None, TrackEvent::Ended);
     }
 }
 
@@ -196,6 +218,7 @@ pub fn create_video_source(label: &str) -> (MediaStreamId, VideoSource) {
         live_tracks: AtomicUsize::new(0),
         frame_rate: Mutex::new(0.0),
         on_unused: Mutex::new(None),
+        watchers: Mutex::new(Vec::new()),
     });
     let id = add_track(source.clone());
     (id, VideoSource(Arc::new(SourceOwner(source))))
@@ -229,7 +252,10 @@ impl VideoSource {
 
     /// The source itself is muted (no frames for a while: a remote track without packets).
     pub fn set_muted(&self, muted: bool) {
-        self.src().muted.store(muted, Ordering::SeqCst);
+        let src = self.src();
+        if src.muted.swap(muted, Ordering::SeqCst) != muted && !src.ended.load(Ordering::SeqCst) {
+            src.notify(None, if muted { TrackEvent::Muted } else { TrackEvent::Unmuted });
+        }
     }
 
     /// The nominal frame rate, for `track_info` (`captureStream(fps)`, a camera's mode).
@@ -266,6 +292,11 @@ pub fn stop_video_track(id: &MediaStreamId) {
         let _latest = track.source.latest.lock().unwrap();
         track.source.newer.notify_all();
     }
+    if !track.source.ended.load(Ordering::SeqCst) {
+        track.source.notify(Some(id), TrackEvent::Ended);
+    }
+    // A stopped track hears nothing more (not the source's end either).
+    track.source.watchers.lock().unwrap().retain(|(x, _)| x != id);
     if track.source.live_tracks.fetch_sub(1, Ordering::SeqCst) == 1 {
         if let Some(callback) = track.source.on_unused.lock().unwrap().as_ref() {
             callback();
@@ -273,10 +304,22 @@ pub fn stop_video_track(id: &MediaStreamId) {
     }
 }
 
+/// Tells `f` about this track's mute, unmute and end (its source's end, or its own stop), as
+/// live::watch_track does for audio. Called on the producer's thread (or the stopping one): forward to
+/// the script thread. One watcher per track; a new one replaces it. Forgotten with the track.
+pub fn watch_video_track(id: &MediaStreamId, f: Box<dyn Fn(TrackEvent) + Send + Sync>) {
+    let Some(track) = track(id) else { return };
+    let mut w = track.source.watchers.lock().unwrap();
+    w.retain(|(x, _)| x != id);
+    w.push((*id, Arc::from(f)));
+}
+
 /// Forgets a track id (its DOM object was collected). Stops it first.
 pub fn unregister_video_track(id: &MediaStreamId) {
     stop_video_track(id);
-    VIDEO_TRACKS.lock().unwrap().remove(id);
+    if let Some(track) = VIDEO_TRACKS.lock().unwrap().remove(id) {
+        track.source.watchers.lock().unwrap().retain(|(x, _)| x != id);
+    }
 }
 
 /// `track.enabled`: a disabled track reads black frames.
@@ -419,9 +462,19 @@ mod tests {
         let h = hit.clone();
         source.on_unused(Box::new(move || h.store(true, Ordering::SeqCst)));
         let id2 = clone_video_track(&id).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let e = events.clone();
+        watch_video_track(&id2, Box::new(move |ev| e.lock().unwrap().push(ev)));
+        source.set_muted(true);
+        source.set_muted(false);
         stop_video_track(&id);
         assert!(!hit.load(Ordering::SeqCst));
         stop_video_track(&id2);
         assert!(hit.load(Ordering::SeqCst));
+        drop(source);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![TrackEvent::Muted, TrackEvent::Unmuted, TrackEvent::Ended]
+        );
     }
 }
