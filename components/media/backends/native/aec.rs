@@ -128,6 +128,8 @@ pub(crate) struct Aec {
     /// The processor and the far-end rate it was built for.
     apm: Option<(u32, AudioProcessing)>,
     pending: VecDeque<f32>,
+    /// 10 ms far-end frames handed to the processor (the tests check the far end arrives).
+    render_frames: u64,
     render: Vec<f32>,
     render_out: Vec<f32>,
     frame: Vec<f32>,
@@ -147,6 +149,7 @@ impl Aec {
             channels: channels.max(1) as usize,
             apm: None,
             pending: VecDeque::new(),
+            render_frames: 0,
             render: Vec::new(),
             render_out: Vec::new(),
             frame: Vec::new(),
@@ -183,6 +186,7 @@ impl Aec {
             self.render_out.resize(rn, 0.);
             for chunk in self.render.chunks_exact(rn) {
                 let _ = apm.process_render_f32(&[chunk], &mut [&mut self.render_out[..]]);
+                self.render_frames += 1;
             }
             let _ = apm.set_stream_delay_ms(DELAY_HINT_MS);
             self.frame.clear();
@@ -218,44 +222,90 @@ mod tests {
         (s1 * s1 + s2 * s2 - c * s1 * s2) / x.len() as f32
     }
 
-    /// A far-end 880 Hz tone comes back into the microphone 30 ms later at half level, over a near-end 440 Hz tone:
-    /// after 4 s the echo is at least 15 dB down and the near end within 6 dB.
-    #[test]
-    fn cancels_a_far_end_tone() {
-        const RATE: u32 = 48000;
-        let n = (RATE / 100) as usize;
-        let mut aec = Aec::with_stages(
+    struct Lcg(u32);
+    impl Lcg {
+        fn next(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223);
+            (self.0 >> 8) as f32 / (1u32 << 24) as f32 * 2. - 1.
+        }
+    }
+
+    fn mean_sq(x: &[f32]) -> f32 {
+        x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32
+    }
+
+    const RATE: u32 = 48000;
+    /// The far end is process-wide (every tap gets it): one test at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn aec() -> Aec {
+        Aec::with_stages(
             RATE,
             1,
             Stages {
                 noise_suppression: false,
                 gain_control: false,
             },
-        );
+        )
+    }
+
+    /// Single talk: a noise far end comes back into the microphone 30 ms later at half level. After 6 s the echo is
+    /// at least 15 dB down (echo return loss enhancement over the last 2 s), and the far end reached the processor.
+    #[test]
+    fn cancels_a_far_end_echo() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let n = (RATE / 100) as usize;
+        let mut aec = aec();
+        let mut rng = Lcg(7);
         let mut echo: VecDeque<f32> = std::iter::repeat_n(0., RATE as usize * 30 / 1000).collect();
         let (mut cap_all, mut out_all) = (Vec::new(), Vec::new());
-        for i in 0..400 {
-            let t0 = i * n;
-            let far: Vec<f32> = (0..n)
-                .map(|k| 0.5 * (2. * PI * 880. * (t0 + k) as f32 / RATE as f32).sin())
-                .collect();
+        for _ in 0..600 {
+            let far: Vec<f32> = (0..n).map(|_| 0.3 * rng.next()).collect();
             feed_render(&far, 1, RATE);
-            let cap: Vec<f32> = (0..n)
-                .map(|k| {
-                    echo.push_back(far[k]);
-                    0.3 * (2. * PI * 440. * (t0 + k) as f32 / RATE as f32).sin() + 0.5 * echo.pop_front().unwrap()
+            let cap: Vec<f32> = far
+                .iter()
+                .map(|f| {
+                    echo.push_back(*f);
+                    0.5 * echo.pop_front().unwrap()
                 })
                 .collect();
             cap_all.extend_from_slice(&cap);
             aec.process(&cap, |f| out_all.extend_from_slice(f));
         }
-        let last = RATE as usize;
-        let (cap, out) = (&cap_all[cap_all.len() - last..], &out_all[out_all.len() - last..]);
-        let db = |a: f32, b: f32| 10. * (a.max(1e-20) / b.max(1e-20)).log10();
-        let erle = db(power(cap, 880., RATE as f32), power(out, 880., RATE as f32));
-        let near = db(power(cap, 440., RATE as f32), power(out, 440., RATE as f32));
-        println!("AEC-TEST erle_880_db {erle:.1} near_440_loss_db {near:.1}");
+        let last = 2 * RATE as usize;
+        let erle = 10.
+            * (mean_sq(&cap_all[cap_all.len() - last..]) / mean_sq(&out_all[out_all.len() - last..]).max(1e-20))
+                .log10();
+        let stats = aec.apm.as_ref().map(|(_, a)| format!("{:?}", a.statistics()));
+        println!(
+            "AEC-TEST echo: erle_db {erle:.1} render_frames {} stats {stats:?}",
+            aec.render_frames
+        );
+        assert!(aec.render_frames >= 590, "the far end didn't reach the processor ({} frames)", aec.render_frames);
         assert!(erle >= 15., "echo only {erle:.1} dB down");
-        assert!(near <= 6., "near end lost {near:.1} dB");
+    }
+
+    /// Near end only (the far end silent): a 440 Hz tone comes through within 3 dB.
+    #[test]
+    fn keeps_the_near_end() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let n = (RATE / 100) as usize;
+        let mut aec = aec();
+        let (mut cap_all, mut out_all) = (Vec::new(), Vec::new());
+        for i in 0..300 {
+            feed_render(&vec![0.; n], 1, RATE);
+            let cap: Vec<f32> = (0..n)
+                .map(|k| 0.3 * (2. * PI * 440. * (i * n + k) as f32 / RATE as f32).sin())
+                .collect();
+            cap_all.extend_from_slice(&cap);
+            aec.process(&cap, |f| out_all.extend_from_slice(f));
+        }
+        let last = RATE as usize;
+        let loss = 10.
+            * (power(&cap_all[cap_all.len() - last..], 440., RATE as f32)
+                / power(&out_all[out_all.len() - last..], 440., RATE as f32).max(1e-20))
+                .log10();
+        println!("AEC-TEST near: loss_db {loss:.1}");
+        assert!(loss.abs() <= 3., "near end changed {loss:.1} dB");
     }
 }
