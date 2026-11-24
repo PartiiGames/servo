@@ -5,7 +5,7 @@
 // https://w3c.github.io/mediacapture-record/#mediarecorder-api
 // Partii: video tracks only (VP8 in WebM), servo-media-recorder.
 
-[Exposed=Window]
+[Exposed=Window, Pref="dom_mediarecorder_enabled"]
 interface MediaRecorder : EventTarget {
   [Throws] constructor(MediaStream stream, optional MediaRecorderOptions options = {});
   readonly attribute MediaStream stream;

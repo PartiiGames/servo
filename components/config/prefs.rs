@@ -141,6 +141,9 @@ pub struct Preferences {
     pub dom_allow_scripts_to_close_windows: bool,
     // feature: Media Capture and Streams API | #26861 | Web/API/Media_Capture_and_Streams_API
     pub dom_canvas_capture_enabled: bool,
+    /// Partii: `MediaRecorder` exposed (clips). Off = the interface is undefined, as the runtime's clips kill switch
+    /// (PARTII_RUNTIME_CLIPS=0) wants, so a game's clip() reports clips unavailable instead of failing.
+    pub dom_mediarecorder_enabled: bool,
     pub dom_canvas_text_enabled: bool,
     /// Selects canvas backend
     ///
@@ -509,6 +512,7 @@ impl Preferences {
             dom_bluetooth_enabled: false,
             dom_bluetooth_testing_enabled: false,
             dom_canvas_capture_enabled: true,
+            dom_mediarecorder_enabled: true,
             dom_canvas_text_enabled: true,
             dom_canvas_backend: String::new(),
             dom_canvas_msg_buffer_size: 16,
