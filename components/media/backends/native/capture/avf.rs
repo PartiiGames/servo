@@ -24,7 +24,7 @@ use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput,
     AVCaptureDevicePosition, AVCaptureOutput, AVCaptureSession, AVCaptureSessionPreset640x480,
     AVCaptureSessionPreset1280x720, AVCaptureSessionPreset1920x1080, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
+    AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeAudio, AVMediaTypeVideo,
 };
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{
@@ -155,8 +155,20 @@ pub(super) fn list() -> Vec<CameraInfo> {
 
 /// Asks the OS for camera access (once per app; later calls answer at once).
 fn authorized() -> bool {
+    authorized_for(media_type_video())
+}
+
+/// Asks the OS for microphone access before the mic opens (capture/mic.rs): cpal's CoreAudio input would trigger
+/// the same prompt by itself, but the mic's open gives up after 10 s, so a player still reading the prompt got
+/// NotReadableError ("no microphone"). Never called with the fake mic.
+pub(super) fn mic_authorized() -> bool {
+    // SAFETY: an AVFoundation constant.
+    authorized_for(unsafe { AVMediaTypeAudio }.expect("AVMediaTypeAudio"))
+}
+
+fn authorized_for(media_type: &objc2_av_foundation::AVMediaType) -> bool {
     // SAFETY: class methods on AVCaptureDevice.
-    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type_video()) };
+    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type) };
     if status == AVAuthorizationStatus::Authorized {
         return true;
     }
@@ -169,7 +181,7 @@ fn authorized() -> bool {
     });
     // SAFETY: the block is copied by AVFoundation and called once.
     unsafe {
-        AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type_video(), &block)
+        AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &block)
     };
     rx.recv_timeout(Duration::from_secs(120)).unwrap_or(false)
 }
