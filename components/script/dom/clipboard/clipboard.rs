@@ -11,12 +11,13 @@ use js::context::JSContext;
 use js::realm::CurrentRealm;
 use js::rust::HandleValue as SafeHandleValue;
 use script_bindings::reflector::reflect_dom_object;
-use servo_constellation_traits::BlobImpl;
+use servo_constellation_traits::{BlobImpl, PolicyFeature};
 
 use super::clipboarditem::Representation;
 use crate::dom::bindings::codegen::Bindings::ClipboardBinding::{
     ClipboardMethods, PresentationStyle,
 };
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::TrustedPromise;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -106,14 +107,29 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
 
         // Step 3 Run the following steps in parallel:
 
-        // TODO Step 3.1 Let r be the result of running check clipboard read permission.
+        // Step 3.1 Let r be the result of running check clipboard read permission.
         // Step 3.2 If r is false, then:
         // Step 3.2.1 Queue a global task on the permission task source, given realm’s global object,
         // to reject p with "NotAllowedError" DOMException in realm.
         // Step 3.2.2 Abort these steps.
+        // Partii: the permission is the frame's policy (`<iframe allow="clipboard-read">`; a
+        // top-level document may), so a game frame can't read the clipboard unless it declares it.
+        let window = global.as_window();
+        if !window
+            .Document()
+            .is_feature_enabled(PolicyFeature::ClipboardRead)
+        {
+            p.reject_error(
+                realm,
+                Error::NotAllowed(Some(
+                    "readText: this frame may not read the clipboard (allow=\"clipboard-read\")"
+                        .into(),
+                )),
+            );
+            return p;
+        }
 
         // Step 3.3 Let data be a copy of the system clipboard data.
-        let window = global.as_window();
         let callback = callback_promise(&p, self, global.task_manager().clipboard_task_source());
         window.send_to_embedder(EmbedderMsg::GetClipboardText(window.webview_id(), callback));
 
@@ -139,6 +155,22 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
         // Step 3.2.1 Queue a global task on the permission task source, given realm’s global object,
         // to reject p with "NotAllowedError" DOMException in realm.
         // Step 3.2.2 Abort these steps.
+        // Partii: the frame's policy (`<iframe allow="clipboard-write">`; a top-level document
+        // may), so a game frame can't overwrite the clipboard unless it declares it.
+        if !global
+            .as_window()
+            .Document()
+            .is_feature_enabled(PolicyFeature::ClipboardWrite)
+        {
+            p.reject_error(
+                realm,
+                Error::NotAllowed(Some(
+                    "writeText: this frame may not write the clipboard (allow=\"clipboard-write\")"
+                        .into(),
+                )),
+            );
+            return p;
+        }
 
         let trusted_promise = TrustedPromise::from(&p);
         let bytes = Vec::from(data);
