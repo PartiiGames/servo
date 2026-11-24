@@ -805,11 +805,12 @@ fn all_opaque(pixels: &[u8]) -> bool {
         .all(|chunk| chunk.iter().fold(alpha, |acc, w| acc & w) & alpha == alpha)
 }
 
-/// Partii (clips): `PARTII_CANVAS_COVER=0` turns off both the covering-drawImage queue drop and the
-/// queued-image cap (an A/B of 9347e06 in one binary).
+/// Partii (clips): the covering-drawImage queue drop and the queued-image cap (9347e06) are OFF unless
+/// `PARTII_CANVAS_COVER=1`. On by default they raised rth-drv's odds of its slow script mode (batch 3,
+/// 30-rep bisect 11-24); they come back after Friday limited to captureStream canvases.
 fn canvas_cover() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| !matches!(std::env::var("PARTII_CANVAS_COVER").as_deref(), Ok("0")))
+    *ON.get_or_init(|| matches!(std::env::var("PARTII_CANVAS_COVER").as_deref(), Ok("1")))
 }
 
 fn canvas_opaque_scan() -> bool {
