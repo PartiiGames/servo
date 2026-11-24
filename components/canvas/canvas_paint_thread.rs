@@ -9,7 +9,7 @@ use crossbeam_channel::{Sender, select, unbounded};
 use euclid::default::{Rect, Size2D, Transform2D};
 use log::warn;
 use paint_api::CrossProcessPaintApi;
-use pixels::{Snapshot, SnapshotPixelFormat};
+use pixels::Snapshot;
 use profile_traits::mem::{
     ProcessReports, ProfilerChan, Report, ReportsChan, perform_memory_report,
 };
@@ -276,32 +276,6 @@ impl CanvasPaintThread {
                 composition_options,
                 transform,
             ),
-            CanvasCommand::DrawImageFromWebGL(
-                WebGLReadback(receiver, size),
-                dest_rect,
-                source_rect,
-                smoothing_enabled,
-                shadow_options,
-                composition_options,
-                transform,
-            ) => match receiver.recv() {
-                Ok((data, alpha_mode)) => {
-                    let mut data = data.to_vec();
-                    pixels::flip_y_rgba8_image_inplace(size, &mut data);
-                    let snapshot =
-                        Snapshot::from_vec(size, SnapshotPixelFormat::RGBA, alpha_mode, data);
-                    self.canvas(canvas_id).draw_image(
-                        snapshot,
-                        dest_rect,
-                        source_rect,
-                        smoothing_enabled,
-                        shadow_options,
-                        composition_options,
-                        transform,
-                    );
-                },
-                Err(error) => warn!("DrawImageFromWebGL: no readback ({error:?})"),
-            },
             CanvasCommand::DrawEmptyImage(
                 image_size,
                 dest_rect,

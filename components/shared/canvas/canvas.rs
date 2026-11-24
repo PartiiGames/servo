@@ -13,12 +13,10 @@ use fonts_traits::{FontDataAndIndex, FontIdentifier};
 use kurbo::{BezPath, ParamCurveNearest as _, PathEl, Point, Shape, Triangle};
 use malloc_size_of::MallocSizeOf;
 use malloc_size_of_derive::MallocSizeOf;
-use pixels::{SharedSnapshot, SnapshotAlphaMode};
+use pixels::SharedSnapshot;
 use serde::{Deserialize, Serialize};
 use servo_base::Epoch;
-use servo_base::generic_channel::{
-    GenericCallback, GenericReceiver, GenericSender, GenericSharedMemory,
-};
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use strum::{Display, EnumString};
 use style::color::AbsoluteColor;
 use webrender_api::ImageKey;
@@ -676,27 +674,6 @@ pub struct LineOptions {
 
 pub type CanvasMsg = (CanvasId, CanvasCommand);
 
-/// Partii: a pending WebGL readback (the answer to WebGLCommand::ReadPixels of the whole drawing buffer: RGBA,
-/// rows bottom-up) of this size. drawImage(webglCanvas) hands it to the canvas thread, which waits for it,
-/// so the script thread doesn't.
-#[derive(Deserialize, Serialize)]
-pub struct WebGLReadback(
-    pub GenericReceiver<(GenericSharedMemory, SnapshotAlphaMode)>,
-    pub Size2D<u32>,
-);
-
-impl MallocSizeOf for WebGLReadback {
-    fn size_of(&self, _ops: &mut malloc_size_of::MallocSizeOfOps) -> usize {
-        0
-    }
-}
-
-impl std::fmt::Debug for WebGLReadback {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "WebGLReadback({:?})", self.1)
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize, Display, MallocSizeOf)]
 pub enum CanvasCommand {
     /// This is used for resizing (when size is provided) or just clearing the canvas (when size is `None`).
@@ -706,16 +683,6 @@ pub enum CanvasCommand {
     SetImageKey(ImageKey),
     DrawImage(
         SharedSnapshot,
-        Rect<f64>,
-        Rect<f64>,
-        bool,
-        ShadowOptions,
-        CompositionOptions,
-        Transform2D<f64>,
-    ),
-    /// Partii: DrawImage of a WebGL canvas's pending readback (WebGLReadback).
-    DrawImageFromWebGL(
-        WebGLReadback,
         Rect<f64>,
         Rect<f64>,
         bool,

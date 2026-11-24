@@ -1006,40 +1006,8 @@ impl CanvasState {
                         },
                     }
                 },
-                // Partii: WebGL and WebGL2: the canvas thread waits for the drawing buffer's readback,
-                // not the script thread (jam clips copy the game's WebGL canvas every frame).
-                #[cfg(feature = "webgl")]
-                RenderingContext::WebGL(ref context) => {
-                    let Some(readback) = context.read_pixels_pending() else {
-                        return Ok(());
-                    };
-                    self.send_canvas_command(CanvasCommand::DrawImageFromWebGL(
-                        readback,
-                        dest_rect,
-                        source_rect,
-                        smoothing_enabled,
-                        self.state.borrow().shadow_options(),
-                        self.state.borrow().composition_options(),
-                        self.state.borrow().transform,
-                    ));
-                },
-                #[cfg(feature = "webgl")]
-                RenderingContext::WebGL2(ref context) => {
-                    let Some(readback) = context.base_context().read_pixels_pending() else {
-                        return Ok(());
-                    };
-                    self.send_canvas_command(CanvasCommand::DrawImageFromWebGL(
-                        readback,
-                        dest_rect,
-                        source_rect,
-                        smoothing_enabled,
-                        self.state.borrow().shadow_options(),
-                        self.state.borrow().composition_options(),
-                        self.state.borrow().transform,
-                    ));
-                },
-                // WebGPU canvases: draw a copy of their image contents (the current texture), as for
-                // the contexts above.
+                // WebGL, WebGL2 and WebGPU canvases: draw a copy of their image contents
+                // (the drawing buffer / current texture), as for the contexts above.
                 ref other => {
                     let Some(snapshot) = other.get_image_data() else {
                         return Ok(());
