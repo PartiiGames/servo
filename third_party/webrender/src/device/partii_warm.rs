@@ -17,6 +17,13 @@
 //! first frame, so the variants exist when the page needs them. GPUs compile at link time, so this
 //! is on only for software GL. `PARTII_WR_WARMUP=0` turns it off, `=1` forces it on any GL.
 //! `PARTII_WR_WARMUP_FILE` names the file, `PARTII_WR_WARMUP_MS` caps the replay (default 4000).
+//!
+//! The file is shared by every page this user runs, so it grows with each game played. Replaying all
+//! of it (up to 4000 states, ~4 ms each even on a warm Mesa cache) made every page pay for every
+//! other game: a 4 s start-up replay, then the rest in the background and in frames (clips, 11-24).
+//! So at start only the most recently recorded `PARTII_WR_WARMUP_KEEP` states (default 256) are
+//! kept and replayed, newest first, and the file is trimmed to them. States a page needs that were
+//! trimmed are recorded again (they move to the end); Mesa's own cache still holds their variants.
 
 use super::*;
 use std::collections::hash_map::DefaultHasher;
@@ -25,6 +32,13 @@ use std::hash::{Hash, Hasher};
 use std::io::Write as _;
 
 const MAX_ENTRIES: usize = 4000;
+/// The recorded states kept and replayed at start: the most recent ones (`PARTII_WR_WARMUP_KEEP`).
+fn keep_max() -> usize {
+    std::env::var("PARTII_WR_WARMUP_KEEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256)
+}
 const STATE_ENUMS: [gl::GLenum; 10] = [
     gl::BLEND,
     gl::BLEND_SRC_RGB,
@@ -239,18 +253,39 @@ impl Recorder {
         let path = file_path();
         let mut known = HashSet::new();
         let mut loaded = Vec::new();
-        if let Some(text) = path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
-            for line in text.lines() {
-                if known.len() >= MAX_ENTRIES {
-                    break;
-                }
-                if known.contains(line) {
+        if let (Some(p), Some(text)) = (path.as_ref(), path.as_ref().and_then(|p| std::fs::read_to_string(p).ok())) {
+            // Newest first: each state's last occurrence, then at most `keep_max()` of them.
+            let keep = keep_max().min(MAX_ENTRIES);
+            let mut seen = HashSet::new();
+            let mut newest: Vec<&str> = Vec::new();
+            let mut total = 0usize;
+            for line in text.lines().rev() {
+                if !seen.insert(line) {
                     continue;
                 }
+                total += 1;
+                if newest.len() < keep && WarmEntry::from_line(line).is_some() {
+                    newest.push(line);
+                }
+            }
+            for line in &newest {
                 if let Some(e) = WarmEntry::from_line(line) {
-                    known.insert(line.to_owned());
+                    known.insert((*line).to_owned());
                     loaded.push(e);
                 }
+            }
+            if total > newest.len() {
+                // Trim the file to the kept states, oldest first (appends stay newest-last).
+                let mut out = String::new();
+                for line in newest.iter().rev() {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                let tmp = p.with_extension("trim");
+                if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, p).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                eprintln!("partii-wr-warmup: kept the newest {} of {total} recorded states", newest.len());
             }
         }
         Box::new(Recorder {
