@@ -41,7 +41,9 @@ use servo_media_audio::context::{AudioContext, AudioContextOptions};
 use servo_media_audio::decoder::AudioDecoder;
 use servo_media_audio::sink::AudioSinkError;
 use servo_media_audio::{AudioBackend, AudioStreamReader};
-use servo_media_dummy::{DummyBackend, DummyPlayer, DummyStreamReader, DummyWebRtcController};
+use servo_media_dummy::{DummyBackend, DummyPlayer, DummyStreamReader};
+#[cfg(not(feature = "webrtc"))]
+use servo_media_dummy::DummyWebRtcController;
 use servo_media_player::context::PlayerGLContext;
 use servo_media_player::{Player, PlayerEvent, StreamType, audio, video};
 use servo_media_streams::capture::MediaTrackConstraintSet;

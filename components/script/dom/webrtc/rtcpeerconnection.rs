@@ -1004,7 +1004,6 @@ impl RTCPeerConnectionMethods<crate::DomTypeHolder> for RTCPeerConnection {
         &self,
         cx: &mut JSContext,
         track: &MediaStreamTrack,
-        _streams: Vec<DomRoot<MediaStream>>,
     ) -> Fallible<DomRoot<RTCRtpSender>> {
         if self.closed.get() {
             return Err(Error::InvalidState(None));

@@ -144,8 +144,9 @@ partial interface RTCPeerConnection {
     sequence<RTCRtpSender>      getSenders();
     sequence<RTCRtpReceiver>    getReceivers();
     sequence<RTCRtpTransceiver> getTransceivers();
-    [Throws] RTCRtpSender       addTrack(MediaStreamTrack track,
-                                         MediaStream... streams);
+    // The spec's `MediaStream... streams` is left out: the bindings' codegen can't take a variadic
+    // interface argument here yet, and jam voice doesn't pass streams.
+    [Throws] RTCRtpSender       addTrack(MediaStreamTrack track);
     // void                        removeTrack(RTCRtpSender sender);
     [Throws] RTCRtpTransceiver  addTransceiver((MediaStreamTrack or DOMString) trackOrKind,
                                                optional RTCRtpTransceiverInit init = {});
