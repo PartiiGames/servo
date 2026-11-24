@@ -16,6 +16,7 @@
 //!   registry (streams.rs), and RTCPeerConnection on str0m with Opus (webrtc.rs, the `webrtc`
 //!   feature); `<audio>.srcObject` plays live audio tracks ([`stream_player`]).
 
+mod aec;
 mod capture;
 mod codecs;
 pub mod decoder;

@@ -41,6 +41,9 @@ libc = { workspace = true }
 # aws-lc-rs crypto (DTLS through dimpl), and libopus (the same bundled build as opus above).
 str0m = { version = "0.25.0", default-features = false, features = ["aws-lc-rs"], optional = true }
 opusic-sys = { version = "0.7.7", optional = true }
+# Microphone echo cancellation, noise suppression and gain control (aec.rs): the pure-Rust port of WebRTC's audio
+# processing (BSD-3-Clause).
+sonora = "0.3.0"
 
 # cpal's own ALSA binding: to keep alsa-lib's probe errors off stderr when there's no sound card.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]

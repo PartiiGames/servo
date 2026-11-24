@@ -6,6 +6,11 @@
 //! stream's): cpal input at the device's own rate and channels (readers resample), or the fake mic
 //! (`PARTII_FAKE_MIC=<hz>`, or 440 Hz with `media_fake_video_input` / set_capture_mocking): a sine at
 //! 48 kHz mono, label "Partii fake mic". The device closes when the last track stops.
+//!
+//! A device microphone goes through echo cancellation (`aec.rs`, mono out) unless `PARTII_RUNTIME_AEC=0`. The fake
+//! mic doesn't (noise suppression would treat its tone as noise), except with `PARTII_FAKE_MIC_ECHO=<gain>`: then it
+//! hears what the output plays, 30 ms late at that gain, on top of its tone, and goes through echo cancellation as
+//! a device would (the farm's echo test; `PARTII_RUNTIME_AEC=0` shows the echo).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,8 +48,22 @@ fn stop_flag(source: &AudioSource) -> Arc<AtomicBool> {
     stop
 }
 
+/// `PARTII_FAKE_MIC_ECHO`: the gain the fake mic hears the output at (none when unset or not in 0..=2).
+fn fake_echo_gain() -> Option<f32> {
+    std::env::var("PARTII_FAKE_MIC_ECHO")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|g| (0. ..=2.).contains(g) && *g > 0.)
+}
+
 fn open_fake() -> MediaStreamId {
     const RATE: u32 = 48000;
+    let echo_gain = fake_echo_gain();
+    // The output as the fake mic hears it (30 ms late), and the canceller it goes through.
+    let echo = echo_gain.map(|_| crate::aec::tap());
+    let mut aec = echo_gain
+        .filter(|_| crate::aec::enabled())
+        .map(|_| crate::aec::Aec::new(RATE, 1));
     let (id, source) = create_audio_source(
         AudioFormat {
             sample_rate: RATE,
@@ -64,12 +83,28 @@ fn open_fake() -> MediaStreamId {
             let step = 2. * std::f64::consts::PI * hz / RATE as f64;
             let start = Instant::now();
             let mut sent = 0u64;
+            let mut delay: std::collections::VecDeque<f32> =
+                std::iter::repeat_n(0., RATE as usize * 30 / 1000).collect();
+            let mut heard = Vec::with_capacity(chunk);
             while !stop.load(Ordering::SeqCst) {
                 for v in buf.iter_mut() {
                     *v = (phase.sin() * 0.5) as f32;
                     phase = (phase + step) % (2. * std::f64::consts::PI);
                 }
-                source.push(&buf, Instant::now());
+                if let (Some(gain), Some(echo)) = (echo_gain, echo.as_ref()) {
+                    // The output's rate is the null output's 48 kHz on the farm; another rate is heard as is.
+                    heard.clear();
+                    echo.lock().unwrap().take(chunk, &mut heard);
+                    heard.resize(chunk, 0.);
+                    for (v, h) in buf.iter_mut().zip(&heard) {
+                        delay.push_back(*h);
+                        *v += gain * delay.pop_front().unwrap_or(0.);
+                    }
+                }
+                match aec.as_mut() {
+                    Some(aec) => aec.process(&buf, |f| source.push(f, Instant::now())),
+                    None => source.push(&buf, Instant::now()),
+                }
                 sent += chunk as u64;
                 let due = start + Duration::from_secs_f64(sent as f64 / RATE as f64);
                 let now = Instant::now();
@@ -99,6 +134,7 @@ fn open_device(device_id: Option<&str>) -> Option<MediaStreamId> {
         config: &cpal::StreamConfig,
         source: AudioSource,
         stop: Arc<AtomicBool>,
+        mut aec: Option<crate::aec::Aec>,
     ) -> Result<cpal::Stream, String>
     where
         T: SizedSample,
@@ -114,8 +150,14 @@ fn open_device(device_id: Option<&str>) -> Option<MediaStreamId> {
                     scratch.extend(data.iter().map(|s| f32::from_sample(*s)));
                     // cpal periods are 5-20 ms; split anything longer into 100 ms pushes.
                     let max = (config_rate_channels(&source) / 10).max(1);
-                    for part in scratch.chunks(max) {
-                        source.push(part, Instant::now());
+                    match aec.as_mut() {
+                        // Mono 10 ms frames.
+                        Some(aec) => aec.process(&scratch, |f| source.push(f, Instant::now())),
+                        None => {
+                            for part in scratch.chunks(max) {
+                                source.push(part, Instant::now());
+                            }
+                        },
                     }
                 },
                 move |error| match error {
@@ -181,22 +223,24 @@ fn open_device(device_id: Option<&str>) -> Option<MediaStreamId> {
                 return;
             };
             let config = supported.config();
+            let mut aec = crate::aec::enabled().then(|| crate::aec::Aec::new(config.sample_rate, config.channels));
             let (id, source) = create_audio_source(
                 AudioFormat {
                     sample_rate: config.sample_rate,
-                    channels: config.channels,
+                    // Echo cancellation hands out mono.
+                    channels: if aec.is_some() { 1 } else { config.channels },
                 },
                 &label,
             );
             let stop = stop_flag(&source);
             let stream = match supported.sample_format() {
-                SampleFormat::F32 => build::<f32>(&device, &config, source.clone(), stop.clone()),
-                SampleFormat::I16 => build::<i16>(&device, &config, source.clone(), stop.clone()),
-                SampleFormat::U16 => build::<u16>(&device, &config, source.clone(), stop.clone()),
-                SampleFormat::I32 => build::<i32>(&device, &config, source.clone(), stop.clone()),
-                SampleFormat::F64 => build::<f64>(&device, &config, source.clone(), stop.clone()),
-                SampleFormat::U8 => build::<u8>(&device, &config, source.clone(), stop.clone()),
-                SampleFormat::I8 => build::<i8>(&device, &config, source.clone(), stop.clone()),
+                SampleFormat::F32 => build::<f32>(&device, &config, source.clone(), stop.clone(), aec.take()),
+                SampleFormat::I16 => build::<i16>(&device, &config, source.clone(), stop.clone(), aec.take()),
+                SampleFormat::U16 => build::<u16>(&device, &config, source.clone(), stop.clone(), aec.take()),
+                SampleFormat::I32 => build::<i32>(&device, &config, source.clone(), stop.clone(), aec.take()),
+                SampleFormat::F64 => build::<f64>(&device, &config, source.clone(), stop.clone(), aec.take()),
+                SampleFormat::U8 => build::<u8>(&device, &config, source.clone(), stop.clone(), aec.take()),
+                SampleFormat::I8 => build::<i8>(&device, &config, source.clone(), stop.clone(), aec.take()),
                 other => Err(format!("unsupported sample format {other:?}")),
             };
             let stream = match stream.and_then(|s| match s.play() {
