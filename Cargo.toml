@@ -357,6 +357,7 @@ servo-media-gstreamer-render-android = { version = "=0.7.0", path = "components/
 servo-media-gstreamer-render-unix = { version = "=0.7.0", path = "components/media/backends/gstreamer/render-unix" }
 servo-media-ohos = { version = "=0.7.0", path = "components/media/backends/ohos" }
 servo-media-player = { version = "=0.7.0", path = "components/media/player" }
+servo-media-recorder = { version = "=0.7.0", path = "components/media/recorder" }
 servo-media-streams = { version = "=0.7.0", path = "components/media/streams" }
 servo-media-traits = { version = "=0.7.0", path = "components/media/traits" }
 servo-media-webrtc = { version = "=0.7.0", path = "components/media/webrtc" }

@@ -3,13 +3,36 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Builds libvpx.a from libvpx/ with its own configure and make (needs sh, perl and make, as every
-//! Linux and macOS build host has): decoders only, static, PIC. The x86 assembly needs nasm or yasm;
+//! Linux and macOS build host has): the VP8/VP9 decoders and the VP8 encoder (realtime only, for
+//! MediaRecorder: servo-media-recorder), static, PIC. The x86 assembly needs nasm or yasm;
 //! when neither is on PATH (most farm nodes) libvpx is built for `generic-gnu`, its plain C code.
 //! PARTII_VPX_TARGET overrides the configure target.
 
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
+
+/// libvpx configure flags. Part of the configure stamp: changing them reconfigures.
+const CONFIGURE: &[&str] = &[
+    "--enable-static",
+    "--disable-shared",
+    "--enable-pic",
+    "--disable-examples",
+    "--disable-tools",
+    "--disable-docs",
+    "--disable-unit-tests",
+    "--disable-install-docs",
+    "--disable-install-bins",
+    "--disable-install-srcs",
+    "--enable-realtime-only",
+    "--disable-vp9-encoder",
+    "--disable-webm-io",
+    "--disable-libyuv",
+    "--enable-vp9-highbitdepth",
+    "--enable-multithread",
+    "--disable-debug",
+    "--size-limit=16384x16384",
+];
 
 fn has(tool: &str) -> bool {
     Command::new(tool)
@@ -24,6 +47,7 @@ fn main() {
     let build = out.join("build");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=libvpx/vpx/vpx_decoder.h");
+    println!("cargo:rerun-if-changed=libvpx/vpx/vpx_encoder.h");
     println!("cargo:rerun-if-env-changed=PARTII_VPX_TARGET");
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
@@ -45,31 +69,12 @@ fn main() {
     let ar = cc::Build::new().get_archiver();
     std::fs::create_dir_all(&build).unwrap();
     let stamp = build.join(".configured");
-    let wanted = format!("{target} {:?}", compiler.path());
+    let wanted = format!("{target} {:?} {}", compiler.path(), CONFIGURE.join(" "));
     if std::fs::read_to_string(&stamp).ok().as_deref() != Some(wanted.as_str()) {
         let status = Command::new("sh")
             .arg(src.join("configure"))
             .arg(format!("--target={target}"))
-            .args([
-                "--enable-static",
-                "--disable-shared",
-                "--enable-pic",
-                "--disable-examples",
-                "--disable-tools",
-                "--disable-docs",
-                "--disable-unit-tests",
-                "--disable-install-docs",
-                "--disable-install-bins",
-                "--disable-install-srcs",
-                "--disable-vp8-encoder",
-                "--disable-vp9-encoder",
-                "--disable-webm-io",
-                "--disable-libyuv",
-                "--enable-vp9-highbitdepth",
-                "--enable-multithread",
-                "--disable-debug",
-                "--size-limit=16384x16384",
-            ])
+            .args(CONFIGURE)
             .env("CC", compiler.path())
             .env("CXX", compiler.path())
             .env("AR", ar.get_program())
