@@ -79,8 +79,8 @@ impl Drop for VelloCPUDrawTarget {
 }
 
 /// Partii (clips): counts a cover/cap event (0 scan, 1 hit, 2 cap) for this canvas and in total;
-/// the totals print every 200 events (PARTII_CANVAS_COVER_TOTAL), so a run that never ends cleanly
-/// still shows them.
+/// the totals print at the first event and every 200 (PARTII_CANVAS_COVER_TOTAL), so a run that
+/// never ends cleanly still shows whether any fired.
 fn note_cover(stats: &mut [u32; 3], kind: usize) {
     use std::sync::atomic::{AtomicU32, Ordering};
     static TOTAL: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
@@ -90,7 +90,7 @@ fn note_cover(stats: &mut [u32; 3], kind: usize) {
     stats[kind] += 1;
     TOTAL[kind].fetch_add(1, Ordering::Relaxed);
     let n: u32 = TOTAL.iter().map(|t| t.load(Ordering::Relaxed)).sum();
-    if n % 200 == 0 {
+    if n == 1 || n % 200 == 0 {
         eprintln!(
             "PARTII_CANVAS_COVER_TOTAL scans={} hits={} caps={}",
             TOTAL[0].load(Ordering::Relaxed),
