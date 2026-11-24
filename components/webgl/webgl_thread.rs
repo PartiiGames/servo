@@ -13,7 +13,7 @@ use std::{slice, thread};
 
 use bitflags::bitflags;
 use byteorder::{ByteOrder, NativeEndian, WriteBytesExt};
-use euclid::default::Size2D;
+use euclid::default::{Rect, Size2D};
 use glow::{
     self as gl, ActiveTransformFeedback, Context as Gl, HasContext, NativeTransformFeedback,
     NativeUniformLocation, NativeVertexArray, PixelUnpackData, ShaderPrecisionFormat,
