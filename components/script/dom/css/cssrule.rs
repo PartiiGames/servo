@@ -23,6 +23,7 @@ use super::cssnesteddeclarations::CSSNestedDeclarations;
 use super::csspropertyrule::CSSPropertyRule;
 use super::cssstylerule::CSSStyleRule;
 use super::cssstylesheet::CSSStyleSheet;
+use super::csscontainerrule::CSSContainerRule;
 use super::csssupportsrule::CSSSupportsRule;
 use crate::dom::bindings::codegen::Bindings::CSSRuleBinding::CSSRuleMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -153,8 +154,14 @@ impl CSSRule {
                 s,
             )),
             StyleCssRule::Page(_) => unreachable!(),
-            StyleCssRule::Container(_) => unimplemented!(), // TODO
-            StyleCssRule::Document(_) => unimplemented!(),  // TODO
+            StyleCssRule::Container(s) => DomRoot::upcast(CSSContainerRule::new(
+                cx,
+                window,
+                parent_rule,
+                parent_stylesheet,
+                s,
+            )),
+            StyleCssRule::Document(_) => unimplemented!(), // TODO
             StyleCssRule::LayerBlock(s) => DomRoot::upcast(CSSLayerBlockRule::new(
                 cx,
                 window,
@@ -265,8 +272,12 @@ impl CSSRule {
                 }
             },
             StyleCssRule::Page(_) => unreachable!(),
-            StyleCssRule::Container(_) => unimplemented!(), // TODO
-            StyleCssRule::Document(_) => unimplemented!(),  // TODO
+            StyleCssRule::Container(s) => {
+                if let Some(rule) = self.downcast::<CSSContainerRule>() {
+                    rule.update_rule(s.clone(), guard);
+                }
+            },
+            StyleCssRule::Document(_) => unimplemented!(), // TODO
             StyleCssRule::LayerBlock(s) => {
                 if let Some(rule) = self.downcast::<CSSLayerBlockRule>() {
                     rule.update_rule(s.clone(), guard);

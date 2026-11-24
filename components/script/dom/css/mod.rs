@@ -26,6 +26,7 @@ pub(crate) mod cssstylerule;
 pub(crate) mod cssstylesheet;
 pub(crate) mod cssstylevalue;
 pub(crate) mod csssupportsrule;
+pub(crate) mod csscontainerrule;
 pub(crate) mod fontface;
 pub(crate) mod fontfaceset;
 pub(crate) mod stylepropertymapreadonly;
