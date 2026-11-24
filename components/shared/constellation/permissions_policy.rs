@@ -3,7 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Partii: a small subset of Permissions Policy, per frame, for the features a game frame must
-//! declare: `fullscreen`, `pointer-lock` and `gamepad`.
+//! declare: `fullscreen`, `pointer-lock`, `gamepad`, `clipboard-read`, `clipboard-write`,
+//! `screen-wake-lock`, `camera` and `microphone`. (`autoplay` is not enforced: the runtime never blocks autoplay, in any frame.)
 //!
 //! The embedding document computes a [`ContainerPolicy`] from its `<iframe>`'s `allow` (and
 //! `allowfullscreen`) attribute when it navigates the frame, already intersected with its own
@@ -30,13 +31,29 @@ pub enum PolicyFeature {
     PointerLock,
     /// <https://w3c.github.io/gamepad/#permission-policy>
     Gamepad,
+    /// <https://w3c.github.io/clipboard-apis/#clipboard-permissions>: `navigator.clipboard.readText()`.
+    ClipboardRead,
+    /// <https://w3c.github.io/clipboard-apis/#clipboard-permissions>: `navigator.clipboard.writeText()`.
+    ClipboardWrite,
+    /// <https://w3c.github.io/screen-wake-lock/#policy-control>: `navigator.wakeLock.request()`.
+    ScreenWakeLock,
+    /// <https://w3c.github.io/mediacapture-main/#permissions-policy-integration>: video from
+    /// `getUserMedia()` (and `permissions.query({name: "camera"})`).
+    Camera,
+    /// The same, for audio (`"microphone"`).
+    Microphone,
 }
 
 impl PolicyFeature {
-    pub const ALL: [PolicyFeature; 3] = [
+    pub const ALL: [PolicyFeature; 8] = [
         PolicyFeature::Fullscreen,
         PolicyFeature::PointerLock,
         PolicyFeature::Gamepad,
+        PolicyFeature::ClipboardRead,
+        PolicyFeature::ClipboardWrite,
+        PolicyFeature::ScreenWakeLock,
+        PolicyFeature::Camera,
+        PolicyFeature::Microphone,
     ];
 
     /// The feature's name in an `allow` attribute.
@@ -45,6 +62,11 @@ impl PolicyFeature {
             PolicyFeature::Fullscreen => "fullscreen",
             PolicyFeature::PointerLock => "pointer-lock",
             PolicyFeature::Gamepad => "gamepad",
+            PolicyFeature::ClipboardRead => "clipboard-read",
+            PolicyFeature::ClipboardWrite => "clipboard-write",
+            PolicyFeature::ScreenWakeLock => "screen-wake-lock",
+            PolicyFeature::Camera => "camera",
+            PolicyFeature::Microphone => "microphone",
         }
     }
 
@@ -103,6 +125,11 @@ pub struct ContainerPolicy {
     pub fullscreen: Allowlist,
     pub pointer_lock: Allowlist,
     pub gamepad: Allowlist,
+    pub clipboard_read: Allowlist,
+    pub clipboard_write: Allowlist,
+    pub screen_wake_lock: Allowlist,
+    pub camera: Allowlist,
+    pub microphone: Allowlist,
 }
 
 impl ContainerPolicy {
@@ -111,6 +138,11 @@ impl ContainerPolicy {
             PolicyFeature::Fullscreen => &self.fullscreen,
             PolicyFeature::PointerLock => &self.pointer_lock,
             PolicyFeature::Gamepad => &self.gamepad,
+            PolicyFeature::ClipboardRead => &self.clipboard_read,
+            PolicyFeature::ClipboardWrite => &self.clipboard_write,
+            PolicyFeature::ScreenWakeLock => &self.screen_wake_lock,
+            PolicyFeature::Camera => &self.camera,
+            PolicyFeature::Microphone => &self.microphone,
         }
     }
 
@@ -119,6 +151,11 @@ impl ContainerPolicy {
             PolicyFeature::Fullscreen => &mut self.fullscreen,
             PolicyFeature::PointerLock => &mut self.pointer_lock,
             PolicyFeature::Gamepad => &mut self.gamepad,
+            PolicyFeature::ClipboardRead => &mut self.clipboard_read,
+            PolicyFeature::ClipboardWrite => &mut self.clipboard_write,
+            PolicyFeature::ScreenWakeLock => &mut self.screen_wake_lock,
+            PolicyFeature::Camera => &mut self.camera,
+            PolicyFeature::Microphone => &mut self.microphone,
         }
     }
 }

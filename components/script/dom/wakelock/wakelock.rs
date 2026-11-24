@@ -10,7 +10,7 @@ use js::context::JSContext;
 use js::realm::CurrentRealm;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use servo_constellation_traits::ScriptToConstellationMessage;
+use servo_constellation_traits::{PolicyFeature, ScriptToConstellationMessage};
 use stylo_atoms::Atom;
 
 use crate::conversions::Convert;
@@ -105,6 +105,16 @@ impl WakeLockMethods<crate::DomTypeHolder> for WakeLock {
         // Step 1. Let document be this's relevant global object's associated Document.
         let document = global.as_window().Document();
 
+        // Partii (spec step "If document is not allowed to use the policy-controlled feature
+        // named screen-wake-lock, reject with NotAllowedError"): a frame must declare
+        // `allow="screen-wake-lock"`; a top-level document may.
+        if !document.is_feature_enabled(PolicyFeature::ScreenWakeLock) {
+            promise.reject_error(cx, Error::NotAllowed(Some(
+                        "Failed to execute 'request' on 'WakeLock': this frame may not use screen-wake-lock (allow=\"screen-wake-lock\")."
+                        .to_string())));
+            return promise;
+        }
+
         // Step 2. If document is not fully active, reject with NotAllowedError.
         if !document.is_fully_active() {
             promise.reject_error(cx, Error::NotAllowed(Some(
@@ -164,8 +174,8 @@ impl RoutedPromiseListener<crate::DomTypeHolder, AllowOrDeny> for WakeLock {
                 let global = self.global();
                 // Step 7.3.1. If document's visibility state is "hidden", reject promise with a
                 // "NotAllowedError" DOMException.
-                if global.as_window().Document().VisibilityState() ==
-                    DocumentVisibilityState::Hidden
+                if global.as_window().Document().VisibilityState()
+                    == DocumentVisibilityState::Hidden
                 {
                     promise.reject_error(
                         cx,

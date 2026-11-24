@@ -11,6 +11,10 @@ Patches on top of 0.22.0:
   Servo's inline layout implements `text-wrap-style: balance`.
 - Container query length units (cqw, cqh, cqi, cqb, cqmin, cqmax) parse for Servo too (Gecko only
   upstream); Servo's layout supplies container sizes (`query_container_size`).
+- `@container` rules parse for Servo when `layout.container-queries.enabled` is on (rule_parser.rs; Gecko
+  only upstream, so every @container block was dropped and the size queries above never had a rule to match).
+- The `container` shorthand (`container: name / inline-size`) parses for Servo under the same pref (shorthands.toml,
+  shorthands.rs; Gecko only upstream): without it a named container was never a container at all.
 - `:has()` invalidation (`invalidation/element/relative_selector.rs`, `AncestorEarlierSibling`):
   an ancestor whose earlier siblings aren't on the sibling search path ends the walk over those
   siblings only (`break`), not the whole upward walk (`return`), so `:has(~ div .test)` still
@@ -61,3 +65,9 @@ Patches on top of webrender 0.70.0:
   and WebRender calls them around scene building (`process_transaction`), the render backend's document
   updates and frame builds, texture-cache uploads and shader compiles. Servo's paint sets them when
   `PARTII_FRAME_TRACE` is on (servo_base::frame_trace); unset, a span is one `OnceLock` load.
+
+## Taffy (third_party/taffy, 0.14.0 from crates.io)
+- `TrackSizingFunction::has_fixed_component` counts calc() as a fixed <length-percentage> (src/style/grid.rs).
+  Upstream only took plain lengths/percentages, so `repeat(auto-fill, minmax(min(100%, 260px), 1fr))` was an
+  invalid template (zero explicit tracks, one implicit auto column): the launcher's store, home and Make grids.
+  Px-only calc() simplifies to a length at computed-value time and was never affected.

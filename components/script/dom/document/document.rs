@@ -3581,9 +3581,17 @@ impl Document {
         // feature, document, and document's origin is "Enabled", then return true.
         // Step 4. Return false.
         // Partii: only the policy-controlled features in `PolicyFeature` are enforced; the
-        // rest stay enabled.
+        // rest stay enabled. This is also the permissions check (permissions.rs
+        // descriptor_permission_state step 4): a frame without `allow="camera"` /
+        // `allow="microphone"` gets "denied", so getUserMedia rejects with NotAllowedError
+        // before the embedder is asked.
         match feature {
             PermissionName::Gamepad => self.is_feature_enabled(PolicyFeature::Gamepad),
+            PermissionName::Camera => self.is_feature_enabled(PolicyFeature::Camera),
+            PermissionName::Microphone => self.is_feature_enabled(PolicyFeature::Microphone),
+            PermissionName::Screen_wake_lock => {
+                self.is_feature_enabled(PolicyFeature::ScreenWakeLock)
+            },
             _ => true,
         }
     }
