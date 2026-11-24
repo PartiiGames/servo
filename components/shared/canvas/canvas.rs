@@ -16,7 +16,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use pixels::SharedSnapshot;
 use serde::{Deserialize, Serialize};
 use servo_base::Epoch;
-use servo_base::generic_channel::GenericSender;
+use servo_base::generic_channel::{GenericCallback, GenericSender};
 use strum::{Display, EnumString};
 use style::color::AbsoluteColor;
 use webrender_api::ImageKey;
@@ -743,6 +743,9 @@ pub enum CanvasCommand {
         Transform2D<f64>,
     ),
     GetImageData(Option<Rect<u32>>, GenericSender<SharedSnapshot>),
+    /// Partii: the whole canvas, answered to a callback (canvas.captureStream pushes its frame from the
+    /// canvas thread, so the script thread never waits for the readback).
+    GetImageDataToCallback(GenericCallback<SharedSnapshot>),
     PutImageData(Rect<u32>, SharedSnapshot),
     StrokeRect(
         Rect<f32>,
