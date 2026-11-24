@@ -306,6 +306,12 @@ impl CanvasPaintThread {
                     warn!("GetImageData response failed ({error})");
                 }
             },
+            CanvasCommand::GetImageDataToCallback(callback) => {
+                let snapshot = self.canvas(canvas_id).read_pixels(None);
+                if let Err(error) = callback.send(snapshot.to_shared()) {
+                    warn!("GetImageDataToCallback failed ({error})");
+                }
+            },
             CanvasCommand::PutImageData(rect, snapshot) => {
                 self.canvas(canvas_id)
                     .put_image_data(snapshot.to_owned(), rect);

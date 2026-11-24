@@ -14,13 +14,14 @@ use js::context::NoGC;
 use js::error::throw_type_error;
 use js::rust::{HandleObject, HandleValue};
 use layout_api::HTMLCanvasData;
-use pixels::{EncodedImageType, Snapshot, SnapshotPixelFormat};
+use pixels::{EncodedImageType, SharedSnapshot, Snapshot, SnapshotPixelFormat};
 use rustc_hash::FxHashMap;
 use script_bindings::cell::{DomRefCell, Ref};
 #[cfg(feature = "webgl")]
 use script_bindings::reflector::DomObject;
 use script_bindings::weakref::WeakRef;
 use servo_base::Epoch;
+use servo_base::generic_channel::GenericCallback;
 #[cfg(feature = "webgl")]
 use servo_canvas_traits::webgl::{GLContextAttributes, WebGLVersion};
 use servo_constellation_traits::BlobImpl;
@@ -124,6 +125,28 @@ struct CanvasCapture {
     used: Instant,
 }
 
+/// Pushes one readback of a canvas to captureStream sources (any thread).
+fn push_capture_frame(
+    sources: &[VideoSource],
+    size: Size2D<u32>,
+    format: SnapshotPixelFormat,
+    bytes: &[u8],
+    at: Instant,
+) {
+    if size.width == 0 || size.height == 0 || bytes.len() < (size.width * size.height * 4) as usize {
+        return;
+    }
+    let format = match format {
+        SnapshotPixelFormat::RGBA => VideoFormat::Rgba8,
+        SnapshotPixelFormat::BGRA => VideoFormat::Bgra8,
+    };
+    let pixels: Arc<[u8]> = Arc::from(&bytes[..(size.width * size.height * 4) as usize]);
+    let frame = VideoFrame::packed(size.width, size.height, format, size.width * 4, pixels, at);
+    for source in sources {
+        source.push(frame.clone());
+    }
+}
+
 /// A capture nobody has read for this long, or whose track the DOM collected, is dropped.
 const CAPTURE_IDLE_DROP: Duration = Duration::from_secs(30);
 /// Frame callbacks come at the display's rate: a frame due within this much counts as due now.
@@ -162,23 +185,7 @@ impl HTMLCanvasElement {
                 c.interval != Some(Duration::ZERO) &&
                 c.next.is_none_or(|t| now + CAPTURE_SLACK >= t)
         };
-        if !captures.iter().any(due) {
-            return !captures.is_empty();
-        }
-        let Some(snapshot) = self.get_image_data() else {
-            return !captures.is_empty();
-        };
-        let size = snapshot.size();
-        let format = match snapshot.format() {
-            SnapshotPixelFormat::RGBA => VideoFormat::Rgba8,
-            SnapshotPixelFormat::BGRA => VideoFormat::Bgra8,
-        };
-        let bytes = snapshot.as_raw_bytes();
-        if size.width == 0 || size.height == 0 || bytes.len() < (size.width * size.height * 4) as usize {
-            return true;
-        }
-        let pixels: Arc<[u8]> = Arc::from(bytes);
-        let frame = VideoFrame::packed(size.width, size.height, format, size.width * 4, pixels, now);
+        let mut sources = Vec::new();
         for c in captures.iter_mut() {
             if c.source.has_readers() {
                 c.used = now;
@@ -186,7 +193,7 @@ impl HTMLCanvasElement {
             if !due(&*c) {
                 continue;
             }
-            c.source.push(frame.clone());
+            sources.push(c.source.clone());
             // The next frame one interval after this one's slot, or after now when it fell behind (late
             // frame callbacks skip frames, never burst).
             c.next = c.interval.map(|i| {
@@ -194,7 +201,28 @@ impl HTMLCanvasElement {
                 if slot <= now { now + i } else { slot }
             });
         }
-        true
+        let keep = !captures.is_empty();
+        drop(captures);
+        if sources.is_empty() {
+            return keep;
+        }
+        // A 2D canvas is read back on its canvas thread, which pushes the frame itself; other contexts
+        // (WebGL, bitmaprenderer) are read here.
+        if let Some(RenderingContext::Context2d(context)) = self.context_mode.borrow().as_ref() {
+            let callback = GenericCallback::new(move |snapshot: Result<SharedSnapshot, _>| {
+                if let Ok(snapshot) = snapshot {
+                    push_capture_frame(&sources, snapshot.size(), snapshot.format(), snapshot.data(), now);
+                }
+            });
+            if let Ok(callback) = callback {
+                context.read_pixels_to_callback(callback);
+            }
+            return keep;
+        }
+        if let Some(snapshot) = self.get_image_data() {
+            push_capture_frame(&sources, snapshot.size(), snapshot.format(), snapshot.as_raw_bytes(), now);
+        }
+        keep
     }
 
     pub(crate) fn new(
