@@ -443,6 +443,10 @@ pub enum WebGLCommand {
         GenericSender<(GenericSharedMemory, SnapshotAlphaMode)>,
     ),
     ReadPixelsPP(Rect<i32>, u32, u32, usize),
+    /// Partii (clips): the drawing buffer's readback for a canvas.captureStream copy (RGBA, rows bottom-up), as
+    /// ReadPixels answers it. On a hardware GL the answer may be the previous capture copy's pixels (a
+    /// double-buffered pixel pack buffer with a fence), so the WebGL thread never waits for the GPU.
+    ReadPixelsCapture(Rect<u32>, GenericSender<(GenericSharedMemory, SnapshotAlphaMode)>),
     SampleCoverage(f32, bool),
     Scissor(i32, i32, u32, u32),
     StencilFunc(u32, i32, u32),

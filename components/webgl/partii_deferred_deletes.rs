@@ -111,7 +111,7 @@ impl DeferredDeletes {
 /// textures bound to units (never one waiting), so it can't see them; flushing first keeps it certain.
 pub(crate) fn flushes(command: &servo_canvas_traits::webgl::WebGLCommand) -> bool {
     use servo_canvas_traits::webgl::WebGLCommand::*;
-    matches!(command, ReadPixels(..) | ReadPixelsPP(..))
+    matches!(command, ReadPixels(..) | ReadPixelsPP(..) | ReadPixelsCapture(..))
 }
 
 #[cfg(test)]

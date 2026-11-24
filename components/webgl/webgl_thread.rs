@@ -152,6 +152,8 @@ pub struct GLState {
     /// on that texture filters these instead of reading the level back (software_mipmaps). glGetTexImage
     /// waits for everything llvmpipe has queued.
     upload_shadow: Option<UploadShadow>,
+    /// Partii (clips): the double-buffered pixel pack buffers of ReadPixelsCapture (see capture_readback).
+    capture_readback: Option<CaptureReadback>,
     /// Partii (webgl-upload): 2D textures whose generateMipmap hasn't run in GL yet (see owe_mipmaps and
     /// pay_owed_mipmaps). Phaser calls generateMipmap on every power-of-two texture it uploads while sampling
     /// it with a LINEAR (non-mipmap) min filter (no `mipmapFilter` in the game's config), so the levels are
@@ -194,6 +196,30 @@ impl GLState {
         self.deferred_programs.len() + self.deferred_deletes.len()
     }
 }
+
+/// Partii (clips): ReadPixelsCapture's pixel pack buffers. Each capture copy reads the drawing buffer into one
+/// buffer and fences it; the next copy answers with that buffer's pixels (one copy late, invisible in an 8-12 fps
+/// clip) and reads into the other. A synchronous glReadPixels on a GPU waits for it to finish the game's frame and
+/// holds this thread (the game's next WebGL frame) behind it: Mac clips 1124-1601, the store copy's drawImage
+/// 1.4-2.1 ms average and 27-75 ms spikes on the GL page, 0.008 ms on the 2D one.
+#[derive(Debug)]
+struct CaptureReadback {
+    /// `None`: this GL can't (a software GL, where the read is the same CPU work either way; or no pixel pack
+    /// buffers and fences: GL < 3.2, GLES < 3.0; or `PARTII_WEBGL_CAPTURE_ASYNC=0`): every copy reads synchronously.
+    /// `PARTII_WEBGL_CAPTURE_ASYNC=1` uses the buffers on a software GL too.
+    buffers: Option<[gl::NativeBuffer; 2]>,
+    size: Size2D<u32>,
+    /// The buffer the next read goes into.
+    next: usize,
+    /// The buffer holding the last read and its fence.
+    pending: Option<(usize, CaptureFence)>,
+}
+
+/// A GL sync object, used only on the WebGL thread that made it (GLState may move with its context's data).
+#[derive(Debug)]
+struct CaptureFence(gl::NativeFence);
+// Safety: the fence is only waited on and deleted with its own GL context current, on the WebGL thread.
+unsafe impl Send for CaptureFence {}
 
 /// Partii (gaps-5): see GLState::upload_shadow.
 #[derive(Debug)]
@@ -534,6 +560,7 @@ impl Default for GLState {
             framebuffer_renderbuffers: FxHashMap::default(),
             pending_textures: FxHashMap::default(),
             upload_shadow: None,
+            capture_readback: None,
             owed_mipmaps: FxHashSet::default(),
             deferred_programs: Default::default(),
             deferred_deletes: Default::default(),
@@ -1934,6 +1961,7 @@ impl WebGLImpl {
                 command,
                 WebGLCommand::ReadPixels(..) |
                     WebGLCommand::ReadPixelsPP(..) |
+                    WebGLCommand::ReadPixelsCapture(..) |
                     WebGLCommand::CopyTexImage2D { .. } |
                     WebGLCommand::CopyTexSubImage2D(..) |
                     WebGLCommand::CopyTexSubImage3D(..) |
@@ -2254,6 +2282,14 @@ impl WebGLImpl {
                 sender
                     .send((GenericSharedMemory::from_vec(pixels), alpha_mode))
                     .unwrap();
+            },
+            WebGLCommand::ReadPixelsCapture(rect, ref sender) => {
+                let alpha_mode = match (attributes.alpha, attributes.premultiplied_alpha) {
+                    (true, premultiplied) => SnapshotAlphaMode::Transparent { premultiplied },
+                    (false, _) => SnapshotAlphaMode::Opaque,
+                };
+                let pixels = Self::capture_readback(gl, state, rect);
+                let _ = sender.send((GenericSharedMemory::from_vec(pixels), alpha_mode));
             },
             WebGLCommand::ReadPixelsPP(rect, format, pixel_type, offset) => unsafe {
                 gl.read_pixels(
@@ -4123,6 +4159,120 @@ impl WebGLImpl {
         });
     }
 
+    /// Partii (clips): the pixels for a ReadPixelsCapture of `rect` (RGBA, rows bottom-up, tightly packed): the
+    /// previous capture copy's read when one is pending in a pixel pack buffer, else a synchronous read; then a new
+    /// read into the other buffer. See CaptureReadback.
+    fn capture_readback(gl: &Gl, state: &mut GLState, rect: Rect<u32>) -> Vec<u8> {
+        let len = 4 * rect.size.area() as usize;
+        let sync_read = |gl: &Gl| {
+            let mut pixels = vec![0; len];
+            unsafe {
+                gl.pixel_store_i32(gl::PACK_ALIGNMENT, 1);
+                gl.read_pixels(
+                    rect.origin.x as i32,
+                    rect.origin.y as i32,
+                    rect.size.width as i32,
+                    rect.size.height as i32,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    gl::PixelPackData::Slice(Some(&mut pixels)),
+                )
+            };
+            pixels
+        };
+        if state.capture_readback.is_none() {
+            let version = gl.version();
+            let capable = if version.is_embedded {
+                version.major >= 3
+            } else {
+                (version.major, version.minor) >= (3, 2)
+            };
+            // PARTII_WEBGL_CAPTURE_ASYNC: 0 off, 1 on even on a software GL (to test the path on the farm).
+            let on = capable &&
+                match std::env::var("PARTII_WEBGL_CAPTURE_ASYNC").as_deref() {
+                    Ok("0") => false,
+                    Ok("1") => true,
+                    _ => !software_gl(gl),
+                };
+            let buffers = if on {
+                unsafe { gl.create_buffer().and_then(|a| gl.create_buffer().map(|b| [a, b])) }.ok()
+            } else {
+                None
+            };
+            state.capture_readback = Some(CaptureReadback {
+                buffers,
+                size: Size2D::zero(),
+                next: 0,
+                pending: None,
+            });
+        }
+        let readback = state.capture_readback.as_mut().unwrap();
+        let Some(buffers) = readback.buffers else {
+            return sync_read(gl);
+        };
+        unsafe {
+            let bound = gl.get_parameter_i32(gl::PIXEL_PACK_BUFFER_BINDING);
+            if readback.size != rect.size {
+                // A new size: the pending read is the wrong size; (re)allocate both buffers.
+                if let Some((_, CaptureFence(fence))) = readback.pending.take() {
+                    gl.delete_sync(fence);
+                }
+                for buffer in buffers {
+                    gl.bind_buffer(gl::PIXEL_PACK_BUFFER, Some(buffer));
+                    gl.buffer_data_size(gl::PIXEL_PACK_BUFFER, len as i32, gl::STREAM_READ);
+                }
+                readback.size = rect.size;
+            }
+            // The previous copy's pixels, when its read is done (or after waiting for it: a copy a frame late
+            // whose fence hasn't signaled is rare; the wait is then no worse than a synchronous read).
+            let previous = readback.pending.take().map(|(index, CaptureFence(fence))| {
+                let _ = gl.client_wait_sync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000);
+                gl.delete_sync(fence);
+                gl.bind_buffer(gl::PIXEL_PACK_BUFFER, Some(buffers[index]));
+                let ptr = gl.map_buffer_range(gl::PIXEL_PACK_BUFFER, 0, len as i32, gl::MAP_READ_BIT);
+                let pixels = if ptr.is_null() {
+                    None
+                } else {
+                    Some(std::slice::from_raw_parts(ptr, len).to_vec())
+                };
+                gl.unmap_buffer(gl::PIXEL_PACK_BUFFER);
+                pixels
+            });
+            // This copy's read, into the other buffer.
+            let index = readback.next;
+            readback.next = 1 - index;
+            gl.bind_buffer(gl::PIXEL_PACK_BUFFER, Some(buffers[index]));
+            gl.pixel_store_i32(gl::PACK_ALIGNMENT, 1);
+            gl.read_pixels(
+                rect.origin.x as i32,
+                rect.origin.y as i32,
+                rect.size.width as i32,
+                rect.size.height as i32,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                gl::PixelPackData::BufferOffset(0),
+            );
+            readback.pending = gl
+                .fence_sync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0)
+                .ok()
+                .map(|fence| (index, CaptureFence(fence)));
+            gl.flush();
+            let restore = std::num::NonZeroU32::new(bound as u32).map(gl::NativeBuffer);
+            gl.bind_buffer(gl::PIXEL_PACK_BUFFER, restore);
+            match previous.flatten() {
+                Some(pixels) => pixels,
+                // The first copy (or a mapping failure): read synchronously, with no pack buffer bound.
+                None => {
+                    gl.bind_buffer(gl::PIXEL_PACK_BUFFER, None);
+                    let pixels = sync_read(gl);
+                    gl.bind_buffer(gl::PIXEL_PACK_BUFFER, restore);
+                    pixels
+                },
+            }
+        }
+    }
+
+
     /// Partii (perf): generateMipmap on a 2D texture whose level 0 is still all zeros (Phaser's boot
     /// makes power-of-two render targets with texImage2D(null) + generateMipmap): the mipmaps of
     /// zeros are zeros, so allocate the levels zeroed (cleared, as texImage2D(null) does) instead of
@@ -4567,6 +4717,7 @@ impl WebGLImpl {
             WebGLCommand::DrawElementsInstancedBaseVertexBaseInstance { .. } |
             WebGLCommand::ReadPixels(..) |
             WebGLCommand::ReadPixelsPP(..) |
+            WebGLCommand::ReadPixelsCapture(..) |
             WebGLCommand::CopyTexImage2D { .. } |
             WebGLCommand::CopyTexSubImage2D(..) |
             WebGLCommand::CopyTexSubImage3D(..) |
@@ -6932,7 +7083,9 @@ fn partii_frame_kind(msg: &WebGLMsg) -> (&'static str, u64, (u32, u32), bool) {
         WebGLCommand::Clear(..) => ("Clear", 0, (0, 0), false),
         WebGLCommand::BufferData(..) | WebGLCommand::BufferSubData(..) => ("BufferData", 0, (0, 0), false),
         WebGLCommand::FramebufferTexture2D(..) => ("FramebufferTexture2D", 0, (0, 0), false),
-        WebGLCommand::ReadPixels(..) | WebGLCommand::ReadPixelsPP(..) => ("ReadPixels", 0, (0, 0), false),
+        WebGLCommand::ReadPixels(..) | WebGLCommand::ReadPixelsPP(..) | WebGLCommand::ReadPixelsCapture(..) => {
+            ("ReadPixels", 0, (0, 0), false)
+        },
         // Partii (webgl-uniforms): the rest by command (was "other").
         _ => (command.into(), 0, (0, 0), false),
     }
