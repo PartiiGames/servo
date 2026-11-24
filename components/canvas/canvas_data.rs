@@ -548,6 +548,10 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
                 .is_none_or(|rect| rect.is_empty())
             {
                 Snapshot::empty()
+            } else if read_rect == canvas_rect {
+                // Partii (clips): the whole canvas (drawImage of it, every frame in a jam clip): the
+                // snapshot is already that copy, don't copy it again.
+                self.draw_target.snapshot()
             } else {
                 self.draw_target.snapshot().get_rect(read_rect)
             }
