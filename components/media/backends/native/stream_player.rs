@@ -7,12 +7,15 @@
 //! waits for the track's newest frame and hands it to the element's video renderer as BGRA, which is
 //! what `drawImage(video)` and `texImage2D(video)` then read.
 //!
-//! Audio tracks of a srcObject are not played here (the voice stream's `<audio>.srcObject` reader
-//! takes them; until then they are accepted and silent).
+//! Audio tracks of a srcObject (a remote WebRTC voice, a mic) play through the shared output
+//! (stream voice): each is an `OutputSource` that reads the live track a little behind its live
+//! edge (20 ms headroom, trimmed back above 60 ms), honours the element's muted / volume / paused,
+//! and resamples linearly to the output rate. jam voice mutes its `<audio>` elements (it plays the
+//! voices through Web Audio), so a muted element reads and drops, it never plays twice.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
 
@@ -22,9 +25,12 @@ use servo_media::MediaInstanceError;
 use servo_media_player::metadata::Metadata;
 use servo_media_player::video::{Buffer, VideoFrame, VideoFrameData, VideoFrameRenderer};
 use servo_media_player::{PlaybackState, Player, PlayerError, PlayerEvent};
+use servo_media_streams::live::{self, AudioReader, ReadState};
 use servo_media_streams::live_video::{self, VideoFormat, VideoState};
 use servo_media_streams::registry::MediaStreamId;
 use servo_media_traits::MediaInstance;
+
+use crate::output::{OutputSource, add_stereo, output};
 
 struct Shared {
     events: GenericCallback<PlayerEvent>,
@@ -47,8 +53,92 @@ pub struct StreamPlayer {
     id: usize,
     shared: Arc<Shared>,
     video: Mutex<Option<MediaStreamId>>,
-    muted: AtomicBool,
-    volume: Mutex<f64>,
+    /// Audio tracks being played (kept alive here; the output holds them weakly).
+    audio: Mutex<Vec<Arc<AudioOut>>>,
+    muted: Arc<AtomicBool>,
+    volume: Arc<Mutex<f64>>,
+}
+
+/// Headroom an audio track waits for before it plays, and the backlog it trims above.
+const AUDIO_START_MS: f64 = 20.;
+const AUDIO_MAX_MS: f64 = 60.;
+
+/// One audio track of a srcObject, mixed into the output.
+struct AudioOut {
+    shared: Arc<Shared>,
+    muted: Arc<AtomicBool>,
+    volume: Arc<Mutex<f64>>,
+    state: Mutex<AudioOutState>,
+}
+
+struct AudioOutState {
+    reader: AudioReader,
+    /// Interleaved input frames not yet played, and the fractional read position (frames).
+    buf: Vec<f32>,
+    pos: f64,
+    playing: bool,
+}
+
+impl OutputSource for AudioOut {
+    fn mix(&self, out: &mut [f32], channels: usize, rate: u32) {
+        let mut guard = self.state.lock().unwrap();
+        let st = &mut *guard;
+        let fmt = st.reader.format();
+        let ch = fmt.channels.max(1) as usize;
+        let in_rate = fmt.sample_rate.max(1) as f64;
+        let avail = st.reader.buffered();
+        if avail > 0 {
+            let old = st.buf.len();
+            st.buf.resize(old + avail, 0.);
+            let got = st.reader.read(&mut st.buf[old..]);
+            st.buf.truncate(old + got);
+        }
+        let frames_in = st.buf.len() / ch;
+        let ms = frames_in as f64 * 1000. / in_rate;
+        if !st.playing && ms >= AUDIO_START_MS {
+            st.playing = true;
+        }
+        if ms > AUDIO_MAX_MS {
+            let keep = (AUDIO_START_MS * in_rate / 1000.) as usize;
+            st.buf.drain(..(frames_in - keep) * ch);
+            st.pos = 0.;
+        }
+        let frames_out = out.len() / channels.max(1);
+        let step = in_rate / rate.max(1) as f64;
+        let needed = (frames_out as f64 * step + st.pos).ceil() as usize + 1;
+        if !st.playing || st.reader.state() == ReadState::Ended {
+            return;
+        }
+        if st.buf.len() / ch < needed {
+            // Underrun: silence, and wait for the headroom again.
+            st.playing = false;
+            return;
+        }
+        let audible = self.shared.playing.load(Ordering::SeqCst) &&
+            !self.muted.load(Ordering::SeqCst) &&
+            st.reader.enabled();
+        let gain = *self.volume.lock().unwrap() as f32;
+        if audible && gain > 0. {
+            for i in 0..frames_out {
+                let p = st.pos + i as f64 * step;
+                let i0 = p.floor() as usize;
+                let frac = (p - i0 as f64) as f32;
+                let at = |j: usize, c: usize| st.buf[j * ch + c.min(ch - 1)];
+                let l = at(i0, 0) + (at(i0 + 1, 0) - at(i0, 0)) * frac;
+                let r = at(i0, 1) + (at(i0 + 1, 1) - at(i0, 1)) * frac;
+                add_stereo(
+                    &mut out[i * channels..(i + 1) * channels],
+                    l * gain,
+                    r * gain,
+                );
+            }
+        }
+        // Muted or paused elements consume too: unmuting plays the live edge, not a backlog.
+        let advance = st.pos + frames_out as f64 * step;
+        let whole = advance.floor() as usize;
+        st.pos = advance - whole as f64;
+        st.buf.drain(..whole * ch);
+    }
 }
 
 impl StreamPlayer {
@@ -67,8 +157,52 @@ impl StreamPlayer {
                 metadata_sent: AtomicBool::new(false),
             }),
             video: Mutex::new(None),
-            muted: AtomicBool::new(false),
-            volume: Mutex::new(1.),
+            audio: Mutex::new(vec![]),
+            muted: Arc::new(AtomicBool::new(false)),
+            volume: Arc::new(Mutex::new(1.)),
+        }
+    }
+
+    fn start_audio(&self, id: MediaStreamId) {
+        let Some(reader) = live::subscribe_audio(&id) else {
+            return;
+        };
+        let first = self.audio.lock().unwrap().is_empty() && self.video.lock().unwrap().is_none();
+        let out = Arc::new(AudioOut {
+            shared: self.shared.clone(),
+            muted: self.muted.clone(),
+            volume: self.volume.clone(),
+            state: Mutex::new(AudioOutState {
+                reader,
+                buf: Vec::new(),
+                pos: 0.,
+                playing: false,
+            }),
+        });
+        let source: Arc<dyn OutputSource> = out.clone();
+        output().add_source(Arc::downgrade(&source) as Weak<dyn OutputSource>);
+        self.audio.lock().unwrap().push(out);
+        // An audio-only srcObject has metadata at once (no frame to wait for).
+        if first && !self.shared.metadata_sent.swap(true, Ordering::SeqCst) {
+            self.shared.emit(PlayerEvent::MetadataUpdated(Metadata {
+                duration: None,
+                width: 0,
+                height: 0,
+                format: String::new(),
+                is_seekable: false,
+                video_tracks: vec![],
+                audio_tracks: vec!["audio".to_owned()],
+                is_live: true,
+                title: None,
+            }));
+            self.shared.emit(PlayerEvent::DurationChanged(None));
+            self.shared.emit(PlayerEvent::StateChanged(
+                if self.shared.playing.load(Ordering::SeqCst) {
+                    PlaybackState::Playing
+                } else {
+                    PlaybackState::Paused
+                },
+            ));
         }
     }
 
@@ -250,6 +384,7 @@ impl Player for StreamPlayer {
     fn stop(&self) -> Result<(), PlayerError> {
         self.shared.running.store(false, Ordering::SeqCst);
         self.shared.playing.store(false, Ordering::SeqCst);
+        self.audio.lock().unwrap().clear();
         Ok(())
     }
     fn seek(&self, _: f64) -> Result<(), PlayerError> {
@@ -306,6 +441,8 @@ impl Player for StreamPlayer {
             *video = Some(*stream);
             drop(video);
             self.start_video(*stream);
+        } else {
+            self.start_audio(*stream);
         }
         Ok(())
     }
