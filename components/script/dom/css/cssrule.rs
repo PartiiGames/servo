@@ -84,6 +84,8 @@ impl CSSRule {
             rule as &dyn SpecificCSSRule
         } else if let Some(rule) = self.downcast::<CSSFontFeatureValuesRule>() {
             rule as &dyn SpecificCSSRule
+        } else if let Some(rule) = self.downcast::<CSSContainerRule>() {
+            rule as &dyn SpecificCSSRule
         } else {
             unreachable!()
         }
