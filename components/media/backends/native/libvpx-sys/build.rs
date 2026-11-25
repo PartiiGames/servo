@@ -62,6 +62,9 @@ fn main() {
             ("aarch64", "linux") if native => "arm64-linux-gcc".into(),
             // arm64-darwin-gcc is libvpx's iOS target (iPhoneOS SDK); macOS 11+ is arm64-darwin20-gcc.
             ("aarch64", "macos") if native => "arm64-darwin20-gcc".into(),
+            // Partii (Mac universal): the x86_64 slice is cross built on the arm64 Mac. libvpx's darwin
+            // target adds -arch x86_64 itself; its SIMD needs nasm (or yasm), as on Linux.
+            ("x86_64", "macos") if has("nasm") || has("yasm") => "x86_64-darwin20-gcc".into(),
             _ => "generic-gnu".into(),
         }
     });
@@ -88,7 +91,18 @@ fn main() {
         // it was turned on): start from an empty build directory.
         let _ = std::fs::remove_dir_all(&build);
         std::fs::create_dir_all(&build).unwrap();
-        let status = Command::new("sh")
+        let mut configure = Command::new("sh");
+        // Cross builds (the Mac x86_64 slice on the arm64 Mac): configure links its probe programs
+        // with $LD (default `gcc`, the host's arch) and fails ("Toolchain is unable to link
+        // executables"). Native builds keep libvpx's default.
+        if !native {
+            let mut ld = compiler.path().as_os_str().to_owned();
+            if os == "macos" {
+                ld.push(format!(" --target={target_triple}"));
+            }
+            configure.env("LD", ld);
+        }
+        let status = configure
             .arg(src.join("configure"))
             .arg(format!("--target={target}"))
             .args(CONFIGURE)
