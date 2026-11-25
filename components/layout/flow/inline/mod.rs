@@ -1995,7 +1995,8 @@ impl InlineFormattingContext {
             LineBreak::Auto => LineBreakStrictness::Normal,
         });
         options.word_option = Some(match word_break {
-            WordBreak::Normal => LineBreakWordOption::Normal,
+            // Partii (ui-fix-3): `break-word` is `normal` here plus `overflow-wrap: anywhere`.
+            WordBreak::Normal | WordBreak::BreakWord => LineBreakWordOption::Normal,
             WordBreak::BreakAll => LineBreakWordOption::BreakAll,
             WordBreak::KeepAll => LineBreakWordOption::KeepAll,
         });
@@ -3151,8 +3152,12 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
             self.commit_pending_whitespace();
 
             // Partii (ui-fix-3): `overflow-wrap: anywhere` makes every character a soft wrap
-            // opportunity for min-content sizes (css-text-3 §5.5; `break-word` does not).
-            if can_wrap && style_text.overflow_wrap == OverflowWrap::Anywhere {
+            // opportunity for min-content sizes (css-text-3 §5.5; `overflow-wrap: break-word` does not;
+            // `word-break: break-word` is `overflow-wrap: anywhere`).
+            if can_wrap &&
+                (style_text.overflow_wrap == OverflowWrap::Anywhere ||
+                    style_text.word_break == WordBreak::BreakWord)
+            {
                 let pieces = run.split_at_characters();
                 if !pieces.is_empty() {
                     for (piece_index, piece) in pieces.iter().enumerate() {

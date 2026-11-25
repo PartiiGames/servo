@@ -99,7 +99,8 @@ impl BatchSlicer<'_> {
         let text_style = parent_style.get_inherited_text();
         let can_break_anywhere = text_style.word_break == WordBreak::BreakAll ||
             text_style.overflow_wrap == OverflowWrap::Anywhere ||
-            text_style.overflow_wrap == OverflowWrap::BreakWord;
+            text_style.overflow_wrap == OverflowWrap::BreakWord ||
+            text_style.word_break == WordBreak::BreakWord;
 
         let mut last_slice = segment.byte_range.start..segment.byte_range.start;
         let mut current_character_offset =

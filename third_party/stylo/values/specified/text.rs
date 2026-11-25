@@ -856,7 +856,7 @@ pub enum WordBreak {
     ///
     /// Specifying `word-break: break-word` makes `overflow-wrap` behave as
     /// `anywhere`, and `word-break` behave like `normal`.
-    #[cfg(feature = "gecko")]
+    /// Partii (ui-fix-3): for Servo too (Chromium and WebKit support it; layout maps it).
     BreakWord,
 }
 

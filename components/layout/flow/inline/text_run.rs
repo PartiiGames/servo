@@ -22,6 +22,7 @@ use style::computed_values::font_kerning::T as FontKerning;
 use style::computed_values::font_variant_position::T as FontVariantPosition;
 use style::computed_values::text_rendering::T as TextRendering;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
+use style::computed_values::word_break::T as WordBreak;
 use style::font_face::FontLanguageOverride;
 use style::properties::ComputedValues;
 use style::values::computed::{
@@ -272,15 +273,14 @@ impl TextRunSegment {
             soft_wrap_policy = SegmentStartSoftWrapPolicy::Force;
         }
 
-        let can_cut_words = matches!(
-            text_run
-                .inline_styles()
-                .style
-                .borrow()
-                .get_inherited_text()
-                .overflow_wrap,
-            OverflowWrap::Anywhere | OverflowWrap::BreakWord
-        );
+        let can_cut_words = {
+            let style = text_run.inline_styles().style.borrow();
+            let text = style.get_inherited_text();
+            matches!(
+                text.overflow_wrap,
+                OverflowWrap::Anywhere | OverflowWrap::BreakWord
+            ) || text.word_break == WordBreak::BreakWord
+        };
         let mut character_range_start = self.character_range.start;
         for (run_index, run) in self.runs.iter().enumerate() {
             let new_character_range_end = character_range_start + run.character_count();
