@@ -890,6 +890,9 @@ impl CanvasState {
         }
 
         let smoothing_enabled = self.state.borrow().image_smoothing_enabled;
+        // Partii: whether the destination is a canvas.captureStream source (see the WebGL arms below).
+        #[cfg(feature = "webgl")]
+        let capture_dest = htmlcanvas.is_some_and(|canvas| canvas.has_captures());
 
         if let Some(context) = canvas.context() {
             match *context {
@@ -1010,7 +1013,7 @@ impl CanvasState {
                 // not the script thread (jam clips copy the game's WebGL canvas every frame).
                 #[cfg(feature = "webgl")]
                 RenderingContext::WebGL(ref context) => {
-                    let Some(readback) = context.read_pixels_pending() else {
+                    let Some(readback) = context.read_pixels_pending(capture_dest) else {
                         return Ok(());
                     };
                     self.send_canvas_command(CanvasCommand::DrawImageFromWebGL(
@@ -1025,7 +1028,7 @@ impl CanvasState {
                 },
                 #[cfg(feature = "webgl")]
                 RenderingContext::WebGL2(ref context) => {
-                    let Some(readback) = context.base_context().read_pixels_pending() else {
+                    let Some(readback) = context.base_context().read_pixels_pending(capture_dest) else {
                         return Ok(());
                     };
                     self.send_canvas_command(CanvasCommand::DrawImageFromWebGL(

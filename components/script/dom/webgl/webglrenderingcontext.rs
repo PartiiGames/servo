@@ -318,7 +318,12 @@ pub(crate) struct WebGLRenderingContext {
 impl WebGLRenderingContext {
     /// Partii: get_image_data's readback without the wait: the WebGL thread answers the returned
     /// receiver (RGBA, rows bottom-up), and drawImage(this canvas) gives it to the canvas thread.
-    pub(crate) fn read_pixels_pending(&self) -> Option<servo_canvas_traits::canvas::WebGLReadback> {
+    /// `capture`: the copy is for a canvas.captureStream source (jam clips): on a GPU the WebGL thread may
+    /// answer with the previous such copy's pixels instead of waiting for this frame (ReadPixelsCapture).
+    pub(crate) fn read_pixels_pending(
+        &self,
+        capture: bool,
+    ) -> Option<servo_canvas_traits::canvas::WebGLReadback> {
         handle_potential_webgl_error!(self, self.validate_framebuffer(), return None);
         let mut size: Size2D<u32> = self.size().cast();
         let (fb_width, fb_height) = handle_potential_webgl_error!(
@@ -332,12 +337,16 @@ impl WebGLRenderingContext {
             return None;
         }
         let (sender, receiver) = generic_channel::channel().unwrap();
-        self.send_command(WebGLCommand::ReadPixels(
-            Rect::from_size(size),
-            constants::RGBA,
-            constants::UNSIGNED_BYTE,
-            sender,
-        ));
+        if capture {
+            self.send_command(WebGLCommand::ReadPixelsCapture(Rect::from_size(size), sender));
+        } else {
+            self.send_command(WebGLCommand::ReadPixels(
+                Rect::from_size(size),
+                constants::RGBA,
+                constants::UNSIGNED_BYTE,
+                sender,
+            ));
+        }
         Some(servo_canvas_traits::canvas::WebGLReadback(receiver, size))
     }
 

@@ -422,7 +422,10 @@ mod tests {
 
 /// Partii: the recorder runs below the page's threads: a clip may lose frames (the encoder takes the
 /// newest frame each time), the game must not. Linux: nice +10 for this thread (libvpx's worker
-/// threads, made from it, inherit it); macOS: the utility QoS class. Elsewhere: unchanged.
+/// threads, made from it, inherit it). macOS: the user-initiated QoS class, not utility:
+/// at utility Apple silicon keeps the encoder on the efficiency cores, which
+/// starve while the Mac is in use (Mac clips 1124-1601: a 347 ms encode, 4 of 97 frames dropped); the
+/// encoder is 1-3 ms a frame at 8-12 fps. Elsewhere: unchanged.
 fn background_priority() {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -431,6 +434,6 @@ fn background_priority() {
     }
     #[cfg(target_os = "macos")]
     unsafe {
-        let _ = libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+        let _ = libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0);
     }
 }
