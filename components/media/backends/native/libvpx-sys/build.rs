@@ -94,12 +94,11 @@ fn main() {
         let mut configure = Command::new("sh");
         // Cross builds (the Mac x86_64 slice on the arm64 Mac): configure links its probe programs
         // with $LD (default `gcc`, the host's arch) and fails ("Toolchain is unable to link
-        // executables"). Native builds keep libvpx's default.
-        if !native {
+        // executables"). Only for macOS: native builds and the Linux arm64 cross (tools/lx/cross-arm64.sh,
+        // which passes its sysroot through CC/CFLAGS) keep libvpx's default.
+        if !native && os == "macos" {
             let mut ld = compiler.path().as_os_str().to_owned();
-            if os == "macos" {
-                ld.push(format!(" --target={target_triple}"));
-            }
+            ld.push(format!(" --target={target_triple}"));
             configure.env("LD", ld);
         }
         let status = configure
