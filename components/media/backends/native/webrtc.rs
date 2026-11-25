@@ -65,18 +65,33 @@ macro_rules! rtc_dbg {
     };
 }
 
-/// The SDP lines that decide ICE and DTLS (candidates, ice-lite, setup, ufrag), for rtc_dbg.
+/// The SDP lines that decide ICE and DTLS (candidates, ice-lite, setup), for rtc_dbg. No ICE
+/// credentials: no a=ice-ufrag/a=ice-pwd lines, and a candidate's "ufrag x" is cut.
 fn sdp_ice_lines(sdp: &str) -> String {
     sdp.lines()
         .filter(|l| {
             l.starts_with("a=candidate") ||
                 l.starts_with("a=ice-lite") ||
                 l.starts_with("a=setup") ||
-                l.starts_with("a=ice-ufrag") ||
                 l.starts_with("m=")
         })
+        .map(redact_ufrag)
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+/// A candidate line without its "ufrag <value>" (for logs).
+fn redact_ufrag(line: &str) -> String {
+    let mut out = vec![];
+    let mut it = line.split_whitespace();
+    while let Some(w) = it.next() {
+        if w == "ufrag" {
+            it.next();
+            continue;
+        }
+        out.push(w);
+    }
+    out.join(" ")
 }
 
 const FRAME: usize = 960;
@@ -2115,7 +2130,8 @@ impl Peer {
                 self.rtc.add_remote_candidate(c);
             },
             // mDNS (.local) host candidates among them: the other candidates (and prflx) still work.
-            Err(e) => debug!("webrtc: remote candidate not used: {e:?}"),
+            // (The error repeats the line, ufrag included: not logged.)
+            Err(_) => debug!("webrtc: remote candidate not used: {}", redact_ufrag(s)),
         }
     }
 }
@@ -2123,6 +2139,26 @@ impl Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trickled candidates go through Candidate::from_sdp_string, which takes the tail fields in
+    /// any order and skips unknown ones (unlike str0m's whole-description grammar).
+    #[test]
+    fn trickled_candidates_any_tail_order() {
+        for line in [
+            "candidate:1 1 udp 1686052607 203.0.113.9 6000 typ srflx raddr 10.0.0.2 rport 5000 generation 0 ufrag abcd network-id 1",
+            "candidate:1 1 udp 1686052607 203.0.113.9 6000 typ srflx generation 0 network-cost 10 rport 5000 raddr 10.0.0.2",
+            "candidate:1 1 udp 1686052607 203.0.113.9 6000 typ srflx ufrag abcd raddr 10.0.0.2 network-id 2 rport 5000",
+            "candidate:2 1 tcp 1518280447 203.0.113.9 9 typ host generation 0 tcptype active ufrag abcd",
+        ] {
+            let c = Candidate::from_sdp_string(line).unwrap_or_else(|e| panic!("{line}: {e:?}"));
+            assert_eq!(c.addr().ip().to_string(), "203.0.113.9", "{line}");
+        }
+        assert_eq!(
+            redact_ufrag("candidate:1 1 udp 1 192.0.2.1 9 typ host ufrag Zq9x generation 0"),
+            "candidate:1 1 udp 1 192.0.2.1 9 typ host generation 0"
+        );
+        assert!(!sdp_ice_lines("m=audio 9 x\r\na=ice-ufrag:Zq9x\r\na=ice-pwd:secretsecret\r\na=candidate:1 1 udp 1 192.0.2.1 9 typ host ufrag Zq9x\r\n").contains("Zq9x"));
+    }
 
     #[test]
     fn candidate_keys() {
