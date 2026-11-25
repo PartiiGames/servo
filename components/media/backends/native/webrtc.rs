@@ -15,7 +15,8 @@
 //! (a STUN binding from each host socket, stun.rs) and relay candidates (a TURN allocation per
 //! turn:/turns: URL over UDP, TCP or TLS, turn.rs). str0m does the checks; this thread routes its
 //! transmits (a relay candidate's are wrapped for the TURN server) and unwraps relayed data for it.
-//! Trickle ICE both ways: candidates found after setLocalDescription go out as icecandidate events,
+//! Trickle ICE both ways: every local candidate goes out as an icecandidate event once
+//! setLocalDescription happened (as in browsers), later ones as they are found;
 //! and createOffer/createAnswer wait (2 s at most) for gathering, so a page that sends the whole
 //! description still has every candidate in it; addIceCandidate's candidates go to str0m.
 //! iceTransportPolicy "relay" offers relay candidates only. Video transceivers are refused for now.
@@ -1710,20 +1711,14 @@ impl Peer {
         );
     }
 
-    /// After setLocalDescription: trickle what the description lacks, and the gathering state.
+    /// After the first setLocalDescription: every candidate so far as an icecandidate event (as
+    /// browsers do, those in the description too: pages that strip them rely on the events), and
+    /// the gathering state.
     fn on_local_described(&mut self) {
         if !self.local_described {
             self.local_described = true;
-            let sdp = self.last_local.as_ref().map(|d| d.sdp.clone()).unwrap_or_default();
-            let have: Vec<String> = sdp
-                .lines()
-                .filter(|l| l.starts_with("a=candidate:"))
-                .filter_map(candidate_key)
-                .collect();
             for line in self.gathered.clone() {
-                if candidate_key(&line).is_some_and(|k| !have.contains(&k)) {
-                    self.trickle(line);
-                }
+                self.trickle(line);
             }
         }
         self.signaller.update_gathering_state(if self.gathering_complete {
@@ -1795,8 +1790,13 @@ impl Peer {
                         p.tries += 1;
                         p.rto *= 2;
                         p.next = now + p.rto;
-                        if let Some((_, s)) = self.sockets.iter().find(|(a, _)| *a == p.base) {
-                            let _ = s.send_to(&p.msg, server);
+                        let sent = self
+                            .sockets
+                            .iter()
+                            .find(|(a, _)| *a == p.base)
+                            .is_some_and(|(_, s)| s.send_to(&p.msg, server).is_ok());
+                        if !sent {
+                            p.done = true;
                         }
                     }
                     *done = probes.iter().all(|p| p.done);
@@ -1911,15 +1911,20 @@ impl Peer {
                     *done = true;
                     return self.update_gathering(now);
                 };
-                rtc_dbg!("stun {url}: binding from {} socket(s)", host.len());
                 *slot = Some(server);
-                for base in host.iter().filter(|h| h.is_ipv4() == server.is_ipv4()) {
+                // A loopback socket can't reach a server elsewhere (a farm test binding 127.0.0.1).
+                for base in host.iter().filter(|h| {
+                    h.is_ipv4() == server.is_ipv4() &&
+                        (!h.ip().is_loopback() || server.ip().is_loopback())
+                }) {
                     let tid = stun::new_tid();
                     let msg = stun::Builder::new(stun::BINDING, stun::Class::Request, tid)
                         .build(None, true);
-                    if let Some((_, s)) = self.sockets.iter().find(|(a, _)| a == base) {
-                        let _ = s.send_to(&msg, server);
-                    }
+                    let sent = self
+                        .sockets
+                        .iter()
+                        .find(|(a, _)| a == base)
+                        .is_some_and(|(_, s)| s.send_to(&msg, server).is_ok());
                     probes.push(Probe {
                         tid,
                         base: *base,
@@ -1927,10 +1932,11 @@ impl Peer {
                         next: now + Duration::from_millis(250),
                         rto: Duration::from_millis(250),
                         tries: 1,
-                        done: false,
+                        done: !sent,
                     });
                 }
-                *done = probes.is_empty();
+                rtc_dbg!("stun {url}: binding from {} socket(s)", probes.iter().filter(|p| !p.done).count());
+                *done = probes.iter().all(|p| p.done);
             },
             Gather::Turn {
                 url,
@@ -1939,7 +1945,11 @@ impl Peer {
                 done,
                 ..
             } => {
-                let local = server.and_then(|sv| host.iter().find(|h| h.is_ipv4() == sv.is_ipv4()));
+                let local = server.and_then(|sv| {
+                    host.iter().find(|h| {
+                        h.is_ipv4() == sv.is_ipv4() && (!h.ip().is_loopback() || sv.ip().is_loopback())
+                    })
+                });
                 let (Some(server), Some(local)) = (server, local) else {
                     rtc_dbg!("turn {url}: no usable address");
                     *done = true;
