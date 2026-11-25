@@ -17,6 +17,7 @@
 //!   feature); `<audio>.srcObject` plays live audio tracks ([`stream_player`]).
 
 mod aec;
+pub use aec::set_remote_off as aec_remote_off;
 mod capture;
 mod codecs;
 pub mod decoder;

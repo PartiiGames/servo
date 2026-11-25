@@ -17,12 +17,26 @@ use std::sync::{Arc, Mutex, Weak};
 use sonora::config::{AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression};
 use sonora::{AudioProcessing, Config, StreamConfig};
 
-/// The kill switch: anything but "0", "off" or "false" (or unset) keeps echo cancellation on.
+/// Set by the app (tauri-runtime's AppConfig.off containing "aec"): echo cancellation off for mics opened after.
+static REMOTE_OFF: AtomicBool = AtomicBool::new(false);
+
+/// The remote kill switch: turns echo cancellation off for every microphone opened from now on.
+pub fn set_remote_off() {
+    REMOTE_OFF.store(true, Ordering::Relaxed);
+}
+
+/// An explicitly set PARTII_RUNTIME_AEC wins ("0", "off" or "false" = off, anything else = on, for support and
+/// local use); unset, the remote switch decides.
 pub(crate) fn enabled() -> bool {
-    !matches!(
-        std::env::var("PARTII_RUNTIME_AEC").as_deref(),
-        Ok("0") | Ok("off") | Ok("false")
-    )
+    decide(std::env::var("PARTII_RUNTIME_AEC").ok().as_deref(), REMOTE_OFF.load(Ordering::Relaxed))
+}
+
+fn decide(env: Option<&str>, remote_off: bool) -> bool {
+    match env {
+        Some("0") | Some("off") | Some("false") => false,
+        Some(_) => true,
+        None => !remote_off,
+    }
 }
 
 /// At most this much far end waits in a tap (a stalled microphone must not grow it).
@@ -208,6 +222,23 @@ mod tests {
     use std::f32::consts::PI;
 
     use super::*;
+
+    /// An explicit PARTII_RUNTIME_AEC wins over the remote switch; unset, the remote switch decides.
+    #[test]
+    fn env_then_remote_order() {
+        for (env, remote_off, want) in [
+            (None, false, true),
+            (None, true, false),
+            (Some("0"), false, false),
+            (Some("off"), false, false),
+            (Some("false"), true, false),
+            (Some("1"), true, true),
+            (Some("on"), true, true),
+            (Some(""), true, true),
+        ] {
+            assert_eq!(decide(env, remote_off), want, "env {env:?} remote_off {remote_off}");
+        }
+    }
 
     /// Power of `hz` in `x` (Goertzel).
     fn power(x: &[f32], hz: f32, rate: f32) -> f32 {
