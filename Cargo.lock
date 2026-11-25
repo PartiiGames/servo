@@ -9412,6 +9412,7 @@ name = "servo-media-native"
 version = "0.7.0"
 dependencies = [
  "alsa",
+ "aws-lc-rs",
  "block2 0.6.2",
  "cpal",
  "dispatch2",
@@ -9428,6 +9429,9 @@ dependencies = [
  "opusic-sys",
  "partii-libvpx-sys",
  "rav1d",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-platform-verifier",
  "servo-base",
  "servo-media",
  "servo-media-audio",

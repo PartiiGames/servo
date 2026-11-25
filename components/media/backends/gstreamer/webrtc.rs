@@ -204,11 +204,14 @@ impl WebRtcControllerBackend for GStreamerWebRtcController {
         }
     }
 
-    fn configure(&mut self, stun_server: &str, policy: BundlePolicy) -> WebRtcResult {
+    fn configure(&mut self, config: &IceConfig) -> WebRtcResult {
+        // As before the IceConfig: the first URL of the first server as the STUN server (TURN and
+        // the transport policy are not passed on to webrtcbin here).
+        if let Some(url) = config.servers.first().and_then(|s| s.urls.first()) {
+            self.webrtc.set_property_from_str("stun-server", url);
+        }
         self.webrtc
-            .set_property_from_str("stun-server", stun_server);
-        self.webrtc
-            .set_property_from_str("bundle-policy", policy.as_str());
+            .set_property_from_str("bundle-policy", config.bundle_policy.as_str());
         Ok(())
     }
 

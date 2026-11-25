@@ -41,6 +41,13 @@ libc = { workspace = true }
 # aws-lc-rs crypto (DTLS through dimpl), and libopus (the same bundled build as opus above).
 str0m = { version = "0.25.0", default-features = false, features = ["aws-lc-rs"], optional = true }
 opusic-sys = { version = "0.7.7", optional = true }
+# ICE servers for RTCPeerConnection (stun.rs, turn.rs): HMAC-SHA1 for STUN MESSAGE-INTEGRITY (aws-lc-rs, which
+# str0m already uses), and TLS for turns: (rustls with its aws-lc-rs provider, the server certificate checked by
+# the platform verifier). The workspace's own versions: no new packages.
+aws-lc-rs = { workspace = true, optional = true }
+rustls = { workspace = true, features = ["aws_lc_rs"], optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+rustls-platform-verifier = { workspace = true, optional = true }
 # Microphone echo cancellation, noise suppression and gain control (aec.rs): the pure-Rust port of WebRTC's audio
 # processing (BSD-3-Clause).
 sonora = "0.3.0"
@@ -74,7 +81,14 @@ vpx = ["video", "dep:partii-libvpx-sys"]
 # AV1 through rav1d (pure Rust).
 av1 = ["video", "dep:rav1d"]
 # RTCPeerConnection: str0m + Opus (webrtc.rs).
-webrtc = ["dep:str0m", "dep:opusic-sys"]
+webrtc = [
+    "dep:str0m",
+    "dep:opusic-sys",
+    "dep:aws-lc-rs",
+    "dep:rustls",
+    "dep:rustls-pki-types",
+    "dep:rustls-platform-verifier",
+]
 
 [lints]
 workspace = true

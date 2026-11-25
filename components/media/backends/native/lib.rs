@@ -33,6 +33,11 @@ pub mod streams;
 mod webm;
 #[cfg(feature = "webrtc")]
 pub mod webrtc;
+// STUN messages and the TURN client for webrtc.rs (srflx and relay candidates).
+#[cfg(feature = "webrtc")]
+mod stun;
+#[cfg(feature = "webrtc")]
+mod turn;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

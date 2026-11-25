@@ -22,7 +22,8 @@ use servo_media::streams::registry::MediaStreamId;
 use stylo_atoms::Atom;
 use servo_media::webrtc::{
     BundlePolicy, DataChannelEvent, DataChannelId, DataChannelState, DescriptionType,
-    GatheringState, IceCandidate, IceConnectionState, PeerConnectionState, RtpStats, SdpType,
+    GatheringState, IceCandidate, IceConfig, IceConnectionState, IceServer, IceTransportPolicy,
+    PeerConnectionState, RtpStats, SdpType,
     SessionDescription, SignalingState, TransceiverId, TransceiverState, WebRtcController,
     WebRtcSignaller,
 };
@@ -32,6 +33,7 @@ use crate::dom::bindings::codegen::Bindings::RTCDataChannelBinding::RTCDataChann
 use crate::dom::bindings::codegen::Bindings::RTCIceCandidateBinding::RTCIceCandidateInit;
 use crate::dom::bindings::codegen::Bindings::RTCPeerConnectionBinding::{
     RTCAnswerOptions, RTCBundlePolicy, RTCConfiguration, RTCIceConnectionState,
+    RTCIceTransportPolicy,
     RTCIceGatheringState, RTCOfferOptions, RTCPeerConnectionMethods, RTCPeerConnectionState,
     RTCRtpTransceiverInit, RTCSignalingState,
 };
@@ -214,25 +216,44 @@ impl RTCPeerConnection {
         );
         let signaller = this.make_signaller();
         *this.controller.borrow_mut() = Some(ServoMedia::get().create_webrtc(signaller));
-        if let Some(ref servers) = config.iceServers
-            && let Some(server) = servers.first()
-        {
-            let server = match server.urls {
-                StringOrStringSequence::String(ref s) => Some(s.clone()),
-                StringOrStringSequence::StringSequence(ref s) => s.first().cloned(),
-            };
-            if let Some(server) = server {
-                let policy = match config.bundlePolicy {
-                    RTCBundlePolicy::Balanced => BundlePolicy::Balanced,
-                    RTCBundlePolicy::Max_compat => BundlePolicy::MaxCompat,
-                    RTCBundlePolicy::Max_bundle => BundlePolicy::MaxBundle,
-                };
-                this.controller
-                    .borrow()
-                    .as_ref()
-                    .unwrap()
-                    .configure(String::from(server), policy);
-            }
+        // Every RTCIceServer (all its urls, username and credential) and the transport policy go
+        // to the backend; it gathers server-reflexive (stun:) and relay (turn:, turns:) candidates
+        // from them. Always sent, so that "relay" applies with no servers too.
+        let servers = config
+            .iceServers
+            .as_ref()
+            .map(|servers| {
+                servers
+                    .iter()
+                    .map(|server| IceServer {
+                        urls: match server.urls {
+                            StringOrStringSequence::String(ref s) => vec![String::from(s.clone())],
+                            StringOrStringSequence::StringSequence(ref s) => {
+                                s.iter().map(|u| String::from(u.clone())).collect()
+                            },
+                        },
+                        username: server.username.as_ref().map(|u| String::from(u.clone())),
+                        credential: server.credential.as_ref().map(|c| String::from(c.clone())),
+                    })
+                    .filter(|s| !s.urls.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let bundle_policy = match config.bundlePolicy {
+            RTCBundlePolicy::Balanced => BundlePolicy::Balanced,
+            RTCBundlePolicy::Max_compat => BundlePolicy::MaxCompat,
+            RTCBundlePolicy::Max_bundle => BundlePolicy::MaxBundle,
+        };
+        let transport_policy = match config.iceTransportPolicy {
+            RTCIceTransportPolicy::Relay => IceTransportPolicy::Relay,
+            RTCIceTransportPolicy::All => IceTransportPolicy::All,
+        };
+        if let Some(controller) = this.controller.borrow().as_ref() {
+            controller.configure(IceConfig {
+                servers,
+                transport_policy,
+                bundle_policy,
+            });
         }
         this
     }
@@ -802,34 +823,31 @@ impl RTCPeerConnectionMethods<crate::DomTypeHolder> for RTCPeerConnection {
         candidate: &RTCIceCandidateInit,
     ) -> RootedPromise {
         let p = Promise::new_in_realm(current_realm);
-        if candidate.sdpMid.is_none() && candidate.sdpMLineIndex.is_none() {
+        // An empty candidate is end-of-candidates (needs no m-line).
+        let text = candidate.candidate.to_string();
+        if !text.is_empty() && candidate.sdpMid.is_none() && candidate.sdpMLineIndex.is_none() {
             p.reject_error(
                 current_realm,
                 Error::Type(c"one of sdpMid and sdpMLineIndex must be set".to_owned()),
             );
             return p;
         }
-
-        // XXXManishearth add support for sdpMid
-        if candidate.sdpMLineIndex.is_none() {
-            p.reject_error(
-                current_realm,
-                Error::Type(c"servo only supports sdpMLineIndex right now".to_owned()),
-            );
+        if self.closed.get() {
+            p.reject_error(current_realm, Error::InvalidState(None));
             return p;
         }
 
         // XXXManishearth this should be enqueued
         // https://w3c.github.io/webrtc-pc/#enqueue-an-operation
 
-        self.controller
-            .borrow_mut()
-            .as_ref()
-            .unwrap()
-            .add_ice_candidate(IceCandidate {
-                sdp_mline_index: candidate.sdpMLineIndex.unwrap() as u32,
-                candidate: candidate.candidate.to_string(),
+        // Trickled candidates go to the backend (str0m adds them to its ICE agent). Every m-line
+        // shares one transport there (max-bundle), so a candidate with only sdpMid counts as m-line 0.
+        if let Some(controller) = self.controller.borrow().as_ref() {
+            controller.add_ice_candidate(IceCandidate {
+                sdp_mline_index: candidate.sdpMLineIndex.map_or(0, u32::from),
+                candidate: text,
             });
+        }
 
         // XXXManishearth add_ice_candidate should have a callback
         p.resolve_native(current_realm, &());

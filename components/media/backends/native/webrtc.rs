@@ -11,8 +11,14 @@
 //!
 //! Audio is Opus mono 48 kHz, 20 ms frames, through libopus: senders read their track from the
 //! live registry (live.rs), receivers push decoded PCM into the transceiver's receiver source.
-//! No trickle ICE: the local host candidates are in every description (jam voice sends no
-//! candidates separately). Video transceivers are refused for now.
+//! ICE: host candidates from the bound sockets; with iceServers, server-reflexive candidates
+//! (a STUN binding from each host socket, stun.rs) and relay candidates (a TURN allocation per
+//! turn:/turns: URL over UDP, TCP or TLS, turn.rs). str0m does the checks; this thread routes its
+//! transmits (a relay candidate's are wrapped for the TURN server) and unwraps relayed data for it.
+//! Trickle ICE both ways: candidates found after setLocalDescription go out as icecandidate events,
+//! and createOffer/createAnswer wait (2 s at most) for gathering, so a page that sends the whole
+//! description still has every candidate in it; addIceCandidate's candidates go to str0m.
+//! iceTransportPolicy "relay" offers relay candidates only. Video transceivers are refused for now.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -27,8 +33,9 @@ use servo_media_streams::live::{self, AudioFormat, AudioReader, AudioSource};
 use servo_media_streams::registry::MediaStreamId;
 use servo_media_webrtc::thread::InternalEvent;
 use servo_media_webrtc::{
-    BundlePolicy, DataChannelId, DataChannelInit, DataChannelMessage, DescriptionType,
-    GatheringState, IceCandidate, IceConnectionState, PeerConnectionState, ResultCallback,
+    DataChannelId, DataChannelInit, DataChannelMessage, DescriptionType, GatheringState,
+    IceCandidate, IceConfig, IceConnectionState, IceTransportPolicy, PeerConnectionState,
+    ResultCallback,
     RtpDirection, RtpStats, SdpType, SessionDescription, SignalingState, TransceiverId,
     TransceiverState, WebRtcController, WebRtcControllerBackend, WebRtcDataChannelResult,
     WebRtcError, WebRtcResult, WebRtcSignaller,
@@ -37,6 +44,9 @@ use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
+
+use crate::stun;
+use crate::turn::{self, Credentials, IceUrl, LinkEvent, StreamWriter, Transport, TurnClient, TurnEvent};
 
 /// Opus at 48 kHz: 20 ms frames.
 /// PARTII_WEBRTC_DEBUG=1: one stderr line per ICE/DTLS step, the candidates and the SDP's ICE lines,
@@ -188,6 +198,12 @@ enum Msg {
     ReplaceTrack(TransceiverId, Option<MediaStreamId>, ResultCallback<()>),
     Stats(Box<dyn FnOnce(Vec<RtpStats>) + Send>),
     AddStream(MediaStreamId),
+    Configure(IceConfig),
+    AddCandidate(IceCandidate),
+    /// An ICE server's addresses (resolved off this thread): `idx` into `Peer::gathers`.
+    Resolved(usize, Vec<SocketAddr>),
+    /// A TCP/TLS TURN connection's news.
+    Link(usize, LinkEvent),
     Quit,
 }
 
@@ -217,11 +233,9 @@ impl Str0mController {
 }
 
 impl WebRtcControllerBackend for Str0mController {
-    fn configure(&mut self, stun_server: &str, _policy: BundlePolicy) -> WebRtcResult {
-        // Host candidates only: jam voice talks to an ICE-lite SFU, which needs no reflexive
-        // candidates from us. Every policy is max-bundle here.
-        debug!("webrtc: STUN server {stun_server} noted (host candidates only)");
-        Ok(())
+    fn configure(&mut self, config: &IceConfig) -> WebRtcResult {
+        // Every bundle policy is max-bundle here. (IceConfig's Debug redacts credentials.)
+        self.send(Msg::Configure(config.clone()))
     }
     fn set_remote_description(
         &mut self,
@@ -238,12 +252,7 @@ impl WebRtcControllerBackend for Str0mController {
         self.set_description(DescriptionType::Local, desc, Box::new(move |_| cb()))
     }
     fn add_ice_candidate(&mut self, candidate: IceCandidate) -> WebRtcResult {
-        // Candidates in the remote description are used; trickled ones are not (yet).
-        debug!(
-            "webrtc: ignoring trickled candidate {}",
-            candidate.candidate
-        );
-        Ok(())
+        self.send(Msg::AddCandidate(candidate))
     }
     fn create_offer(
         &mut self,
@@ -600,6 +609,172 @@ fn bind_udp(ip: IpAddr) -> Option<UdpSocket> {
     }
 }
 
+// ---------- ICE servers: STUN bindings and TURN allocations ----------
+
+/// How long gathering may take before icegatheringstate says complete (later candidates still
+/// trickle), and how long createOffer/createAnswer wait for it.
+const GATHER_WAIT: Duration = Duration::from_secs(5);
+const CREATE_WAIT: Duration = Duration::from_secs(2);
+/// At most this many TURN allocations per peer connection (Cloudflare hands out six URLs).
+const MAX_TURN: usize = 6;
+
+/// One STUN binding request from one host socket.
+struct Probe {
+    tid: stun::TransId,
+    base: SocketAddr,
+    msg: Vec<u8>,
+    next: Instant,
+    rto: Duration,
+    tries: u32,
+    done: bool,
+}
+
+enum TurnLink {
+    /// Through the host socket at `local`.
+    Udp { server: SocketAddr, local: SocketAddr },
+    Stream { writer: StreamWriter, local: SocketAddr },
+}
+
+impl TurnLink {
+    fn local(&self) -> SocketAddr {
+        match self {
+            TurnLink::Udp { local, .. } | TurnLink::Stream { local, .. } => *local,
+        }
+    }
+}
+
+enum Gather {
+    Stun {
+        url: IceUrl,
+        server: Option<SocketAddr>,
+        probes: Vec<Probe>,
+        done: bool,
+    },
+    Turn {
+        url: IceUrl,
+        client: TurnClient,
+        link: Option<TurnLink>,
+        relay: Option<SocketAddr>,
+        done: bool,
+    },
+}
+
+impl Gather {
+    fn done(&self) -> bool {
+        match self {
+            Gather::Stun { done, .. } | Gather::Turn { done, .. } => *done,
+        }
+    }
+    fn relay(&self) -> Option<SocketAddr> {
+        match self {
+            Gather::Turn { relay, .. } => *relay,
+            Gather::Stun { .. } => None,
+        }
+    }
+}
+
+/// The STUN and TURN servers to gather from: every URL of every server (TURN ones need a username
+/// and credential), each once.
+fn gathers_from(config: &IceConfig) -> Vec<Gather> {
+    let mut v: Vec<Gather> = vec![];
+    let mut seen: Vec<IceUrl> = vec![];
+    for server in &config.servers {
+        for raw in &server.urls {
+            let Some(url) = turn::parse_url(raw) else {
+                warn!("webrtc: ICE server URL not understood, skipped");
+                continue;
+            };
+            if seen.contains(&url) {
+                continue;
+            }
+            seen.push(url.clone());
+            match url.scheme {
+                turn::Scheme::Stun => v.push(Gather::Stun {
+                    url,
+                    server: None,
+                    probes: vec![],
+                    done: false,
+                }),
+                // STUN over TLS finds no address a UDP socket could use.
+                turn::Scheme::Stuns => {},
+                turn::Scheme::Turn | turn::Scheme::Turns => {
+                    let (Some(username), Some(password)) =
+                        (server.username.clone(), server.credential.clone())
+                    else {
+                        warn!("webrtc: TURN URL {url} without username/credential, skipped");
+                        continue;
+                    };
+                    if v.iter().filter(|g| matches!(g, Gather::Turn { .. })).count() >= MAX_TURN {
+                        continue;
+                    }
+                    let reliable = url.transport != Transport::Udp;
+                    v.push(Gather::Turn {
+                        url,
+                        client: TurnClient::new(Credentials { username, password }, reliable),
+                        link: None,
+                        relay: None,
+                        done: false,
+                    });
+                },
+            }
+        }
+    }
+    v
+}
+
+/// "<ip> <port> typ <kind>" of a candidate line (with or without "a="): what makes two lines the
+/// same candidate.
+fn candidate_key(line: &str) -> Option<String> {
+    let t: Vec<&str> = line.split_whitespace().collect();
+    let typ = t.iter().position(|x| *x == "typ")?;
+    Some(format!(
+        "{} {} {} typ {}",
+        t.get(2)?.to_ascii_lowercase(),
+        t.get(4)?,
+        t.get(5)?,
+        t.get(typ + 1)?
+    ))
+}
+
+/// `sdp` with each of `cands` ("candidate:..." lines) added to every m-section that lacks it.
+fn sdp_with_candidates(sdp: &str, cands: &[String]) -> String {
+    if cands.is_empty() {
+        return sdp.to_owned();
+    }
+    let eol = if sdp.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out: Vec<String> = vec![];
+    let mut start: Option<usize> = None;
+    let finish = |out: &mut Vec<String>, start: Option<usize>| {
+        let Some(s) = start else { return };
+        let mut end = out.len();
+        while end > s && out[end - 1].is_empty() {
+            end -= 1;
+        }
+        let have: Vec<String> = out[s..end]
+            .iter()
+            .filter(|l| l.starts_with("a=candidate:"))
+            .filter_map(|l| candidate_key(l))
+            .collect();
+        let missing: Vec<String> = cands
+            .iter()
+            .filter(|c| candidate_key(c).is_some_and(|k| !have.contains(&k)))
+            .map(|c| format!("a={c}"))
+            .collect();
+        for (k, m) in missing.into_iter().enumerate() {
+            out.insert(end + k, m);
+        }
+    };
+    for l in sdp.split(eol) {
+        if l.starts_with("m=") {
+            finish(&mut out, start);
+            start = Some(out.len());
+        }
+        out.push(l.to_owned());
+    }
+    finish(&mut out, start);
+    out.join(eol)
+}
+
 struct Peer {
     rtc: Rtc,
     signaller: Box<dyn WebRtcSignaller>,
@@ -624,6 +799,19 @@ struct Peer {
     n_out: u64,
     n_send_err: u64,
     last_dbg: Instant,
+    /// For the resolver and TURN link threads to post back here.
+    tx: Sender<Msg>,
+    /// iceTransportPolicy "relay": only relay candidates go to str0m.
+    relay_only: bool,
+    gathers: Vec<Gather>,
+    gathering_started: Option<Instant>,
+    gathering_complete: bool,
+    /// Every local candidate str0m took, as "candidate:..." lines, in order.
+    gathered: Vec<String>,
+    /// setLocalDescription happened: new candidates trickle out at once.
+    local_described: bool,
+    /// createOffer/createAnswer results held until gathering completes (or CREATE_WAIT).
+    waiting: Vec<(Instant, Result<SessionDescription, String>, ResultCallback<SessionDescription>)>,
 }
 
 impl Peer {
@@ -659,7 +847,18 @@ impl Peer {
             n_out: 0,
             n_send_err: 0,
             last_dbg: Instant::now(),
+            tx: tx.clone(),
+            relay_only: false,
+            gathers: vec![],
+            gathering_started: None,
+            gathering_complete: false,
+            gathered: vec![],
+            local_described: false,
+            waiting: vec![],
         };
+        // Candidates go to str0m once the configuration is known (start_gathering): with
+        // iceTransportPolicy "relay" the host ones never do, though their sockets still carry
+        // STUN and TURN over UDP.
         for ip in host_addresses() {
             let Some(sock) = bind_udp(ip) else {
                 continue;
@@ -670,13 +869,6 @@ impl Peer {
             let Ok(reader) = sock.try_clone() else {
                 continue;
             };
-            let Ok(c) = Candidate::host(addr, "udp") else {
-                rtc_dbg!("local candidate {addr} refused by Candidate::host");
-                continue;
-            };
-            let added = peer.rtc.add_local_candidate(c).is_some();
-            rtc_dbg!("local candidate {addr} (added: {added})");
-            peer.drain();
             let _ = reader.set_read_timeout(Some(Duration::from_millis(250)));
             let tx = tx.clone();
             let stop = peer.stop_sockets.clone();
@@ -736,6 +928,7 @@ impl Peer {
                     warn!("webrtc: timeout input: {e:?}");
                 }
             }
+            self.ice_tick(now);
             next = self.drain();
             self.send_audio();
             self.check_liveness();
@@ -763,6 +956,15 @@ impl Peer {
             match self.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => return t,
                 Ok(Output::Transmit(t)) => {
+                    // From a relay candidate: through its TURN allocation.
+                    if let Some(i) = self.gathers.iter().position(|g| g.relay() == Some(t.source)) {
+                        if let Gather::Turn { client, .. } = &mut self.gathers[i] {
+                            client.send_to(t.destination, &t.contents, Instant::now());
+                        }
+                        self.flush_turn(i);
+                        self.n_out += 1;
+                        continue;
+                    }
                     let sock = self
                         .sockets
                         .iter()
@@ -1045,6 +1247,13 @@ impl Peer {
     }
 
     fn handle(&mut self, m: Msg) {
+        if !matches!(
+            m,
+            Msg::Packet { .. } | Msg::Resolved(..) | Msg::Link(..) | Msg::Configure(_) | Msg::Quit
+        ) {
+            // No configure came (no RTCConfiguration reached the backend): host candidates only.
+            self.start_gathering();
+        }
         match m {
             Msg::Packet {
                 data,
@@ -1052,6 +1261,10 @@ impl Peer {
                 destination,
                 at,
             } => {
+                if self.ice_server_packet(&data, source, destination, at) {
+                    self.drain();
+                    return;
+                }
                 let Ok(contents) = data.as_slice().try_into() else {
                     return;
                 };
@@ -1087,7 +1300,13 @@ impl Peer {
                         })
                         .ok_or_else(|| "createAnswer needs a remote offer".to_owned())
                 };
-                cb(r);
+                // Held until gathering is done (CREATE_WAIT at most): then every candidate is in it.
+                if self.gathering_complete {
+                    let r = self.with_candidates(r);
+                    cb(r);
+                } else {
+                    self.waiting.push((Instant::now(), r, cb));
+                }
             },
             Msg::SetDescription(which, desc, cb) => {
                 let r = self.set_description(which, desc);
@@ -1157,6 +1376,24 @@ impl Peer {
                 self.trs.push(t);
                 self.signaller.on_negotiation_needed(&self.controller);
             },
+            Msg::Configure(config) => {
+                if self.gathering_started.is_some() {
+                    debug!("webrtc: configuration after gathering started: ignored");
+                } else {
+                    self.relay_only = config.transport_policy == IceTransportPolicy::Relay;
+                    self.gathers = gathers_from(&config);
+                    rtc_dbg!(
+                        "ice servers: {} stun, {} turn, policy {:?}",
+                        self.gathers.iter().filter(|g| matches!(g, Gather::Stun { .. })).count(),
+                        self.gathers.iter().filter(|g| matches!(g, Gather::Turn { .. })).count(),
+                        config.transport_policy
+                    );
+                    self.start_gathering();
+                }
+            },
+            Msg::AddCandidate(c) => self.add_remote_candidate(c),
+            Msg::Resolved(idx, addrs) => self.resolved(idx, addrs),
+            Msg::Link(idx, ev) => self.link_event(idx, ev),
             Msg::Quit => self.closed = true,
         }
         self.drain();
@@ -1237,8 +1474,7 @@ impl Peer {
                 }
                 self.last_local = Some(desc);
                 self.set_signaling(SignalingState::HaveLocalOffer);
-                self.signaller
-                    .update_gathering_state(GatheringState::Complete);
+                self.on_local_described();
                 self.report(&[]);
                 Ok(())
             },
@@ -1250,8 +1486,7 @@ impl Peer {
                 self.answer = None;
                 let fire = self.refresh_directions();
                 self.set_signaling(SignalingState::Stable);
-                self.signaller
-                    .update_gathering_state(GatheringState::Complete);
+                self.on_local_described();
                 self.report(&fire);
                 Ok(())
             },
@@ -1366,6 +1601,23 @@ impl Peer {
 
     fn close(&mut self) {
         self.closed = true;
+        for (_, _, cb) in self.waiting.drain(..) {
+            cb(Err("InvalidStateError: closed".into()));
+        }
+        let now = Instant::now();
+        for i in 0..self.gathers.len() {
+            if let Gather::Turn { client, .. } = &mut self.gathers[i] {
+                client.close(now);
+            }
+            self.flush_turn(i);
+            if let Gather::Turn {
+                link: Some(TurnLink::Stream { writer, .. }),
+                ..
+            } = &self.gathers[i]
+            {
+                writer.shutdown();
+            }
+        }
         self.stop_sockets.store(true, Ordering::Relaxed);
         self.rtc.disconnect();
         for t in &mut self.trs {
@@ -1379,5 +1631,576 @@ impl Peer {
                 .update_connection_state(PeerConnectionState::Closed);
         }
         self.signaller.close();
+    }
+}
+
+// ---------- gathering and trickle ICE (the peer's thread) ----------
+
+impl Peer {
+    /// Host candidates (unless relay-only), then the STUN/TURN servers: resolved, and TCP/TLS
+    /// connections made, on threads of their own; the answers come back as Msg::Resolved/Link.
+    fn start_gathering(&mut self) {
+        if self.gathering_started.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        self.gathering_started = Some(now);
+        if !self.relay_only {
+            let addrs: Vec<SocketAddr> = self.sockets.iter().map(|(a, _)| *a).collect();
+            for addr in addrs {
+                match Candidate::host(addr, "udp") {
+                    Ok(c) => self.local_candidate(c),
+                    Err(_) => rtc_dbg!("local candidate {addr} refused by Candidate::host"),
+                }
+            }
+        }
+        for idx in 0..self.gathers.len() {
+            let tx = self.tx.clone();
+            match &self.gathers[idx] {
+                Gather::Stun { url, .. } |
+                Gather::Turn {
+                    url: url @ IceUrl {
+                        transport: Transport::Udp,
+                        ..
+                    },
+                    ..
+                } => {
+                    let url = url.clone();
+                    let _ = thread::Builder::new()
+                        .name("PartiiRtcDns".to_owned())
+                        .spawn(move || {
+                            let _ = tx.send(Msg::Resolved(idx, turn::resolve(&url)));
+                        });
+                },
+                Gather::Turn { url, .. } => {
+                    turn::spawn_stream(
+                        url.clone(),
+                        Box::new(move |ev| tx.send(Msg::Link(idx, ev)).is_ok()),
+                    );
+                },
+            }
+        }
+        self.update_gathering(now);
+    }
+
+    /// Give str0m a local candidate; once setLocalDescription happened, trickle it out too.
+    fn local_candidate(&mut self, c: Candidate) {
+        let kind = c.kind();
+        let addr = c.addr();
+        let Some(added) = self.rtc.add_local_candidate(c) else {
+            rtc_dbg!("local {kind:?} candidate {addr} not taken by str0m");
+            return;
+        };
+        let line = added.to_sdp_string();
+        rtc_dbg!("local {kind:?} candidate {addr}");
+        self.gathered.push(line.clone());
+        if self.local_described {
+            self.trickle(line);
+        }
+        self.drain();
+    }
+
+    fn trickle(&self, candidate: String) {
+        self.signaller.on_ice_candidate(
+            &self.controller,
+            IceCandidate {
+                sdp_mline_index: 0,
+                candidate,
+            },
+        );
+    }
+
+    /// After setLocalDescription: trickle what the description lacks, and the gathering state.
+    fn on_local_described(&mut self) {
+        if !self.local_described {
+            self.local_described = true;
+            let sdp = self.last_local.as_ref().map(|d| d.sdp.clone()).unwrap_or_default();
+            let have: Vec<String> = sdp
+                .lines()
+                .filter(|l| l.starts_with("a=candidate:"))
+                .filter_map(candidate_key)
+                .collect();
+            for line in self.gathered.clone() {
+                if candidate_key(&line).is_some_and(|k| !have.contains(&k)) {
+                    self.trickle(line);
+                }
+            }
+        }
+        self.signaller.update_gathering_state(if self.gathering_complete {
+            GatheringState::Complete
+        } else {
+            GatheringState::Gathering
+        });
+    }
+
+    fn with_candidates(
+        &self,
+        r: Result<SessionDescription, String>,
+    ) -> Result<SessionDescription, String> {
+        r.map(|d| SessionDescription {
+            type_: d.type_,
+            sdp: sdp_with_candidates(&d.sdp, &self.gathered),
+        })
+    }
+
+    fn update_gathering(&mut self, now: Instant) {
+        if !self.gathering_complete &&
+            let Some(t0) = self.gathering_started &&
+            (self.gathers.iter().all(Gather::done) || now - t0 >= GATHER_WAIT)
+        {
+            self.gathering_complete = true;
+            rtc_dbg!(
+                "gathering complete after {} ms ({} candidates)",
+                (now - t0).as_millis(),
+                self.gathered.len()
+            );
+            if self.local_described {
+                self.signaller
+                    .update_gathering_state(GatheringState::Complete);
+            }
+        }
+        if self.waiting.is_empty() {
+            return;
+        }
+        let complete = self.gathering_complete;
+        let (ready, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|(t, _, _)| complete || now - *t >= CREATE_WAIT);
+        self.waiting = wait;
+        for (_, r, cb) in ready {
+            let r = self.with_candidates(r);
+            cb(r);
+        }
+    }
+
+    /// Every loop pass: STUN retransmissions, TURN timers, the gathering state.
+    fn ice_tick(&mut self, now: Instant) {
+        if self.gathering_started.is_none() {
+            return;
+        }
+        for i in 0..self.gathers.len() {
+            match &mut self.gathers[i] {
+                Gather::Stun {
+                    server: Some(server),
+                    probes,
+                    done,
+                    ..
+                } if !*done => {
+                    let server = *server;
+                    for p in probes.iter_mut().filter(|p| !p.done && now >= p.next) {
+                        if p.tries >= 5 {
+                            p.done = true;
+                            continue;
+                        }
+                        p.tries += 1;
+                        p.rto *= 2;
+                        p.next = now + p.rto;
+                        if let Some((_, s)) = self.sockets.iter().find(|(a, _)| *a == p.base) {
+                            let _ = s.send_to(&p.msg, server);
+                        }
+                    }
+                    *done = probes.iter().all(|p| p.done);
+                },
+                Gather::Turn {
+                    client, link: Some(_), done: false, ..
+                } |
+                Gather::Turn {
+                    client,
+                    relay: Some(_),
+                    ..
+                } => {
+                    client.handle_timeout(now);
+                    self.process_turn(i, now);
+                },
+                _ => {},
+            }
+        }
+        self.update_gathering(now);
+    }
+
+    /// A datagram on a host socket from a STUN or UDP TURN server: handled here, not by str0m.
+    fn ice_server_packet(
+        &mut self,
+        data: &[u8],
+        source: SocketAddr,
+        destination: SocketAddr,
+        now: Instant,
+    ) -> bool {
+        if self.gathers.is_empty() {
+            return false;
+        }
+        if stun::is_stun(data) && let Ok(m) = stun::Message::decode(data) {
+            // One of our binding requests? (Some(base) once, then Some(None) for repeats.)
+            let mut hit: Option<Option<SocketAddr>> = None;
+            for g in &mut self.gathers {
+                let Gather::Stun { probes, done, .. } = g else {
+                    continue;
+                };
+                let Some(p) = probes.iter_mut().find(|p| p.tid == m.tid) else {
+                    continue;
+                };
+                hit = Some((!p.done).then_some(p.base));
+                p.done = true;
+                *done = probes.iter().all(|p| p.done);
+                break;
+            }
+            if let Some(first) = hit {
+                if let Some(base) = first &&
+                    m.method == stun::BINDING &&
+                    m.class == stun::Class::Success &&
+                    let Some(mapped) = m.mapped_addr()
+                {
+                    self.srflx(mapped, base);
+                }
+                return true;
+            }
+        }
+        let Some(i) = self.gathers.iter().position(|g| {
+            matches!(g, Gather::Turn { link: Some(TurnLink::Udp { server, local }), .. }
+                if *server == source && *local == destination)
+        }) else {
+            return false;
+        };
+        let Gather::Turn { client, .. } = &mut self.gathers[i] else {
+            return false;
+        };
+        if !client.handle_input(data, now) {
+            return false;
+        }
+        self.process_turn(i, now);
+        true
+    }
+
+    fn srflx(&mut self, mapped: SocketAddr, base: SocketAddr) {
+        if self.relay_only || mapped == base {
+            return;
+        }
+        if self.gathered.iter().any(|l| {
+            candidate_key(l) == Some(format!("udp {} {} typ srflx", mapped.ip(), mapped.port()))
+        }) {
+            return;
+        }
+        match Candidate::server_reflexive(mapped, base, "udp") {
+            Ok(c) => self.local_candidate(c),
+            Err(e) => rtc_dbg!("srflx {mapped}: {e:?}"),
+        }
+    }
+
+    fn resolved(&mut self, idx: usize, addrs: Vec<SocketAddr>) {
+        let now = Instant::now();
+        let host: Vec<SocketAddr> = self.sockets.iter().map(|(a, _)| *a).collect();
+        let Some(g) = self.gathers.get_mut(idx) else {
+            return;
+        };
+        // A server address of a family we have a host socket for (IPv4 first).
+        let server = addrs
+            .iter()
+            .filter(|a| a.is_ipv4())
+            .chain(addrs.iter().filter(|a| a.is_ipv6()))
+            .find(|a| host.iter().any(|h| h.is_ipv4() == a.is_ipv4()))
+            .copied();
+        match g {
+            Gather::Stun {
+                url,
+                server: slot,
+                probes,
+                done,
+            } => {
+                let Some(server) = server else {
+                    rtc_dbg!("stun {url}: no usable address");
+                    *done = true;
+                    return self.update_gathering(now);
+                };
+                rtc_dbg!("stun {url}: binding from {} socket(s)", host.len());
+                *slot = Some(server);
+                for base in host.iter().filter(|h| h.is_ipv4() == server.is_ipv4()) {
+                    let tid = stun::new_tid();
+                    let msg = stun::Builder::new(stun::BINDING, stun::Class::Request, tid)
+                        .build(None, true);
+                    if let Some((_, s)) = self.sockets.iter().find(|(a, _)| a == base) {
+                        let _ = s.send_to(&msg, server);
+                    }
+                    probes.push(Probe {
+                        tid,
+                        base: *base,
+                        msg,
+                        next: now + Duration::from_millis(250),
+                        rto: Duration::from_millis(250),
+                        tries: 1,
+                        done: false,
+                    });
+                }
+                *done = probes.is_empty();
+            },
+            Gather::Turn {
+                url,
+                client,
+                link,
+                done,
+                ..
+            } => {
+                let local = server.and_then(|sv| host.iter().find(|h| h.is_ipv4() == sv.is_ipv4()));
+                let (Some(server), Some(local)) = (server, local) else {
+                    rtc_dbg!("turn {url}: no usable address");
+                    *done = true;
+                    return self.update_gathering(now);
+                };
+                rtc_dbg!("turn {url}: allocating from {local}");
+                *link = Some(TurnLink::Udp {
+                    server,
+                    local: *local,
+                });
+                client.start(now);
+                self.process_turn(idx, now);
+            },
+        }
+        self.update_gathering(now);
+    }
+
+    fn link_event(&mut self, idx: usize, ev: LinkEvent) {
+        let now = Instant::now();
+        let Some(Gather::Turn {
+            url,
+            client,
+            link,
+            relay,
+            done,
+        }) = self.gathers.get_mut(idx)
+        else {
+            return;
+        };
+        match ev {
+            LinkEvent::Connected { local, server, writer } => {
+                if self.closed {
+                    writer.shutdown();
+                    return;
+                }
+                rtc_dbg!("turn {url}: connected {local} -> {server}, allocating");
+                *link = Some(TurnLink::Stream { writer, local });
+                client.start(now);
+            },
+            LinkEvent::Frames(frames) => {
+                for f in frames {
+                    client.handle_input(&f, now);
+                }
+            },
+            LinkEvent::Closed(why) => {
+                rtc_dbg!("turn {url}: connection ended: {why}");
+                *link = None;
+                *relay = None;
+                *done = true;
+            },
+        }
+        self.process_turn(idx, now);
+        self.update_gathering(now);
+    }
+
+    /// Send what the TURN client queued for its server.
+    fn flush_turn(&mut self, idx: usize) {
+        let Some(Gather::Turn { url, client, link, .. }) = self.gathers.get_mut(idx) else {
+            return;
+        };
+        let mut broken = false;
+        while let Some(b) = client.poll_transmit() {
+            match link {
+                Some(TurnLink::Udp { server, local }) => {
+                    if let Some((_, s)) = self.sockets.iter().find(|(a, _)| *a == *local) {
+                        let _ = s.send_to(&b, *server);
+                    }
+                },
+                Some(TurnLink::Stream { writer, .. }) => {
+                    if let Err(e) = writer.send(&b) {
+                        rtc_dbg!("turn {url}: write: {e}");
+                        writer.shutdown();
+                        broken = true;
+                        break;
+                    }
+                },
+                None => {},
+            }
+        }
+        if broken {
+            *link = None;
+        }
+    }
+
+    /// Flush, then act on the TURN client's events: a relay candidate, data for str0m.
+    fn process_turn(&mut self, idx: usize, now: Instant) {
+        self.flush_turn(idx);
+        loop {
+            let Some(Gather::Turn {
+                url,
+                client,
+                link,
+                relay,
+                done,
+            }) = self.gathers.get_mut(idx)
+            else {
+                return;
+            };
+            let Some(ev) = client.poll_event() else {
+                break;
+            };
+            match ev {
+                TurnEvent::Allocated { relay: r, mapped } => {
+                    let Some(local) = link.as_ref().map(TurnLink::local) else {
+                        continue;
+                    };
+                    let udp = matches!(link, Some(TurnLink::Udp { .. }));
+                    rtc_dbg!("turn {url}: relay {r} (mapped {mapped:?})");
+                    *relay = Some(r);
+                    *done = true;
+                    match Candidate::relayed(r, local, "udp") {
+                        Ok(c) => self.local_candidate(c),
+                        Err(e) => rtc_dbg!("relay candidate {r}: {e:?}"),
+                    }
+                    // Over UDP the allocation's mapped address is a server-reflexive candidate too.
+                    if udp && let Some(m) = mapped {
+                        self.srflx(m, local);
+                    }
+                },
+                TurnEvent::Failed(why) => {
+                    rtc_dbg!("turn {url}: {why}");
+                    warn!("webrtc: TURN allocation failed ({why})");
+                    *relay = None;
+                    *done = true;
+                },
+                TurnEvent::Data { peer, data } => {
+                    let Some(r) = *relay else { continue };
+                    let Ok(contents) = data.as_slice().try_into() else {
+                        continue;
+                    };
+                    let input = Input::Receive(
+                        now,
+                        Receive {
+                            proto: Protocol::Udp,
+                            source: peer,
+                            destination: r,
+                            contents,
+                        },
+                    );
+                    self.n_in += 1;
+                    if self.rtc.accepts(&input) {
+                        self.n_accepted += 1;
+                        if let Err(e) = self.rtc.handle_input(input) {
+                            debug!("webrtc: relayed input: {e:?}");
+                        }
+                    }
+                },
+            }
+            self.flush_turn(idx);
+        }
+    }
+
+    /// A candidate from addIceCandidate: to str0m (an empty one is end-of-candidates).
+    fn add_remote_candidate(&mut self, c: IceCandidate) {
+        let s = c.candidate.trim();
+        let s = s.strip_prefix("a=").unwrap_or(s);
+        if s.is_empty() {
+            return;
+        }
+        match Candidate::from_sdp_string(s) {
+            Ok(c) => {
+                rtc_dbg!("remote {:?} candidate {}", c.kind(), c.addr());
+                self.rtc.add_remote_candidate(c);
+            },
+            // mDNS (.local) host candidates among them: the other candidates (and prflx) still work.
+            Err(e) => debug!("webrtc: remote candidate not used: {e:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_keys() {
+        assert_eq!(
+            candidate_key("candidate:1 1 udp 2113937151 192.0.2.1 54400 typ host"),
+            Some("udp 192.0.2.1 54400 typ host".into())
+        );
+        assert_eq!(
+            candidate_key("a=candidate:2 1 UDP 1677729535 203.0.113.9 6000 typ srflx raddr 0.0.0.0 rport 0"),
+            Some("udp 203.0.113.9 6000 typ srflx".into())
+        );
+        assert_eq!(candidate_key("candidate:x"), None);
+    }
+
+    #[test]
+    fn sdp_gets_missing_candidates_per_section() {
+        let sdp = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\n\
+                   m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n\
+                   a=candidate:1 1 udp 2113937151 192.0.2.1 54400 typ host\r\n\
+                   m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:1\r\n";
+        let cands = vec![
+            "candidate:1 1 udp 2113937151 192.0.2.1 54400 typ host".to_owned(),
+            "candidate:3 1 udp 16777215 198.51.100.2 50000 typ relay raddr 0.0.0.0 rport 0".to_owned(),
+        ];
+        let out = sdp_with_candidates(sdp, &cands);
+        let sections: Vec<&str> = out.split("m=audio").collect();
+        assert_eq!(sections.len(), 3);
+        // Session part untouched; first section: host kept once, relay added; second: both added.
+        assert!(!sections[0].contains("candidate"));
+        assert_eq!(sections[1].matches("typ host").count(), 1);
+        assert_eq!(sections[1].matches("typ relay").count(), 1);
+        assert_eq!(sections[2].matches("typ host").count(), 1);
+        assert_eq!(sections[2].matches("typ relay").count(), 1);
+        assert!(out.ends_with("\r\n"));
+        assert!(out.contains("a=mid:1\r\na=candidate:1 1 udp"));
+        // Nothing to add: the same text.
+        assert_eq!(sdp_with_candidates(&out, &cands), out);
+    }
+
+    #[test]
+    fn gathers_from_config() {
+        use servo_media_webrtc::{BundlePolicy, IceServer};
+        let config = IceConfig {
+            servers: vec![
+                IceServer {
+                    urls: vec!["stun:stun.example.org:3478".into(), "stun:stun.example.org:3478".into()],
+                    username: None,
+                    credential: None,
+                },
+                IceServer {
+                    urls: vec![
+                        "turn:turn.example.org:3478?transport=udp".into(),
+                        "turn:turn.example.org:3478?transport=tcp".into(),
+                        "turns:turn.example.org:443?transport=tcp".into(),
+                        "bogus:x".into(),
+                    ],
+                    username: Some("u".into()),
+                    credential: Some("p".into()),
+                },
+                // TURN without credentials: skipped.
+                IceServer {
+                    urls: vec!["turn:other.example.org".into()],
+                    username: None,
+                    credential: None,
+                },
+            ],
+            transport_policy: IceTransportPolicy::Relay,
+            bundle_policy: BundlePolicy::MaxBundle,
+        };
+        let g = gathers_from(&config);
+        let kinds: Vec<String> = g
+            .iter()
+            .map(|g| match g {
+                Gather::Stun { url, .. } => format!("stun {url}"),
+                Gather::Turn { url, .. } => format!("turn {url}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "stun stun:stun.example.org:3478 (udp)",
+                "turn turn:turn.example.org:3478 (udp)",
+                "turn turn:turn.example.org:3478 (tcp)",
+                "turn turns:turn.example.org:443 (tls)",
+            ]
+        );
+        // The config's Debug output redacts the credentials.
+        let d = format!("{config:?}");
+        assert!(d.contains("<redacted>") && !d.contains("Some(\"p\")"), "{d}");
     }
 }

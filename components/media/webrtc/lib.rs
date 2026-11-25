@@ -40,7 +40,7 @@ impl<T: Display> From<T> for WebRtcError {
 /// This trait is implemented by backends and should never be used directly by
 /// the client. Use WebRtcController instead
 pub trait WebRtcControllerBackend: Send {
-    fn configure(&mut self, stun_server: &str, policy: BundlePolicy) -> WebRtcResult;
+    fn configure(&mut self, config: &IceConfig) -> WebRtcResult;
     fn set_remote_description(
         &mut self,
         _: SessionDescription,
@@ -307,6 +307,43 @@ pub struct IceCandidate {
     pub sdp_mline_index: u32,
     pub candidate: String,
     // XXXManishearth this is missing a bunch
+}
+
+/// One RTCIceServer: its URLs (stun:, turn:, turns:) and, for TURN, the long-term credentials.
+/// Debug redacts the credentials.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    pub username: Option<String>,
+    pub credential: Option<String>,
+}
+
+impl std::fmt::Debug for IceServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IceServer")
+            .field("urls", &self.urls)
+            .field("username", &self.username.as_ref().map(|_| "<redacted>"))
+            .field("credential", &self.credential.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// <https://w3c.github.io/webrtc-pc/#dom-rtcicetransportpolicy>
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IceTransportPolicy {
+    /// Every candidate type.
+    #[default]
+    All,
+    /// Relay (TURN) candidates only.
+    Relay,
+}
+
+/// The ICE part of an RTCConfiguration, as the backend gets it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IceConfig {
+    pub servers: Vec<IceServer>,
+    pub transport_policy: IceTransportPolicy,
+    pub bundle_policy: BundlePolicy,
 }
 
 /// <https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection#RTCBundlePolicy_enum>

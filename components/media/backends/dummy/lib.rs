@@ -30,7 +30,7 @@ use servo_media_streams::registry::{MediaStreamId, register_stream, unregister_s
 use servo_media_streams::{MediaOutput, MediaSocket, MediaStream, MediaStreamType};
 use servo_media_traits::{ClientContextId, MediaInstance};
 use servo_media_webrtc::{
-    BundlePolicy, DataChannelId, DataChannelInit, DataChannelMessage, IceCandidate,
+    DataChannelId, DataChannelInit, DataChannelMessage, IceCandidate, IceConfig,
     SessionDescription, WebRtcBackend, WebRtcController, WebRtcControllerBackend,
     WebRtcDataChannelResult, WebRtcResult, WebRtcSignaller, thread,
 };
@@ -319,7 +319,7 @@ impl MediaOutput for DummyMediaOutput {
 pub struct DummyWebRtcController;
 
 impl WebRtcControllerBackend for DummyWebRtcController {
-    fn configure(&mut self, _: &str, _: BundlePolicy) -> WebRtcResult {
+    fn configure(&mut self, _: &IceConfig) -> WebRtcResult {
         Ok(())
     }
     fn set_remote_description(

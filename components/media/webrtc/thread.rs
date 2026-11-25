@@ -12,7 +12,7 @@ use crate::datachannel::{DataChannelEvent, DataChannelId, DataChannelInit, DataC
 use servo_media_streams::live::AudioSource;
 
 use crate::{
-    BundlePolicy, DescriptionType, IceCandidate, MediaStreamId, ResultCallback, RtpDirection,
+    DescriptionType, IceCandidate, IceConfig, MediaStreamId, ResultCallback, RtpDirection,
     RtpStats, SdpType, SessionDescription, TransceiverId, WebRtcBackend, WebRtcControllerBackend,
     WebRtcSignaller,
 };
@@ -42,10 +42,8 @@ impl WebRtcController {
 
         t
     }
-    pub fn configure(&self, stun_server: String, policy: BundlePolicy) {
-        let _ = self
-            .sender
-            .send(RtcThreadEvent::ConfigureStun(stun_server, policy));
+    pub fn configure(&self, config: IceConfig) {
+        let _ = self.sender.send(RtcThreadEvent::Configure(config));
     }
     pub fn set_remote_description(
         &self,
@@ -158,7 +156,7 @@ impl WebRtcController {
 }
 
 pub enum RtcThreadEvent {
-    ConfigureStun(String, BundlePolicy),
+    Configure(IceConfig),
     SetRemoteDescription(SessionDescription, Box<dyn FnOnce() + Send + 'static>),
     SetLocalDescription(SessionDescription, Box<dyn FnOnce() + Send + 'static>),
     AddIceCandidate(IceCandidate),
@@ -212,7 +210,7 @@ pub fn handle_rtc_event(
     event: RtcThreadEvent,
 ) -> bool {
     let result = match event {
-        RtcThreadEvent::ConfigureStun(server, policy) => controller.configure(&server, policy),
+        RtcThreadEvent::Configure(config) => controller.configure(&config),
         RtcThreadEvent::SetRemoteDescription(desc, cb) => {
             controller.set_remote_description(desc, cb)
         },
