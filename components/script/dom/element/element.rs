@@ -4603,6 +4603,9 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         keyframes: *mut JSObject,
         options: UnrestrictedDoubleOrKeyframeAnimationOptions,
     ) -> Fallible<DomRoot<Animation>> {
+        // partii: root `keyframes` first: the default timeline below can allocate, and a minor GC would
+        // move a nursery keyframes object out from under the raw pointer (see KeyframeEffect::Constructor).
+        rooted!(&in(cx) let keyframes = keyframes);
         let window = self.owner_window();
 
         // Step 1. Let target be the object on which this method was called.
@@ -4646,7 +4649,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             &window,
             None,
             Some(target),
-            keyframes,
+            keyframes.get(),
             parent_options,
         )?;
 

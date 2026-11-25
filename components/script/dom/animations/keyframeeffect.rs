@@ -182,6 +182,10 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         keyframes: *mut JSObject,
         options: UnrestrictedDoubleOrKeyframeEffectOptions,
     ) -> Fallible<DomRoot<KeyframeEffect>> {
+        // partii: root `keyframes` before anything allocates. It arrives as a raw pointer, and a minor GC
+        // during KeyframeEffect::new moves a nursery object, leaving the raw copy dangling (the launcher's
+        // startup SIGSEGV in JS::ForOfIterator::init, 2 in 100 cold starts, soak 676d8887).
+        rooted!(&in(cx) let keyframes = keyframes);
         // Step 1. Create a new KeyframeEffect object, effect.
         let effect = KeyframeEffect::new(cx, window);
 
@@ -250,7 +254,7 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         // passing keyframes as the input.
         let document = window.Document();
         *effect.keyframes.safe_borrow_mut(cx.no_gc()) =
-            process_a_keyframes_argument(cx, &document, keyframes)?;
+            process_a_keyframes_argument(cx, &document, keyframes.get())?;
 
         Ok(effect)
     }
