@@ -458,14 +458,17 @@ impl RTCPeerConnection {
 
         match event {
             DataChannelEvent::NewChannel => {
-                let channel = RTCDataChannel::new(
+                let Ok(channel) = RTCDataChannel::new(
                     cx,
                     &self.global(),
                     self,
                     USVString::from(String::new()),
                     &RTCDataChannelInit::empty(),
                     Some(channel_id),
-                );
+                ) else {
+                    warn!("webrtc: could not set up remote data channel {channel_id:?}");
+                    return;
+                };
 
                 let event = RTCDataChannelEvent::new(
                     cx,
@@ -970,7 +973,10 @@ impl RTCPeerConnectionMethods<crate::DomTypeHolder> for RTCPeerConnection {
         cx: &mut JSContext,
         label: USVString,
         init: &RTCDataChannelInit,
-    ) -> DomRoot<RTCDataChannel> {
+    ) -> Fallible<DomRoot<RTCDataChannel>> {
+        if self.closed.get() {
+            return Err(Error::InvalidState(None));
+        }
         RTCDataChannel::new(cx, &self.global(), self, label, init, None)
     }
 

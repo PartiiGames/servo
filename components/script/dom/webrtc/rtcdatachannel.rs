@@ -92,20 +92,22 @@ impl RTCDataChannel {
         label: USVString,
         options: &RTCDataChannelInit,
         servo_media_id: Option<DataChannelId>,
-    ) -> RTCDataChannel {
+    ) -> Fallible<RTCDataChannel> {
         let mut init: DataChannelInit = options.convert();
         init.label = label.0.clone();
 
-        let controller = peer_connection.get_webrtc_controller().borrow();
-        let servo_media_id = servo_media_id.unwrap_or(
-            controller
+        // The backend may refuse (or be gone): the page gets an OperationError, never a dead script thread.
+        let servo_media_id = match servo_media_id {
+            Some(id) => id,
+            None => peer_connection
+                .get_webrtc_controller()
+                .borrow()
                 .as_ref()
-                .unwrap()
-                .create_data_channel(init)
-                .expect("Expected data channel id"),
-        );
+                .and_then(|c| c.create_data_channel(init))
+                .ok_or(Error::Operation(None))?,
+        };
 
-        RTCDataChannel {
+        Ok(RTCDataChannel {
             eventtarget: EventTarget::new_inherited(),
             label,
             ordered: options.ordered,
@@ -118,7 +120,7 @@ impl RTCDataChannel {
             binary_type: DomRefCell::new(DOMString::from_static("blob")),
             peer_connection: Dom::from_ref(peer_connection),
             droppable: DroppableRTCDataChannel::new(WeakRef::new(peer_connection), servo_media_id),
-        }
+        })
     }
 
     pub(crate) fn new(
@@ -128,7 +130,7 @@ impl RTCDataChannel {
         label: USVString,
         options: &RTCDataChannelInit,
         servo_media_id: Option<DataChannelId>,
-    ) -> DomRoot<RTCDataChannel> {
+    ) -> Fallible<DomRoot<RTCDataChannel>> {
         let rtc_data_channel = reflect_dom_object(
             cx,
             Box::new(RTCDataChannel::new_inherited(
@@ -136,14 +138,14 @@ impl RTCDataChannel {
                 label,
                 options,
                 servo_media_id,
-            )),
+            )?),
             global,
         );
 
         peer_connection
             .register_data_channel(rtc_data_channel.get_servo_media_id(), &rtc_data_channel);
 
-        rtc_data_channel
+        Ok(rtc_data_channel)
     }
 
     pub(crate) fn get_servo_media_id(&self) -> DataChannelId {
@@ -274,10 +276,10 @@ impl RTCDataChannel {
         };
 
         let controller = self.peer_connection.get_webrtc_controller().borrow();
-        controller
-            .as_ref()
-            .unwrap()
-            .send_data_channel_message(&self.get_servo_media_id(), message);
+        let Some(controller) = controller.as_ref() else {
+            return Err(Error::InvalidState(None));
+        };
+        controller.send_data_channel_message(&self.get_servo_media_id(), message);
 
         Ok(())
     }
@@ -357,10 +359,9 @@ impl RTCDataChannelMethods<crate::DomTypeHolder> for RTCDataChannel {
     /// <https://www.w3.org/TR/webrtc/#dom-rtcdatachannel-close>
     fn Close(&self) {
         let controller = self.peer_connection.get_webrtc_controller().borrow();
-        controller
-            .as_ref()
-            .unwrap()
-            .close_data_channel(&self.get_servo_media_id());
+        if let Some(controller) = controller.as_ref() {
+            controller.close_data_channel(&self.get_servo_media_id());
+        }
     }
 
     /// <https://www.w3.org/TR/webrtc/#dom-datachannel-binarytype>

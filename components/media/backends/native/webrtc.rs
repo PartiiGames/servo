@@ -194,6 +194,8 @@ enum Msg {
 /// servo-media's controller backend: forwards everything to the peer's own thread.
 pub struct Str0mController {
     tx: Sender<Msg>,
+    /// Ids for data channels, which never open here (see `create_data_channel`).
+    next_dc: DataChannelId,
 }
 
 impl Str0mController {
@@ -204,7 +206,7 @@ impl Str0mController {
             .name("PartiiRtc".to_owned())
             .spawn(move || Peer::new(signaller, controller, tx2).run(rx))
             .expect("spawn the WebRTC thread");
-        Str0mController { tx }
+        Str0mController { tx, next_dc: 0 }
     }
 
     fn send(&self, m: Msg) -> WebRtcResult {
@@ -272,10 +274,14 @@ impl WebRtcControllerBackend for Str0mController {
     fn add_stream(&mut self, stream: &MediaStreamId) -> WebRtcResult {
         self.send(Msg::AddStream(*stream))
     }
+    // Data channels are not carried yet (str0m's SCTP is not wired in). A channel is created and simply never
+    // opens: readyState stays "connecting" until the page or the peer connection closes it, sends are dropped,
+    // and a remote m=application never fires ondatachannel. A page that needs one (partii-net's links) then
+    // keeps to its other path (the ws relay) instead of the page dying on an error it never expects here.
     fn create_data_channel(&mut self, _: &DataChannelInit) -> WebRtcDataChannelResult {
-        Err(WebRtcError::Backend(
-            "data channels are not supported".into(),
-        ))
+        self.next_dc += 1;
+        debug!("webrtc: data channel {} created (never opens: not supported yet)", self.next_dc);
+        Ok(self.next_dc)
     }
     fn close_data_channel(&mut self, _: &DataChannelId) -> WebRtcResult {
         Ok(())
@@ -285,9 +291,7 @@ impl WebRtcControllerBackend for Str0mController {
         _: &DataChannelId,
         _: &DataChannelMessage,
     ) -> WebRtcResult {
-        Err(WebRtcError::Backend(
-            "data channels are not supported".into(),
-        ))
+        Ok(())
     }
     fn internal_event(&mut self, _: InternalEvent) -> WebRtcResult {
         Ok(())

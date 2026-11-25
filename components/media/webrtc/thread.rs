@@ -79,10 +79,11 @@ impl WebRtcController {
     }
     pub fn create_data_channel(&self, init: DataChannelInit) -> Option<DataChannelId> {
         let (sender, receiver) = channel();
-        let _ = self
-            .sender
-            .send(RtcThreadEvent::CreateDataChannel(init, sender));
-        receiver.recv().unwrap()
+        // None when the backend refuses or its thread is gone (after close): the page gets an error, not a panic.
+        self.sender
+            .send(RtcThreadEvent::CreateDataChannel(init, sender))
+            .ok()?;
+        receiver.recv().ok().flatten()
     }
     pub fn send_data_channel_message(&self, id: &DataChannelId, message: DataChannelMessage) {
         let _ = self
