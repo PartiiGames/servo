@@ -32,6 +32,8 @@ pub mod streams;
 #[cfg(feature = "video")]
 mod webm;
 #[cfg(feature = "webrtc")]
+pub mod sdp_norm;
+#[cfg(feature = "webrtc")]
 pub mod webrtc;
 
 use std::collections::HashMap;

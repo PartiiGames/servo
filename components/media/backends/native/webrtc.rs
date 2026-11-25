@@ -610,6 +610,8 @@ struct Peer {
     pending: Option<(SdpPendingOffer, Vec<(TransceiverId, Mid)>)>,
     last_local: Option<SessionDescription>,
     answer: Option<String>,
+    /// G7: warned once that a remote description gave str0m no candidate (ICE can't pair).
+    warned_no_remote_candidates: bool,
     signaling: SignalingState,
     pc_state: PeerConnectionState,
     ice_connected: bool,
@@ -627,6 +629,18 @@ struct Peer {
 }
 
 impl Peer {
+    /// Once per call, at warn: a remote description str0m found no candidate in (no trickle here, so
+    /// ICE has nothing to pair and sends no binding request). Shows the drop that G7 hit silently.
+    fn warn_no_remote_candidates(&mut self, sdp: &str, found: usize, what: &str) {
+        if found == 0 && !self.warned_no_remote_candidates {
+            self.warned_no_remote_candidates = true;
+            warn!(
+                "webrtc: remote {what} gave no ICE candidate ({} a=candidate lines in it): ICE has nothing to pair unless candidates are trickled",
+                crate::sdp_norm::candidate_lines(sdp)
+            );
+        }
+    }
+
     fn new(
         signaller: Box<dyn WebRtcSignaller>,
         controller: WebRtcController,
@@ -646,6 +660,7 @@ impl Peer {
             pending: None,
             last_local: None,
             answer: None,
+            warned_no_remote_candidates: false,
             signaling: SignalingState::Stable,
             pc_state: PeerConnectionState::New,
             ice_connected: false,
@@ -1260,8 +1275,11 @@ impl Peer {
                 let Some((pending, added)) = self.pending.take() else {
                     return Err("InvalidStateError: no local offer".into());
                 };
-                let answer = SdpAnswer::from_sdp_string(&desc.sdp)
+                // Candidate lines in the shape str0m parses (sdp_norm.rs: Calls' were dropped silently).
+                let sdp = crate::sdp_norm::normalize_sdp(&desc.sdp);
+                let answer = SdpAnswer::from_sdp_string(&sdp)
                     .map_err(|e| format!("OperationError: {e:?}"))?;
+                self.warn_no_remote_candidates(&sdp, crate::sdp_parsed_candidates!(answer), "answer");
                 let r = self.rtc.sdp_api().accept_answer(pending, answer);
                 if let Err(e) = r {
                     rtc_dbg!("accept_answer: {e:?}");
@@ -1284,8 +1302,10 @@ impl Peer {
             },
             (DescriptionType::Remote, SdpType::Offer) => {
                 rtc_dbg!("remote offer: {}", sdp_ice_lines(&desc.sdp));
-                let offer = SdpOffer::from_sdp_string(&desc.sdp)
+                let sdp = crate::sdp_norm::normalize_sdp(&desc.sdp);
+                let offer = SdpOffer::from_sdp_string(&sdp)
                     .map_err(|e| format!("OperationError: {e:?}"))?;
+                self.warn_no_remote_candidates(&sdp, crate::sdp_parsed_candidates!(offer), "offer");
                 // A remote offer rolls back an unanswered local one.
                 if let Some((_, added)) = self.pending.take() {
                     for t in &mut self.trs {
