@@ -12,6 +12,7 @@
 //! can be serialized and compared across processes.
 
 use std::ops::{Add, Sub};
+use std::sync::OnceLock;
 
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,23 @@ impl CrossProcessInstant {
     /// `DOMHighResolutionTimestamp`. See <https://w3c.github.io/hr-time/#sec-time-origin>.
     pub fn epoch() -> Self {
         Self { value: 0 }
+    }
+
+    /// Where the Unix epoch falls on this clock, relative to [`Self::epoch`]: HR-Time's "estimated monotonic time of
+    /// the Unix epoch" (<https://w3c.github.io/hr-time/#dfn-estimated-monotonic-time-of-the-unix-epoch>), measured
+    /// once per process, so `timeOrigin` is a Unix-epoch time in milliseconds as the spec says. Adding it to
+    /// `instant - epoch()` gives that instant's time since the Unix epoch.
+    pub fn unix_epoch_offset() -> Duration {
+        static OFFSET: OnceLock<Duration> = OnceLock::new();
+        *OFFSET.get_or_init(|| {
+            let monotonic = Self::now() - Self::epoch();
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| Duration::try_from(d).ok())
+                .unwrap_or(Duration::ZERO);
+            wall - monotonic
+        })
     }
 }
 

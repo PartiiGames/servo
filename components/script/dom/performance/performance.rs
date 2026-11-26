@@ -547,9 +547,11 @@ impl PerformanceMethods<crate::DomTypeHolder> for Performance {
         self.to_dom_high_res_time_stamp(CrossProcessInstant::now())
     }
 
-    /// <https://www.w3.org/TR/hr-time-2/#dom-performance-timeorigin>
+    /// <https://w3c.github.io/hr-time/#dom-performance-timeorigin>: the time origin as a Unix-epoch time (so
+    /// `timeOrigin + now()` tracks `Date.now()`), not the machine's monotonic clock reading.
     fn TimeOrigin(&self) -> DOMHighResTimeStamp {
-        (self.time_origin - CrossProcessInstant::epoch()).to_dom_high_res_time_stamp()
+        (self.time_origin - CrossProcessInstant::epoch() + CrossProcessInstant::unix_epoch_offset())
+            .to_dom_high_res_time_stamp()
     }
 
     /// <https://www.w3.org/TR/performance-timeline-2/#dom-performance-getentries>
