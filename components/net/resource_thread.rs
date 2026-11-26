@@ -189,6 +189,85 @@ pub fn new_core_resource_thread(
     (public_setup_chan, private_setup_chan)
 }
 
+/// Partii (perf, netspin): counts what wakes the resource thread. A receiver's close is logged once (with the
+/// time since start); with PARTII_NET_SELECT_LOG=1 every second with a wake prints the counts by receiver and kind.
+struct SelectWakeLog {
+    names: [(u64, &'static str); 5],
+    start: std::time::Instant,
+    window: std::time::Instant,
+    enabled: bool,
+    closed_seen: [bool; 5],
+    counts: FxHashMap<String, u64>,
+}
+
+impl SelectWakeLog {
+    fn new(names: [(u64, &'static str); 5]) -> Self {
+        let now = std::time::Instant::now();
+        SelectWakeLog {
+            names,
+            start: now,
+            window: now,
+            enabled: std::env::var("PARTII_NET_SELECT_LOG").is_ok_and(|v| v == "1"),
+            closed_seen: [false; 5],
+            counts: Default::default(),
+        }
+    }
+
+    fn name(&self, id: u64) -> (usize, &'static str) {
+        self.names
+            .iter()
+            .enumerate()
+            .find(|(_, (i, _))| *i == id)
+            .map(|(k, (_, n))| (k, *n))
+            .unwrap_or((usize::MAX, "unknown"))
+    }
+
+    fn bump(&mut self, key: String) {
+        if !self.enabled {
+            return;
+        }
+        *self.counts.entry(key).or_default() += 1;
+        if self.window.elapsed() >= std::time::Duration::from_secs(1) {
+            let mut v: Vec<_> = self.counts.drain().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            let line: Vec<String> = v.iter().map(|(k, n)| format!("{k} {n}")).collect();
+            eprintln!(
+                "partii-net-select: t={:.1}s wakes/{:.2}s: {}",
+                self.start.elapsed().as_secs_f64(),
+                self.window.elapsed().as_secs_f64(),
+                line.join(", ")
+            );
+            self.window = std::time::Instant::now();
+        }
+    }
+
+    fn closed(&mut self, id: u64) {
+        let (k, name) = self.name(id);
+        if k < 5 && !self.closed_seen[k] {
+            self.closed_seen[k] = true;
+            eprintln!(
+                "partii-net: resource thread receiver '{name}' closed at t={:.1}s (its sender was dropped)",
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        self.bump(format!("{name}:closed"));
+    }
+
+    fn error(&mut self) {
+        self.bump("error".to_owned());
+    }
+
+    fn message(&mut self, id: u64, msg: &CoreResourceMsg) {
+        if !self.enabled {
+            return;
+        }
+        let (_, name) = self.name(id);
+        let kind = format!("{msg:?}");
+        let kind = kind.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("?").to_owned();
+        self.bump(format!("{name}:{kind}"));
+    }
+}
+
 struct ResourceChannelManager {
     resource_manager: CoreResourceManager,
     config_dir: Option<PathBuf>,
@@ -275,16 +354,36 @@ impl ResourceChannelManager {
         let revoker_id = rx_set.add(revoke_receiver);
         let refresh_id = rx_set.add(refresh_receiver);
         let mut selector = rx_set.selector();
+        // Partii (perf, netspin): what wakes this thread (PARTII_NET_SELECT_LOG=1: per second), and each receiver's
+        // close, once.
+        let mut wakes = SelectWakeLog::new([
+            (private_id, "private"),
+            (public_id, "public"),
+            (reporter_id, "memory-reporter"),
+            (revoker_id, "blob-revoke"),
+            (refresh_id, "blob-refresh"),
+        ]);
 
         loop {
-            for received in selector.select().into_iter() {
+            let results = selector.select();
+            if results.is_empty() {
+                // Every receiver is closed: nothing can arrive any more.
+                eprintln!("partii-net: resource thread: every receiver closed; the thread ends");
+                return;
+            }
+            for received in results.into_iter() {
                 // Handles case where profiler thread shuts down before resource thread.
                 match received {
-                    GenericSelectionResult::ChannelClosed(_) => continue,
+                    GenericSelectionResult::ChannelClosed(id) => {
+                        wakes.closed(id);
+                        continue;
+                    },
                     GenericSelectionResult::Error(error) => {
+                        wakes.error();
                         log::error!("Found selection error: {error}")
                     },
                     GenericSelectionResult::MessageReceived(id, msg) => {
+                        wakes.message(id, &msg);
                         if id == revoker_id {
                             let CoreResourceMsg::RevokeTokenForFile(revocation_request) = msg
                             else {

@@ -152,6 +152,7 @@ impl<T: Serialize + for<'de> Deserialize<'de>> GenericReceiverSet<T> {
                 }
                 SelectorInner::Crossbeam {
                     receivers: receivers.as_slice(),
+                    closed: vec![false; receivers.len()],
                     sel,
                 }
             },
@@ -179,6 +180,8 @@ enum SelectorInner<'a, T: for<'de> Deserialize<'de>> {
     Ipc(&'a mut IpcReceiverSet),
     Crossbeam {
         receivers: &'a [crossbeam_channel::Receiver<Result<T, SendError>>],
+        /// Partii (perf, netspin): receivers found closed (and removed from `sel`).
+        closed: Vec<bool>,
         sel: crossbeam_channel::Select<'a>,
     },
 }
@@ -201,7 +204,16 @@ impl<'a, T: Serialize + for<'de> Deserialize<'de>> Selector<'a, T> {
                 .unwrap_or_else(|e| {
                     smallvec::smallvec![GenericSelectionResult::Error(e.to_string())]
                 }),
-            SelectorInner::Crossbeam { receivers, sel } => {
+            SelectorInner::Crossbeam {
+                receivers,
+                closed,
+                sel,
+            } => {
+                // Partii (perf, netspin): every receiver closed: nothing can arrive any more (an empty result, as
+                // an empty IpcReceiverSet gives), instead of a select over nothing.
+                if !closed.is_empty() && closed.iter().all(|c| *c) {
+                    return SmallVec::new();
+                }
                 let selected = sel.select();
                 let index = selected.index();
                 let selection_result = match receivers.get(index) {
@@ -211,11 +223,30 @@ impl<'a, T: Serialize + for<'de> Deserialize<'de>> Selector<'a, T> {
                             GenericSelectionResult::MessageReceived(index as u64, value)
                         },
                         Ok(Err(error)) => GenericSelectionResult::Error(error.to_string()),
-                        Err(_) => GenericSelectionResult::ChannelClosed(index as u64),
+                        Err(_) => {
+                            // Partii (perf, netspin): a disconnected receiver is always ready, so leaving it in
+                            // the select made every later select return at once with ChannelClosed: a thread
+                            // spinning a core (the resource thread, 40% of Digii t4 samples). Remove it, as
+                            // IpcReceiverSet drops closed channels; it is reported closed this once.
+                            // PARTII_NET_SELECT_KEEP_CLOSED=1 keeps the old behaviour (A/B).
+                            if !keep_closed() && !closed[index] {
+                                closed[index] = true;
+                                sel.remove(index);
+                            }
+                            GenericSelectionResult::ChannelClosed(index as u64)
+                        },
                     },
                 };
                 smallvec::smallvec![selection_result]
             },
         }
     }
+}
+
+/// Partii (perf, netspin): PARTII_NET_SELECT_KEEP_CLOSED=1 leaves a closed receiver in the select (the old spin).
+fn keep_closed() -> bool {
+    static KEEP: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("PARTII_NET_SELECT_KEEP_CLOSED").is_ok_and(|v| v == "1")
+    });
+    *KEEP
 }
