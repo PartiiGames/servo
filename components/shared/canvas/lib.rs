@@ -15,6 +15,8 @@ use crate::canvas::CanvasId;
 pub mod canvas;
 #[macro_use]
 pub mod webgl;
+/// Partii (perf, wglq): the bound on the WebGL command queue.
+pub mod partii_webgl_queue;
 
 pub enum ConstellationCanvasMsg {
     Create {

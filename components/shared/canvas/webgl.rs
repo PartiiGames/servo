@@ -218,8 +218,17 @@ impl WebGLMsgSender {
     /// Send a WebGLCommand message
     #[inline]
     pub fn send(&self, command: WebGLCommand, backtrace: WebGLCommandBacktrace) -> WebGLSendResult {
-        self.sender
-            .send(WebGLMsg::WebGLCommand(self.ctx_id, command, backtrace))
+        // Partii (perf, wglq): wait (bounded) for room *before* enqueueing; see partii_webgl_queue.
+        let gauge = &crate::partii_webgl_queue::GAUGE;
+        gauge.before_send(crate::partii_webgl_queue::GIVE_UP);
+        gauge.add();
+        let result = self
+            .sender
+            .send(WebGLMsg::WebGLCommand(self.ctx_id, command, backtrace));
+        if result.is_err() {
+            gauge.unadd();
+        }
+        result
     }
 
     /// Set an [`ImageKey`] on this WebGL context.
