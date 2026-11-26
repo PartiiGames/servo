@@ -941,6 +941,19 @@ impl WebGLThread {
 
     /// Handles a generic WebGLMsg message
     fn handle_msg(&mut self, msg: WebGLMsg, webgl_chan: &WebGLChan) -> bool {
+        // Partii (perf, wglbatch): a batch runs its commands in order, each as if it had come on its own (the
+        // per-message trace, slow and frame logs, and the wglq queue gauge see one command at a time).
+        let msg = match msg {
+            WebGLMsg::WebGLCommandBatch(commands) => {
+                for (ctx_id, command, backtrace) in commands {
+                    if self.handle_msg(WebGLMsg::WebGLCommand(ctx_id, command, backtrace), webgl_chan) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            msg => msg,
+        };
         trace!("processing {:?}", msg);
         // Partii (frame-attr): the thread's work per message, by kind.
         let _span = servo_base::frame_trace::enabled()
@@ -996,6 +1009,7 @@ impl WebGLThread {
                 self.handle_webgl_command(ctx_id, command, backtrace);
                 servo_canvas_traits::partii_webgl_queue::GAUGE.done();
             },
+            WebGLMsg::WebGLCommandBatch(_) => unreachable!("batches are unpacked above"),
             WebGLMsg::WebXRCommand(_command) => {
                 #[cfg(feature = "webxr")]
                 self.handle_webxr_command(_command);

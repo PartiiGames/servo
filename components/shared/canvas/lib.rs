@@ -17,6 +17,8 @@ pub mod canvas;
 pub mod webgl;
 /// Partii (perf, wglq): the bound on the WebGL command queue.
 pub mod partii_webgl_queue;
+/// Partii (perf, wglbatch): WebGL command batching.
+pub mod partii_webgl_batch;
 
 pub enum ConstellationCanvasMsg {
     Create {

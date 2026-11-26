@@ -69,6 +69,9 @@ pub(crate) fn run_worker_event_loop<T, WorkerMsg, Event>(
         .map(crossbeam_channel::at)
         .unwrap_or_else(crossbeam_channel::never);
 
+    // Partii (perf, wglbatch): send this worker's batched WebGL commands (OffscreenCanvas) before waiting.
+    servo_canvas_traits::partii_webgl_batch::flush_thread();
+
     let event = select! {
         recv(worker_scope.control_receiver()) -> msg => match msg {
             Ok(msg) => Some(T::from_control_msg(msg)),

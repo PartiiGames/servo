@@ -226,6 +226,12 @@ impl<T: Serialize> fmt::Debug for GenericSender<T> {
 }
 
 impl<T: Serialize> GenericSender<T> {
+    /// Partii (perf, wglbatch): whether this is an in-process (crossbeam) channel.
+    #[inline]
+    pub fn is_crossbeam(&self) -> bool {
+        matches!(self.0, GenericSenderVariants::Crossbeam(_))
+    }
+
     #[inline]
     pub fn send(&self, msg: T) -> SendResult {
         match &self.0 {

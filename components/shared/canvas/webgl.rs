@@ -46,7 +46,21 @@ pub struct WebGLChan(pub GenericSender<WebGLMsg>);
 impl WebGLChan {
     #[inline]
     pub fn send(&self, msg: WebGLMsg) -> WebGLSendResult {
+        // Partii (perf, wglbatch): this thread's batched commands go first, so every message keeps its order.
+        crate::partii_webgl_batch::flush_thread();
         self.0.send(msg)
+    }
+
+    /// Partii (perf, wglbatch): send without flushing the batch (the batch itself).
+    #[inline]
+    pub fn send_unflushed(&self, msg: WebGLMsg) -> WebGLSendResult {
+        self.0.send(msg)
+    }
+
+    /// Partii (perf, wglbatch): whether the WebGL thread is in this process (a crossbeam channel).
+    #[inline]
+    pub fn is_in_process(&self) -> bool {
+        self.0.is_crossbeam()
     }
 }
 
@@ -138,6 +152,8 @@ pub enum WebGLMsg {
     RemoveContext(WebGLContextId),
     /// Runs a WebGLCommand in a specific WebGLContext.
     WebGLCommand(WebGLContextId, WebGLCommand, WebGLCommandBacktrace),
+    /// Partii (perf, wglbatch): WebGLCommands that need no reply, in order (partii_webgl_batch).
+    WebGLCommandBatch(Vec<(WebGLContextId, WebGLCommand, WebGLCommandBacktrace)>),
     /// Runs a WebXRCommand (WebXR layers need to be created in the WebGL
     /// thread, as they may have thread affinity).
     WebXRCommand(WebXRCommand),
@@ -218,13 +234,21 @@ impl WebGLMsgSender {
     /// Send a WebGLCommand message
     #[inline]
     pub fn send(&self, command: WebGLCommand, backtrace: WebGLCommandBacktrace) -> WebGLSendResult {
+        // Partii (perf, wglbatch): a command that needs no reply waits in this thread's batch.
+        if crate::partii_webgl_batch::max_commands() > 0 {
+            if crate::partii_webgl_batch::is_batchable(&command) && self.sender.is_in_process() {
+                crate::partii_webgl_batch::push(&self.sender, self.ctx_id, command, backtrace);
+                return Ok(());
+            }
+            crate::partii_webgl_batch::flush_thread();
+        }
         // Partii (perf, wglq): wait (bounded) for room *before* enqueueing; see partii_webgl_queue.
         let gauge = &crate::partii_webgl_queue::GAUGE;
         gauge.before_send(crate::partii_webgl_queue::GIVE_UP);
         gauge.add();
         let result = self
             .sender
-            .send(WebGLMsg::WebGLCommand(self.ctx_id, command, backtrace));
+            .send_unflushed(WebGLMsg::WebGLCommand(self.ctx_id, command, backtrace));
         if result.is_err() {
             gauge.unadd();
         }

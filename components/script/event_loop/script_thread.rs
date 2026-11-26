@@ -1572,6 +1572,9 @@ impl ScriptThread {
             }
         }
 
+        // Partii (perf, wglbatch): send this thread's batched WebGL commands before waiting.
+        servo_canvas_traits::partii_webgl_batch::flush_thread();
+
         // Notify the background-hang-monitor we are waiting for an event.
         self.background_hang_monitor.notify_wait();
 
