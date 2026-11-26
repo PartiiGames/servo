@@ -9,6 +9,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use log::{debug, error, warn};
 use malloc_size_of::MallocSizeOf;
@@ -20,7 +21,7 @@ use profile_traits::mem::{
 use profile_traits::path;
 use rusqlite::Error as RusqliteError;
 use rustc_hash::{FxHashMap, FxHashSet};
-use servo_base::generic_channel::{self, GenericReceiver, GenericSender, ReceiveError};
+use servo_base::generic_channel::{self, GenericReceiver, GenericSender, ReceiveError, TryReceiveError};
 use servo_base::threadpool::ThreadPool;
 use servo_url::origin::ImmutableOrigin;
 use storage_traits::client_storage::StorageProxyMap;
@@ -1182,24 +1183,60 @@ impl IndexedDBManager {
 }
 
 impl IndexedDBManager {
+    /// Partii (perf, 2026-11-26): no transaction batch is running or queued in any database. At shutdown the
+    /// thread acknowledges Exit only once this holds (or after EXIT_DRAIN), so every write a page made before
+    /// its script thread was joined has reached SQLite before the embedder ends the process (the runtime
+    /// leaves with _exit right after Servo's shutdown). Before, Exit was acknowledged at once while write
+    /// batches could still be queued here or running on the thread pool.
+    fn idle(&self) -> bool {
+        self.databases.values().all(|db| {
+            db.running_readwrite.is_none() &&
+                db.running_readonly.is_empty() &&
+                db.queued_readwrite.is_empty() &&
+                db.queued_readonly.is_empty()
+        })
+    }
+
     fn start(&mut self) {
+        const EXIT_DRAIN: Duration = Duration::from_secs(5);
+        let mut exiting: Option<(GenericSender<()>, Instant)> = None;
         loop {
+            if let Some((_, since)) = &exiting {
+                let drained = self.idle();
+                if drained || since.elapsed() >= EXIT_DRAIN {
+                    if !drained {
+                        warn!("IndexedDB: exiting with transactions still running or queued after {EXIT_DRAIN:?}");
+                    }
+                    debug!("IndexedDB: exit after draining for {:?}", since.elapsed());
+                    let (sender, _) = exiting.take().expect("checked");
+                    let _ = sender.send(());
+                    break;
+                }
+            }
             // FIXME:(arihant2math) No message *most likely* means that
             // the ipc sender has been dropped, so we break the look
-            let message = match self.port.recv() {
+            let received = match &exiting {
+                None => self.port.recv().map_err(TryReceiveError::ReceiveError),
+                Some((_, since)) => self
+                    .port
+                    .try_recv_timeout(EXIT_DRAIN.saturating_sub(since.elapsed()).max(Duration::from_millis(1))),
+            };
+            let message = match received {
                 Ok(msg) => msg,
-                Err(ReceiveError::Disconnected) => {
+                Err(TryReceiveError::Empty) => continue,
+                Err(TryReceiveError::ReceiveError(ReceiveError::Disconnected)) => {
                     break;
                 },
-                Err(e) => {
+                Err(TryReceiveError::ReceiveError(e)) => {
                     warn!("Error in IndexedDB thread: {e:?}");
                     continue;
                 },
             };
             match message {
                 IndexedDBThreadMsg::Sync(SyncOperation::Exit(sender)) => {
-                    let _ = sender.send(());
-                    break;
+                    // Keep serving engine completions (and anything already queued) until idle.
+                    exiting = Some((sender, Instant::now()));
+                    continue;
                 },
                 IndexedDBThreadMsg::Sync(operation) => {
                     self.handle_sync_operation(operation);
