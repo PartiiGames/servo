@@ -159,6 +159,11 @@ impl Drop for MsgGuard {
                 }
                 line.push(')');
             }
+            // Partii (perf, wglq): the command-queue bound's give-ups so far (each one also logs its own line).
+            let gauge = &servo_canvas_traits::partii_webgl_queue::GAUGE;
+            if gauge.giveups() > 0 {
+                line.push_str(&format!(" | queue give-ups {} (pending {})", gauge.giveups(), gauge.pending()));
+            }
             eprintln!("{line}");
         });
     }

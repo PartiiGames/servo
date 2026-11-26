@@ -709,6 +709,11 @@ impl WebGLThread {
 
     fn process(&mut self) {
         let webgl_chan = WebGLChan(self.sender.clone());
+        // Partii (perf, wglq): arm the command-queue bound for this process's script threads; closing it on exit
+        // or unwind wakes any sender still waiting for room.
+        let gauge = &servo_canvas_traits::partii_webgl_queue::GAUGE;
+        gauge.arm(servo_canvas_traits::partii_webgl_queue::configured_max());
+        let _close_gauge = servo_canvas_traits::partii_webgl_queue::CloseOnDrop(gauge);
         loop {
             // Partii (stream gaps3): once a page has made a context, the thread makes the next one's GL context
             // when it has had nothing to do for SPARE_IDLE (between a frame's commands and the next frame's).
@@ -989,6 +994,7 @@ impl WebGLThread {
             },
             WebGLMsg::WebGLCommand(ctx_id, command, backtrace) => {
                 self.handle_webgl_command(ctx_id, command, backtrace);
+                servo_canvas_traits::partii_webgl_queue::GAUGE.done();
             },
             WebGLMsg::WebXRCommand(_command) => {
                 #[cfg(feature = "webxr")]
