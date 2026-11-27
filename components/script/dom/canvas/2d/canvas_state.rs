@@ -923,8 +923,8 @@ impl CanvasState {
                         self.state.borrow().transform,
                     ));
                 },
-                RenderingContext::Placeholder(ref context) => {
-                    let Some(context) = context.context() else {
+                RenderingContext::Placeholder(ref offscreen) => {
+                    let Some(context) = offscreen.context() else {
                         return Err(Error::InvalidState(None));
                     };
                     match *context {
@@ -1004,8 +1004,22 @@ impl CanvasState {
                                 self.state.borrow().transform,
                             ));
                         },
+                        // Partii: the OffscreenCanvas went to a worker; draw the frame the
+                        // worker last committed (see `PlaceholderReadback`).
                         OffscreenRenderingContext::Detached => {
-                            return Err(Error::InvalidState(None));
+                            let Some(snapshot) = offscreen.placeholder_image_data() else {
+                                return Ok(());
+                            };
+
+                            self.send_canvas_command(CanvasCommand::DrawImage(
+                                snapshot.to_shared(),
+                                dest_rect,
+                                source_rect,
+                                smoothing_enabled,
+                                self.state.borrow().shadow_options(),
+                                self.state.borrow().composition_options(),
+                                self.state.borrow().transform,
+                            ));
                         },
                     }
                 },

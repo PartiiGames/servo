@@ -132,6 +132,8 @@ struct ReadbackState {
     snapshot_epoch: u32,
     committed_epoch: u32,
     commits: u32,
+    /// The bitmap size at the last commit.
+    committed_size: Size2D<u32>,
     last_read: Option<Instant>,
     /// Whether the worker's bitmap was origin-clean at the last commit; reads of a
     /// tainted frame must taint the reader too.
@@ -180,11 +182,18 @@ impl PlaceholderReadback {
     }
 
     /// The worker committed `epoch`, with its snapshot if one was taken.
-    fn committed(&self, epoch: u32, snapshot: Option<SharedSnapshot>, origin_clean: bool) {
+    fn committed(
+        &self,
+        epoch: u32,
+        size: Size2D<u32>,
+        snapshot: Option<SharedSnapshot>,
+        origin_clean: bool,
+    ) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         state.committed_epoch = epoch;
+        state.committed_size = size;
         state.origin_tainted |= !origin_clean;
         state.commits = state.commits.saturating_add(1);
         if let Some(snapshot) = snapshot {
@@ -205,6 +214,13 @@ impl PlaceholderReadback {
 
     fn origin_is_clean(&self) -> bool {
         self.state.lock().is_ok_and(|state| !state.origin_tainted)
+    }
+
+    fn committed_size(&self) -> Size2D<u32> {
+        self.state
+            .lock()
+            .map(|state| state.committed_size)
+            .unwrap_or_default()
     }
 }
 
@@ -320,6 +336,21 @@ impl OffscreenCanvas {
                 .and_then(|link| link.0.read()),
             Some(context) => context.get_image_data(),
             None => None,
+        }
+    }
+
+    /// The size of this canvas as its placeholder element sees it as an image source:
+    /// the context's, or, once transferred to a worker, the size of the last commit.
+    pub(crate) fn placeholder_size(&self) -> Size2D<u32> {
+        match self.context.borrow().as_ref() {
+            Some(OffscreenRenderingContext::Detached) => self
+                .readback
+                .borrow()
+                .as_ref()
+                .map(|link| link.0.committed_size())
+                .unwrap_or_default(),
+            Some(context) => context.size(),
+            None => Size2D::default(),
         }
     }
 
@@ -665,7 +696,8 @@ impl OffscreenCanvas {
                     wall
                 );
             }
-            link.0.committed(epoch.0, snapshot, self.origin_is_clean());
+            link.0
+                .committed(epoch.0, self.get_size(), snapshot, self.origin_is_clean());
         }
 
         if let Some(canvas) = self.placeholder() {

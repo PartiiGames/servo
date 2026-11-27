@@ -294,10 +294,8 @@ impl CanvasContext for RenderingContext {
 
     fn size(&self) -> Size2D<u32> {
         match self {
-            RenderingContext::Placeholder(offscreen_canvas) => offscreen_canvas
-                .context()
-                .map(|context| context.size())
-                .unwrap_or_default(),
+            // Partii: once the OffscreenCanvas went to a worker, the size of its last commit.
+            RenderingContext::Placeholder(offscreen_canvas) => offscreen_canvas.placeholder_size(),
             RenderingContext::Context2d(context) => context.size(),
             RenderingContext::BitmapRenderer(context) => context.size(),
             #[cfg(feature = "webgl")]
