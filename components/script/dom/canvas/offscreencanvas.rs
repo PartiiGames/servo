@@ -3,7 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use dom_struct::dom_struct;
 use euclid::default::Size2D;
@@ -11,7 +12,7 @@ use js::error::throw_type_error;
 use js::jsapi::JSTracer;
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject, HandleValue};
-use pixels::{EncodedImageType, Snapshot};
+use pixels::{EncodedImageType, SharedSnapshot, Snapshot};
 use rustc_hash::FxHashMap;
 use script_bindings::cell::{DomRefCell, Ref};
 #[cfg(feature = "webgl")]
@@ -98,6 +99,132 @@ pub(crate) struct OffscreenCanvas {
 
     /// Whether the bitmap's size changed since the last commit.
     size_changed: Cell<bool>,
+
+    /// Partii: the frame committed to a placeholder on another thread, shared between
+    /// the worker's OffscreenCanvas (which stores it at each commit) and the detached
+    /// OffscreenCanvas the placeholder element holds (which reads it). See
+    /// [`PlaceholderReadback`].
+    #[ignore_malloc_size_of = "Arc"]
+    readback: DomRefCell<Option<ReadbackLink>>,
+}
+
+/// Partii: how a placeholder canvas element reads the frame a worker committed to it
+/// (drawImage, toDataURL, toBlob, createImageBitmap, captureStream, texImage2D).
+///
+/// The bitmap lives on the worker, so the element's thread can't read it directly.
+/// Instead the worker stores a snapshot of the bitmap here at each commit, before the
+/// buffers swap, and the element reads the latest one without waiting on any thread.
+/// Taking a snapshot costs a readback on the worker, so in the default mode it is taken
+/// only while someone reads: during the first `WARM_COMMITS` commits, and for
+/// `READ_WINDOW` after any read. A read that finds its snapshot older than the last
+/// commit waits up to `STALE_WAIT` for the next commit's snapshot (one frame of an
+/// animating canvas), then returns the newest it has.
+/// PARTII_OFFSCREEN_READBACK=always snapshots every commit; =off never (reads return
+/// nothing, as before this change).
+pub(crate) struct PlaceholderReadback {
+    state: Mutex<ReadbackState>,
+    fresh: Condvar,
+}
+
+#[derive(Default)]
+struct ReadbackState {
+    snapshot: Option<SharedSnapshot>,
+    snapshot_epoch: u32,
+    committed_epoch: u32,
+    commits: u32,
+    last_read: Option<Instant>,
+    /// Whether the worker's bitmap was origin-clean at the last commit; reads of a
+    /// tainted frame must taint the reader too.
+    origin_tainted: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ReadbackMode {
+    Auto,
+    Always,
+    Off,
+}
+
+static READBACK_MODE: LazyLock<ReadbackMode> = LazyLock::new(|| {
+    match std::env::var("PARTII_OFFSCREEN_READBACK").as_deref() {
+        Ok("always") => ReadbackMode::Always,
+        Ok("off") => ReadbackMode::Off,
+        _ => ReadbackMode::Auto,
+    }
+});
+
+const WARM_COMMITS: u32 = 120;
+const READ_WINDOW: Duration = Duration::from_secs(5);
+const STALE_WAIT: Duration = Duration::from_millis(50);
+
+impl PlaceholderReadback {
+    fn new() -> Self {
+        PlaceholderReadback {
+            state: Mutex::new(ReadbackState::default()),
+            fresh: Condvar::new(),
+        }
+    }
+
+    /// Whether the next commit should store a snapshot.
+    fn wanted(&self) -> bool {
+        match *READBACK_MODE {
+            ReadbackMode::Always => true,
+            ReadbackMode::Off => false,
+            ReadbackMode::Auto => self.state.lock().is_ok_and(|state| {
+                state.commits < WARM_COMMITS ||
+                    state
+                        .last_read
+                        .is_some_and(|read| read.elapsed() < READ_WINDOW)
+            }),
+        }
+    }
+
+    /// The worker committed `epoch`, with its snapshot if one was taken.
+    fn committed(&self, epoch: u32, snapshot: Option<SharedSnapshot>, origin_clean: bool) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.committed_epoch = epoch;
+        state.origin_tainted |= !origin_clean;
+        state.commits = state.commits.saturating_add(1);
+        if let Some(snapshot) = snapshot {
+            state.snapshot = Some(snapshot);
+            state.snapshot_epoch = epoch;
+            self.fresh.notify_all();
+        }
+    }
+
+    /// The latest committed frame, for the placeholder element's thread.
+    fn read(&self) -> Option<Snapshot> {
+        if *READBACK_MODE == ReadbackMode::Off {
+            return None;
+        }
+        let mut state = self.state.lock().ok()?;
+        state.last_read = Some(Instant::now());
+        if state.snapshot_epoch < state.committed_epoch {
+            state = self
+                .fresh
+                .wait_timeout_while(state, STALE_WAIT, |state| {
+                    state.snapshot_epoch < state.committed_epoch
+                })
+                .ok()?
+                .0;
+        }
+        state.snapshot.as_ref().map(SharedSnapshot::to_owned)
+    }
+
+    fn origin_is_clean(&self) -> bool {
+        self.state.lock().is_ok_and(|state| !state.origin_tainted)
+    }
+}
+
+/// An [`Arc`] of a [`PlaceholderReadback`]: plain data shared between threads, no GC things.
+#[derive(Clone)]
+pub(crate) struct ReadbackLink(Arc<PlaceholderReadback>);
+
+#[expect(unsafe_code)]
+unsafe impl JSTraceable for ReadbackLink {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {}
 }
 
 /// A placeholder canvas element on another thread of this agent cluster, and the way
@@ -119,7 +246,7 @@ unsafe impl JSTraceable for RemotePlaceholder {
 /// process as their owner, so a process-wide table is enough. (An entry whose message
 /// is never received keeps its placeholder element alive; that is a small leak.)
 static PENDING_PLACEHOLDERS: LazyLock<
-    Mutex<FxHashMap<OffscreenCanvasId, (RemotePlaceholder, Option<ImageKey>)>>,
+    Mutex<FxHashMap<OffscreenCanvasId, (RemotePlaceholder, Option<ImageKey>, Option<ReadbackLink>)>>,
 > = LazyLock::new(Default::default);
 
 impl OffscreenCanvas {
@@ -139,6 +266,7 @@ impl OffscreenCanvas {
             commit_queued: Cell::new(false),
             commit_epoch: Cell::new(0),
             size_changed: Cell::new(false),
+            readback: DomRefCell::new(None),
         }
     }
 
@@ -187,6 +315,35 @@ impl OffscreenCanvas {
         match *self.context.borrow() {
             Some(ref context) => context.origin_is_clean(),
             _ => true,
+        }
+    }
+
+    /// The bitmap as the placeholder canvas element holding this OffscreenCanvas reads
+    /// it: the context's own bitmap, or, once this canvas was transferred to a worker,
+    /// the frame the worker last committed (see [`PlaceholderReadback`]).
+    pub(crate) fn placeholder_image_data(&self) -> Option<Snapshot> {
+        match self.context.borrow().as_ref() {
+            Some(OffscreenRenderingContext::Detached) => self
+                .readback
+                .borrow()
+                .as_ref()
+                .and_then(|link| link.0.read()),
+            Some(context) => context.get_image_data(),
+            None => None,
+        }
+    }
+
+    /// Whether reading this canvas through its placeholder element keeps the reader
+    /// origin-clean (see [`OffscreenCanvas::placeholder_image_data`]).
+    pub(crate) fn placeholder_origin_is_clean(&self) -> bool {
+        match self.context.borrow().as_ref() {
+            Some(OffscreenRenderingContext::Detached) => self
+                .readback
+                .borrow()
+                .as_ref()
+                .is_none_or(|link| link.0.origin_is_clean()),
+            Some(context) => context.origin_is_clean(),
+            None => true,
         }
     }
 
@@ -460,6 +617,21 @@ impl OffscreenCanvas {
     fn commit_to_placeholder_inner(&self, cx: &mut js::context::JSContext) {
         self.commit_queued.set(false);
         let epoch = Epoch(self.commit_epoch.get().wrapping_add(1));
+        // Partii: for a placeholder on another thread, keep a copy of the frame for its
+        // reads, taken before the swap (which may clear the drawing buffer).
+        let readback = self.readback.borrow().clone();
+        let snapshot = readback
+            .as_ref()
+            .filter(|link| link.0.wanted())
+            .and_then(|_| match self.context.borrow().as_ref() {
+                Some(OffscreenRenderingContext::Context2d(_)) => self.get_image_data(),
+                #[cfg(feature = "webgl")]
+                Some(OffscreenRenderingContext::WebGL(_) | OffscreenRenderingContext::WebGL2(_)) => {
+                    self.get_image_data()
+                },
+                _ => None,
+            })
+            .map(|snapshot| snapshot.to_shared());
         let committed = match self.context.borrow().as_ref() {
             Some(OffscreenRenderingContext::Context2d(context)) => context.commit(epoch),
             // The WebGL thread swaps the drawing buffer to the front and updates the
@@ -486,6 +658,9 @@ impl OffscreenCanvas {
             return;
         };
         self.commit_epoch.set(epoch.0);
+        if let Some(link) = readback {
+            link.0.committed(epoch.0, snapshot, self.origin_is_clean());
+        }
 
         if let Some(canvas) = self.placeholder() {
             canvas.placeholder_frame_committed(cx, epoch, None);
@@ -547,10 +722,21 @@ impl Transferable for OffscreenCanvas {
                         .to_sendable(),
                 },
                 canvas.placeholder_image_key(),
+                {
+                    // Partii: this object stays in the placeholder element (context mode
+                    // placeholder) and reads what the receiving worker commits.
+                    let link = ReadbackLink(Arc::new(PlaceholderReadback::new()));
+                    *self.readback.borrow_mut() = Some(link.clone());
+                    Some(link)
+                },
             )),
             None => self.remote_placeholder.borrow_mut().take().map(|remote| {
                 // Transferring onwards again: hand on the link we were given.
-                (remote, self.placeholder_image_key.get())
+                (
+                    remote,
+                    self.placeholder_image_key.get(),
+                    self.readback.borrow_mut().take(),
+                )
             }),
         };
 
@@ -612,9 +798,10 @@ impl Transferable for OffscreenCanvas {
             .lock()
             .ok()
             .and_then(|mut pending| pending.remove(&id));
-        if let Some((remote, image_key)) = link {
+        if let Some((remote, image_key, readback)) = link {
             *canvas.remote_placeholder.borrow_mut() = Some(remote);
             canvas.placeholder_image_key.set(image_key);
+            *canvas.readback.borrow_mut() = readback;
         }
         Ok(canvas)
     }

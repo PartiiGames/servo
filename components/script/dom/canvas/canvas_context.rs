@@ -260,8 +260,10 @@ impl CanvasContext for RenderingContext {
 
     fn get_image_data(&self) -> Option<Snapshot> {
         match self {
+            // Partii: a placeholder whose OffscreenCanvas went to a worker reads the frame
+            // the worker committed.
             RenderingContext::Placeholder(offscreen_canvas) => {
-                offscreen_canvas.context()?.get_image_data()
+                offscreen_canvas.placeholder_image_data()
             },
             RenderingContext::Context2d(context) => context.get_image_data(),
             RenderingContext::BitmapRenderer(context) => context.get_image_data(),
@@ -276,9 +278,9 @@ impl CanvasContext for RenderingContext {
 
     fn origin_is_clean(&self) -> bool {
         match self {
-            RenderingContext::Placeholder(offscreen_canvas) => offscreen_canvas
-                .context()
-                .is_none_or(|context| context.origin_is_clean()),
+            RenderingContext::Placeholder(offscreen_canvas) => {
+                offscreen_canvas.placeholder_origin_is_clean()
+            },
             RenderingContext::Context2d(context) => context.origin_is_clean(),
             RenderingContext::BitmapRenderer(context) => context.origin_is_clean(),
             #[cfg(feature = "webgl")]
