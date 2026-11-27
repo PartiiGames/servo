@@ -346,9 +346,10 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
         self.terminated.set(true);
 
         // Step 3
-        // CanWait: also wake the worker if it is blocked in `Atomics.wait`.
+        // Wake the worker even when it is blocked in `Atomics.wait` (urgent interrupt; the CanWait one never
+        // wakes the wait: see wake_worker_for_termination).
         if let Some(cx) = self.context_for_interrupt.borrow().as_ref() {
-            cx.request_interrupt_callback_can_wait()
+            crate::runtime::script_runtime::wake_worker_for_termination(cx)
         }
     }
 
