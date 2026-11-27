@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dom_struct::dom_struct;
 use euclid::default::Size2D;
@@ -116,14 +116,14 @@ pub(crate) struct OffscreenCanvas {
 /// buffers swap, and the element reads the latest one without waiting on any thread.
 /// Taking a snapshot costs a readback on the worker, so in the default mode it is taken
 /// only while someone reads: during the first `WARM_COMMITS` commits, and for
-/// `READ_WINDOW` after any read. A read that finds its snapshot older than the last
-/// commit waits up to `STALE_WAIT` for the next commit's snapshot (one frame of an
-/// animating canvas), then returns the newest it has.
+/// `READ_WINDOW` after any read. A read never waits: it returns the newest snapshot,
+/// which may be one commit behind (the spec promises the last committed frame; a page
+/// that needs a given frame waits for its commit, by rAF or a message from the worker).
 /// PARTII_OFFSCREEN_READBACK=always snapshots every commit; =off never (reads return
-/// nothing, as before this change).
+/// nothing, as before this change). PARTII_OFFSCREEN_READBACK_LOG=1 prints one line a
+/// commit on stderr: the epoch, the size, the snapshot's cost and the wall clock.
 pub(crate) struct PlaceholderReadback {
     state: Mutex<ReadbackState>,
-    fresh: Condvar,
 }
 
 #[derive(Default)]
@@ -155,13 +155,13 @@ static READBACK_MODE: LazyLock<ReadbackMode> = LazyLock::new(|| {
 
 const WARM_COMMITS: u32 = 120;
 const READ_WINDOW: Duration = Duration::from_secs(5);
-const STALE_WAIT: Duration = Duration::from_millis(50);
+static READBACK_LOG: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("PARTII_OFFSCREEN_READBACK_LOG").is_some());
 
 impl PlaceholderReadback {
     fn new() -> Self {
         PlaceholderReadback {
             state: Mutex::new(ReadbackState::default()),
-            fresh: Condvar::new(),
         }
     }
 
@@ -190,7 +190,6 @@ impl PlaceholderReadback {
         if let Some(snapshot) = snapshot {
             state.snapshot = Some(snapshot);
             state.snapshot_epoch = epoch;
-            self.fresh.notify_all();
         }
     }
 
@@ -201,15 +200,6 @@ impl PlaceholderReadback {
         }
         let mut state = self.state.lock().ok()?;
         state.last_read = Some(Instant::now());
-        if state.snapshot_epoch < state.committed_epoch {
-            state = self
-                .fresh
-                .wait_timeout_while(state, STALE_WAIT, |state| {
-                    state.snapshot_epoch < state.committed_epoch
-                })
-                .ok()?
-                .0;
-        }
         state.snapshot.as_ref().map(SharedSnapshot::to_owned)
     }
 
@@ -620,6 +610,7 @@ impl OffscreenCanvas {
         // Partii: for a placeholder on another thread, keep a copy of the frame for its
         // reads, taken before the swap (which may clear the drawing buffer).
         let readback = self.readback.borrow().clone();
+        let snapshot_t0 = Instant::now();
         let snapshot = readback
             .as_ref()
             .filter(|link| link.0.wanted())
@@ -632,6 +623,7 @@ impl OffscreenCanvas {
                 _ => None,
             })
             .map(|snapshot| snapshot.to_shared());
+        let snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1000.0;
         let committed = match self.context.borrow().as_ref() {
             Some(OffscreenRenderingContext::Context2d(context)) => context.commit(epoch),
             // The WebGL thread swaps the drawing buffer to the front and updates the
@@ -659,6 +651,20 @@ impl OffscreenCanvas {
         };
         self.commit_epoch.set(epoch.0);
         if let Some(link) = readback {
+            if *READBACK_LOG {
+                let wall = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis());
+                eprintln!(
+                    "partii-offscreen: commit {} {}x{} snapshot {} {:.3} ms wall {}",
+                    epoch.0,
+                    self.width.get(),
+                    self.height.get(),
+                    if snapshot.is_some() { "taken" } else { "none" },
+                    snapshot_ms,
+                    wall
+                );
+            }
             link.0.committed(epoch.0, snapshot, self.origin_is_clean());
         }
 
