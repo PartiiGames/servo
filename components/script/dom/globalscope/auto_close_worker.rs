@@ -44,9 +44,9 @@ impl Drop for AutoCloseWorker {
             warn!("Couldn't send an exit message to a dedicated worker.");
         }
 
-        // The CanWait variant also wakes a worker blocked in `Atomics.wait`; otherwise the join
-        // below would wait forever for a worker parked on shared memory.
-        self.context.request_interrupt_callback_can_wait();
+        // Wake the worker even when it is parked in `Atomics.wait` (an urgent interrupt: the CanWait one only
+        // sets a pending bit and never wakes the wait, so the join below hung; see wake_worker_for_termination).
+        crate::runtime::script_runtime::wake_worker_for_termination(&self.context);
 
         // Step 2. If there are any tasks queued in the `WorkerGlobalScope` object's relevant agent's event loop's task queues, discard them without processing them.
         // Step 3. Abort the script currently running in the worker.

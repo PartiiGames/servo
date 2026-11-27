@@ -1707,3 +1707,20 @@ impl IntroductionType {
     pub const WORKER: &CStr = c"Worker";
     pub const WORKER_STR: &str = "Worker";
 }
+
+/// Partii (perf-shutdown, 2026-11-27): wake a worker that is being terminated, even when it is parked in
+/// `Atomics.wait`. `JS_RequestInterruptCallbackCanWait` only sets a pending bit: SpiderMonkey's
+/// `JSContext::requestInterrupt` notifies the `FutexThread` (ends an `Atomics.wait`) for `CallbackUrgent` alone, so
+/// a worker in `Atomics.wait` never saw the request, and the parent's join waited forever (Digii with 4 threads:
+/// Script in `pthread_join`, all 4 workers in `pthread_cond_wait`; Servo's shutdown hit the 20 s watchdog).
+/// The urgent request wakes the wait, the worker's interrupt callback sees `closing` (set before this call) and
+/// returns false, the wait returns an uncatchable error and the worker's script ends. `cx` must be the worker's own
+/// context. `PARTII_SHUTDOWN_WAKE_WORKERS=0` keeps the old non-waking request (the control arm of the A/B).
+pub(crate) fn wake_worker_for_termination(cx: &ThreadSafeJSContext) {
+    static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *OLD.get_or_init(|| std::env::var("PARTII_SHUTDOWN_WAKE_WORKERS").is_ok_and(|v| v == "0")) {
+        cx.request_interrupt_callback_can_wait();
+    } else {
+        cx.request_interrupt_callback();
+    }
+}
