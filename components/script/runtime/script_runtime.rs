@@ -1678,6 +1678,19 @@ unsafe extern "C" fn invoke_script_environment_preparer(
     });
 }
 
+/// An off-thread promise task accepted by `dispatch_to_event_loop`, plus the runtime's set of accepted-but-unrun
+/// tasks (`PendingDispatchables`). Invariants (Partii, perf-shutdown):
+/// - Exactly one party runs the task: whoever removes its pointer from the set under the lock (`run` here, or
+///   `Runtime::drop` with `ShuttingDown`). The other finds it gone and does nothing, so no double run.
+/// - Dropping a `Runnable` without running it (a queue torn down while the runtime lives: a navigation, a worker
+///   closing mid-dispatch, the script thread leaving its loop) deliberately does nothing: there is no `Drop`, no
+///   `JSContext` is needed, the pointer stays in the set and `Runtime::drop` runs it with `ShuttingDown` on the
+///   runtime's own thread before the context is destroyed. So nothing leaks or is left for
+///   `OffThreadPromiseRuntimeState::shutdown` to wait on.
+/// - A dispatchable is only freed by its run, so a pointer in the set is never reused while there; after
+///   `Runtime::drop` closes the set, new dispatches are refused (SpiderMonkey marks them failed), so a stale
+///   `Runnable` can never claim a reused address.
+/// - Each runtime has its own set, and a task is only sent to the event loop of the runtime that accepted it.
 pub(crate) struct Runnable(*mut DispatchablePointer, PendingDispatch);
 
 #[expect(unsafe_code)]
