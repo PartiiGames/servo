@@ -343,14 +343,19 @@ impl WebGLRenderingContext {
         // wait behind whatever that thread is doing (a swap, the previous copy's readback): clips
         // 3d0209c3, the script thread's copy drawImage 4-10 ms on average with ~15 ms/s of its own CPU,
         // frame_attr ipc_wait. The size only changes on a resize (reallocate_drawing_buffer sets
-        // `size`), so it's asked once per context size and kept. PARTII_WEBGL_COPY_SIZE_QUERY=1 asks
-        // every copy again (the old path, for A/Bs).
+        // `size`, and drops the kept size), so it's asked once per reallocation and kept. Servo has no
+        // WEBGL_lose_context and IsContextLost is always false, so loss/restore can't change it.
+        // PARTII_WEBGL_COPY_SIZE_QUERY=1 asks every copy again (the old path, for A/Bs).
         let (fb_width, fb_height) = match self.bound_draw_framebuffer.get() {
             None if !copy_size_query() => match self.copy_fb_size.get() {
                 Some((at, fb)) if at == self.size.get() => fb,
                 _ => {
                     let fb = (self.DrawingBufferWidth(), self.DrawingBufferHeight());
-                    self.copy_fb_size.set(Some((self.size.get(), fb)));
+                    // An empty answer (a 0-sized canvas, a buffer that failed to allocate) is not
+                    // kept: the next copy asks again.
+                    if fb.0 > 0 && fb.1 > 0 {
+                        self.copy_fb_size.set(Some((self.size.get(), fb)));
+                    }
                     fb
                 },
             },
@@ -539,6 +544,10 @@ impl WebGLRenderingContext {
         // FIXME(#21718) The backend is allowed to choose a size smaller than
         // what was requested
         self.size.set(size);
+        // Partii (clips): every reallocation (a resize, a same-size colour space change, a
+        // drawingBufferStorage) may give a buffer of a new size, smaller than asked when clamped:
+        // drop the copy size read_pixels_pending keeps so the next copy asks again.
+        self.copy_fb_size.set(None);
         let bytes_per_pixel =
             if self.drawing_buffer_format.get() == WebGL2RenderingContextConstants::RGBA16F {
                 8
