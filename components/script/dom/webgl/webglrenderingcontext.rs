@@ -270,6 +270,11 @@ pub(crate) struct WebGLRenderingContext {
     current_clear_color: Cell<(f32, f32, f32, f32)>,
     #[no_trace]
     size: Cell<Size2D<u32>>,
+    /// Partii (clips): the default framebuffer's size as the WebGL thread last reported it
+    /// (DrawingBufferWidth/Height), with the context size it was asked at. See read_pixels_pending.
+    #[no_trace]
+    #[ignore_malloc_size_of = "Because it's small"]
+    copy_fb_size: Cell<Option<(Size2D<u32>, (i32, i32))>>,
     /// Whether the drawing buffer has alpha (WebGLContextAttributes.alpha).
     drawing_buffer_alpha: bool,
     /// <https://registry.khronos.org/webgl/specs/latest/1.0/#DOM-WebGLRenderingContext-drawingBufferFormat>:
@@ -315,6 +320,13 @@ pub(crate) struct WebGLRenderingContext {
     droppable: DroppableWebGLRenderingContext,
 }
 
+/// Partii (clips): PARTII_WEBGL_COPY_SIZE_QUERY=1: read_pixels_pending asks the drawing buffer's size
+/// every copy (the path before the cache).
+fn copy_size_query() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PARTII_WEBGL_COPY_SIZE_QUERY").is_ok_and(|v| v == "1"))
+}
+
 impl WebGLRenderingContext {
     /// Partii: get_image_data's readback without the wait: the WebGL thread answers the returned
     /// receiver (RGBA, rows bottom-up), and drawImage(this canvas) gives it to the canvas thread.
@@ -326,11 +338,28 @@ impl WebGLRenderingContext {
     ) -> Option<servo_canvas_traits::canvas::WebGLReadback> {
         handle_potential_webgl_error!(self, self.validate_framebuffer(), return None);
         let mut size: Size2D<u32> = self.size().cast();
-        let (fb_width, fb_height) = handle_potential_webgl_error!(
-            self,
-            self.get_current_framebuffer_size().ok_or(InvalidOperation),
-            return None
-        );
+        // Partii (clips): with the default framebuffer bound, get_current_framebuffer_size asks the
+        // WebGL thread for the drawing buffer's width and height, two blocking round trips per copy that
+        // wait behind whatever that thread is doing (a swap, the previous copy's readback): clips
+        // 3d0209c3, the script thread's copy drawImage 4-10 ms on average with ~15 ms/s of its own CPU,
+        // frame_attr ipc_wait. The size only changes on a resize (reallocate_drawing_buffer sets
+        // `size`), so it's asked once per context size and kept. PARTII_WEBGL_COPY_SIZE_QUERY=1 asks
+        // every copy again (the old path, for A/Bs).
+        let (fb_width, fb_height) = match self.bound_draw_framebuffer.get() {
+            None if !copy_size_query() => match self.copy_fb_size.get() {
+                Some((at, fb)) if at == self.size.get() => fb,
+                _ => {
+                    let fb = (self.DrawingBufferWidth(), self.DrawingBufferHeight());
+                    self.copy_fb_size.set(Some((self.size.get(), fb)));
+                    fb
+                },
+            },
+            _ => handle_potential_webgl_error!(
+                self,
+                self.get_current_framebuffer_size().ok_or(InvalidOperation),
+                return None
+            ),
+        };
         size.width = cmp::min(size.width, fb_width as u32);
         size.height = cmp::min(size.height, fb_height as u32);
         if size.is_empty() {
@@ -410,6 +439,7 @@ impl WebGLRenderingContext {
                 // FIXME(#21718) The backend is allowed to choose a size smaller than
                 // what was requested
                 size: Cell::new(size),
+                copy_fb_size: Cell::new(None),
                 drawing_buffer_alpha,
                 drawing_buffer_format: Cell::new(if drawing_buffer_alpha {
                     constants::RGBA8
