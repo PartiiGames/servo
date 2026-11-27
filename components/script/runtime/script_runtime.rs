@@ -539,7 +539,26 @@ struct RuntimeCallbackData {
     #[no_trace]
     #[ignore_malloc_size_of = "ScriptThread measures its own memory itself."]
     script_thread: Option<Weak<ScriptThread>>,
+    #[no_trace]
+    #[ignore_malloc_size_of = "a set of pointers"]
+    pending_dispatch: PendingDispatch,
 }
+
+/// Partii (perf-shutdown, 2026-11-27): the off-thread promise tasks (`Atomics.waitAsync` wake-ups, async wasm
+/// compiles, ...) that `dispatch_to_event_loop` accepted and the event loop has not run yet.
+/// SpiderMonkey requires the embedding to run every task it accepted before the context is destroyed (with
+/// `ShuttingDown` once shutdown has begun): `OffThreadPromiseRuntimeState::shutdown` (inside `DestroyContext`) waits
+/// until every registered task has run or failed. A task accepted just as the script thread left its event loop was
+/// dropped unrun, and `DestroyContext` waited forever (Digii with 4 threads, with the worker wake fix: Script in
+/// `OffThreadPromiseRuntimeState::shutdown`, the constellation joining it, Servo's shutdown at the 20 s watchdog).
+/// `Runtime::drop` now closes this (later dispatches are refused, so SpiderMonkey marks them failed itself) and runs
+/// every task still here with `ShuttingDown`; `Runnable::run` only runs a task it can still claim from the set.
+#[derive(Default)]
+struct PendingDispatchables {
+    closed: bool,
+    ptrs: HashSet<usize>,
+}
+type PendingDispatch = std::sync::Arc<std::sync::Mutex<PendingDispatchables>>;
 
 #[derive(JSTraceable, MallocSizeOf)]
 pub(crate) struct Runtime {
@@ -602,6 +621,7 @@ impl Runtime {
         let runtime_callback_data = Box::new(RuntimeCallbackData {
             script_event_loop_sender,
             script_thread: None,
+            pending_dispatch: Default::default(),
         });
         let runtime_callback_data = Box::into_raw(runtime_callback_data);
 
@@ -667,19 +687,33 @@ impl Runtime {
                 return false;
             };
 
-            let runnable = Runnable(dispatchable);
+            // Refuse once the runtime is shutting down (SpiderMonkey then marks the task failed itself); otherwise
+            // remember it until it runs, so Runtime::drop can run it with ShuttingDown if the loop never does.
+            let pending = runtime_callback_data.pending_dispatch.clone();
+            {
+                let mut p = pending.lock().unwrap();
+                if p.closed {
+                    return false;
+                }
+                p.ptrs.insert(dispatchable as usize);
+            }
+            let runnable = Runnable(dispatchable, pending.clone());
             let task = task!(dispatch_to_event_loop_message: move |cx| {
                 runnable.run(cx, Dispatchable_MaybeShuttingDown::NotShuttingDown);
             });
 
-            script_event_loop_sender
+            let sent = script_event_loop_sender
                 .send(CommonScriptMsg::Task(
                     ScriptThreadEventCategory::NetworkEvent,
                     Box::new(task),
                     None, /* pipeline_id */
                     TaskSourceName::Networking,
                 ))
-                .is_ok()
+                .is_ok();
+            if !sent {
+                pending.lock().unwrap().ptrs.remove(&(dispatchable as usize));
+            }
+            sent
         }
 
         if have_event_loop_sender {
@@ -890,7 +924,25 @@ impl Runtime {
 }
 
 impl Drop for Runtime {
+    #[expect(unsafe_code)]
     fn drop(&mut self) {
+        // Every off-thread promise task we accepted and never ran: run it now with ShuttingDown, before the
+        // context is destroyed (see PendingDispatchables); refuse any later dispatch.
+        let unrun: Vec<usize> = {
+            let mut p = self.runtime_callback_data.pending_dispatch.lock().unwrap();
+            p.closed = true;
+            p.ptrs.drain().collect()
+        };
+        for ptr in unrun {
+            unsafe {
+                DispatchableRun(
+                    self.rt.cx(),
+                    ptr as *mut DispatchablePointer,
+                    Dispatchable_MaybeShuttingDown::ShuttingDown,
+                );
+            }
+        }
+
         // Clear our main microtask_queue.
         job_queue_clear(self.rt.cx_no_gc());
 
@@ -1626,7 +1678,7 @@ unsafe extern "C" fn invoke_script_environment_preparer(
     });
 }
 
-pub(crate) struct Runnable(*mut DispatchablePointer);
+pub(crate) struct Runnable(*mut DispatchablePointer, PendingDispatch);
 
 #[expect(unsafe_code)]
 unsafe impl Sync for Runnable {}
@@ -1636,6 +1688,10 @@ unsafe impl Send for Runnable {}
 #[expect(unsafe_code)]
 impl Runnable {
     fn run(&self, cx: &mut JSContext, maybe_shutting_down: Dispatchable_MaybeShuttingDown) {
+        // Already run (with ShuttingDown) by Runtime::drop: the pointer is gone, don't touch it.
+        if !self.1.lock().unwrap().ptrs.remove(&(self.0 as usize)) {
+            return;
+        }
         unsafe {
             DispatchableRun(cx, self.0, maybe_shutting_down);
         }
