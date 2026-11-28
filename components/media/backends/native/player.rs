@@ -8,13 +8,15 @@
 //! go to the element's renderer when the clock reaches them: the audio clock, or the wall clock
 //! when there is no audio (or it has ended). Files with neither report an error.
 
+use std::collections::HashMap;
 #[cfg(feature = "video")]
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -89,6 +91,12 @@ pub(crate) struct PlayerShared {
 }
 
 impl PlayerShared {
+    /// The play state, also after a hub player panicked while holding it (the hub stops that
+    /// player; its element and the output must not panic on the poisoned lock).
+    fn st(&self) -> MutexGuard<'_, PlayState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Pull `frames` frames at `rate` from the FIFO (resampled), calling `put` per frame.
     fn pull(st: &mut PlayState, frames: usize, rate: u32, mut put: impl FnMut(usize, f32, f32)) {
         let gain = if st.muted || st.context_muted {
@@ -105,7 +113,7 @@ impl PlayerShared {
 
 impl OutputSource for PlayerShared {
     fn mix(&self, out: &mut [f32], channels: usize, rate: u32) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.st();
         let st = &mut *guard;
         if !st.playing || st.suspended || st.src_rate == 0 || st.playback_rate <= 0. {
             return;
@@ -119,7 +127,7 @@ impl OutputSource for PlayerShared {
                 // The output's callbacks are the clock: render the same span of time at the
                 // renderer's rate.
                 let renderer_rate = context_rate(rate);
-                let mut carry = self.renderer_carry.lock().unwrap();
+                let mut carry = self.renderer_carry.lock().unwrap_or_else(PoisonError::into_inner);
                 let exact = frames_out as f64 * renderer_rate as f64 / rate as f64 + *carry;
                 let frames = exact.floor() as usize;
                 *carry = exact - frames as f64;
@@ -157,11 +165,57 @@ enum Route {
     Hub(Sender<HubMsg>, u64),
 }
 
-enum HubMsg {
-    Add(u64, Box<PlayerThread>),
+enum HubMsg<P = PlayerThread> {
+    Add(u64, Box<P>),
     Cmd(u64, Cmd),
     /// Something outside the commands changed whether a player needs ticks (resume).
     Wake,
+}
+
+/// What the hub drives. One player's panic must not stop every sound: every call into a player is
+/// caught, the player that panicked is dropped (after `failed`, which tells its element) and the
+/// hub goes on with the others. Only in unwinding builds (dev-fast, release-fast): the shipping
+/// profile is panic = "abort", where any panic ends the process.
+trait HubPlayer {
+    fn start(&mut self);
+    fn handle(&mut self, cmd: Cmd);
+    fn needs_tick(&self) -> bool;
+    /// What each player's own loop did after every command and every tick (cheap when paused).
+    fn step(&mut self);
+    /// After a panic in one of the calls above: stop its sound and report the error.
+    fn failed(&mut self, what: String);
+}
+
+impl HubPlayer for PlayerThread {
+    fn start(&mut self) {
+        PlayerThread::start(self)
+    }
+    fn handle(&mut self, cmd: Cmd) {
+        PlayerThread::handle(self, cmd)
+    }
+    fn needs_tick(&self) -> bool {
+        PlayerThread::needs_tick(self)
+    }
+    fn step(&mut self) {
+        self.fill();
+        self.report();
+    }
+    fn failed(&mut self, what: String) {
+        self.shared.st().playing = false;
+        self.stream = None;
+        #[cfg(feature = "video")]
+        {
+            self.video = None;
+        }
+        self.emit(PlayerEvent::Error(format!("media decode error: {what}")));
+    }
+}
+
+fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
+    e.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| e.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".to_owned())
 }
 
 /// The audio players' hub: one thread for every audio-only player in the process, started on first use.
@@ -180,11 +234,32 @@ fn hub() -> Sender<HubMsg> {
     .clone()
 }
 
-fn run_hub(rx: Receiver<HubMsg>) {
-    let mut players: HashMap<u64, PlayerThread> = HashMap::new();
+fn run_hub<P: HubPlayer>(rx: Receiver<HubMsg<P>>) {
+    let mut players: HashMap<u64, P> = HashMap::new();
+    // Runs one call into a player; a panic drops that player (after `failed`) and nothing else.
+    fn guard<P: HubPlayer, R>(players: &mut HashMap<u64, P>, key: u64, f: impl FnOnce(&mut P) -> R) -> Option<R> {
+        let player = players.get_mut(&key)?;
+        match catch_unwind(AssertUnwindSafe(|| f(&mut *player))) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                let what = panic_text(&*e);
+                warn!("audio hub: player {key} panicked ({what}); dropping it, the others play on");
+                if let Some(mut p) = players.remove(&key) {
+                    let _ = catch_unwind(AssertUnwindSafe(|| p.failed(what)));
+                    let _ = catch_unwind(AssertUnwindSafe(move || drop(p)));
+                }
+                None
+            },
+        }
+    }
     loop {
         // Tick every TICK while a player plays; otherwise wait for the next command.
-        let first = if players.values().any(PlayerThread::needs_tick) {
+        let keys: Vec<u64> = players.keys().copied().collect();
+        let mut tick = false;
+        for key in keys {
+            tick |= guard(&mut players, key, |p| p.needs_tick()).unwrap_or(false);
+        }
+        let first = if tick {
             match rx.recv_timeout(TICK) {
                 Ok(msg) => Some(msg),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -200,26 +275,24 @@ fn run_hub(rx: Receiver<HubMsg>) {
         while let Some(msg) = next.take() {
             match msg {
                 HubMsg::Add(key, player) => {
-                    let player = *player;
-                    player.start();
-                    players.insert(key, player);
+                    players.insert(key, *player);
+                    guard(&mut players, key, |p| p.start());
                 },
                 HubMsg::Cmd(key, Cmd::Quit) => {
-                    players.remove(&key);
+                    if let Some(p) = players.remove(&key) {
+                        let _ = catch_unwind(AssertUnwindSafe(move || drop(p)));
+                    }
                 },
                 HubMsg::Cmd(key, cmd) => {
-                    if let Some(player) = players.get_mut(&key) {
-                        player.handle(cmd);
-                    }
+                    guard(&mut players, key, |p| p.handle(cmd));
                 },
                 HubMsg::Wake => {},
             }
             next = rx.try_recv().ok();
         }
-        // As each player's own loop did after every command and every tick (cheap when paused).
-        for player in players.values_mut() {
-            player.fill();
-            player.report();
+        let keys: Vec<u64> = players.keys().copied().collect();
+        for key in keys {
+            guard(&mut players, key, |p| p.step());
         }
     }
 }
@@ -367,21 +440,21 @@ impl Player for NativePlayer {
     }
 
     fn set_mute(&self, muted: bool) -> Result<(), PlayerError> {
-        self.shared.state.lock().unwrap().muted = muted;
+        self.shared.st().muted = muted;
         Ok(())
     }
 
     fn muted(&self) -> bool {
-        self.shared.state.lock().unwrap().muted
+        self.shared.st().muted
     }
 
     fn set_volume(&self, volume: f64) -> Result<(), PlayerError> {
-        self.shared.state.lock().unwrap().volume = volume.clamp(0., 1.) as f32;
+        self.shared.st().volume = volume.clamp(0., 1.) as f32;
         Ok(())
     }
 
     fn volume(&self) -> f64 {
-        self.shared.state.lock().unwrap().volume as f64
+        self.shared.st().volume as f64
     }
 
     fn set_input_size(&self, size: u64) -> Result<(), PlayerError> {
@@ -399,12 +472,12 @@ impl Player for NativePlayer {
     }
 
     fn set_playback_rate(&self, playback_rate: f64) -> Result<(), PlayerError> {
-        self.shared.state.lock().unwrap().playback_rate = playback_rate.clamp(0., 16.);
+        self.shared.st().playback_rate = playback_rate.clamp(0., 16.);
         Ok(())
     }
 
     fn playback_rate(&self) -> f64 {
-        self.shared.state.lock().unwrap().playback_rate
+        self.shared.st().playback_rate
     }
 
     fn push_data(&self, data: Vec<u8>) -> Result<(), PlayerError> {
@@ -423,7 +496,7 @@ impl Player for NativePlayer {
     }
 
     fn buffered(&self) -> Vec<Range<f64>> {
-        match self.shared.state.lock().unwrap().duration {
+        match self.shared.st().duration {
             Some(d) => vec![0.0..d],
             None => vec![],
         }
@@ -452,17 +525,17 @@ impl MediaInstance for NativePlayer {
     }
 
     fn mute(&self, val: bool) -> Result<(), MediaInstanceError> {
-        self.shared.state.lock().unwrap().context_muted = val;
+        self.shared.st().context_muted = val;
         Ok(())
     }
 
     fn suspend(&self) -> Result<(), MediaInstanceError> {
-        self.shared.state.lock().unwrap().suspended = true;
+        self.shared.st().suspended = true;
         Ok(())
     }
 
     fn resume(&self) -> Result<(), MediaInstanceError> {
-        self.shared.state.lock().unwrap().suspended = false;
+        self.shared.st().suspended = false;
         self.wake();
         Ok(())
     }
@@ -759,7 +832,7 @@ impl PlayerThread {
         let now = Instant::now();
         let dt = now.duration_since(self.clock_tick).as_secs_f64();
         self.clock_tick = now;
-        let st = self.shared.state.lock().unwrap();
+        let st = self.shared.st();
         let audio_live = self
             .stream
             .as_ref()
@@ -773,7 +846,7 @@ impl PlayerThread {
 
     fn set_duration(&mut self, duration: Option<f64>) {
         self.duration = duration;
-        self.shared.state.lock().unwrap().duration = duration;
+        self.shared.st().duration = duration;
     }
 
     fn emit(&self, event: PlayerEvent) {
@@ -794,7 +867,7 @@ impl PlayerThread {
         if !self.is_open() || self.ended_sent {
             return false;
         }
-        let st = self.shared.state.lock().unwrap();
+        let st = self.shared.st();
         st.playing && !st.suspended
     }
 
@@ -843,7 +916,7 @@ impl PlayerThread {
 
     fn set_playing(&mut self, playing: bool) {
         let changed = {
-            let mut st = self.shared.state.lock().unwrap();
+            let mut st = self.shared.st();
             let changed = st.playing != playing;
             st.playing = playing;
             changed
@@ -909,7 +982,7 @@ impl PlayerThread {
             }
         }
         {
-            let mut st = self.shared.state.lock().unwrap();
+            let mut st = self.shared.st();
             st.src_rate = stream.as_ref().map_or(0, |s| s.rate);
             st.fifo.clear();
             st.base_time = 0.;
@@ -996,7 +1069,7 @@ impl PlayerThread {
             }
         }
         {
-            let mut st = self.shared.state.lock().unwrap();
+            let mut st = self.shared.st();
             st.fifo.clear();
             st.base_time = time;
             st.consumed = 0;
@@ -1018,7 +1091,7 @@ impl PlayerThread {
             return;
         }
         let rate = stream.rate.max(1) as f64;
-        let level = self.shared.state.lock().unwrap().fifo.len();
+        let level = self.shared.st().fifo.len();
         if (level as f64) >= LOW_WATER_SECS * rate {
             return;
         }
@@ -1029,7 +1102,7 @@ impl PlayerThread {
                 break;
             }
         }
-        let mut st = self.shared.state.lock().unwrap();
+        let mut st = self.shared.st();
         st.src_rate = stream.rate;
         st.fifo.extend(self.scratch.drain(..));
         if stream.finished {
@@ -1113,7 +1186,7 @@ impl PlayerThread {
         self.tick_clock();
         self.present();
         let (playing, empty) = {
-            let st = self.shared.state.lock().unwrap();
+            let st = self.shared.st();
             (st.playing && !st.suspended, st.fifo.is_empty())
         };
         let position = self.clock;
@@ -1144,5 +1217,82 @@ impl PlayerThread {
             self.last_position = Instant::now();
             self.emit(PlayerEvent::PositionChanged(position));
         }
+    }
+}
+
+#[cfg(test)]
+mod hub_tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use super::*;
+
+    /// A stand-in player: always playing, counts its steps, panics in `step` or `handle` when told to.
+    struct Fake {
+        steps: Arc<AtomicUsize>,
+        failed: Arc<Mutex<Option<String>>>,
+        panic_step: bool,
+        panic_handle: bool,
+    }
+
+    impl HubPlayer for Fake {
+        fn start(&mut self) {}
+        fn handle(&mut self, _: Cmd) {
+            if self.panic_handle {
+                panic!("bad command");
+            }
+        }
+        fn needs_tick(&self) -> bool {
+            true
+        }
+        fn step(&mut self) {
+            if self.panic_step {
+                panic!("bad frame");
+            }
+            self.steps.fetch_add(1, Ordering::Relaxed);
+        }
+        fn failed(&mut self, what: String) {
+            *self.failed.lock().unwrap() = Some(what);
+        }
+    }
+
+    fn fake(panic_step: bool, panic_handle: bool) -> (Fake, Arc<AtomicUsize>, Arc<Mutex<Option<String>>>) {
+        let steps = Arc::new(AtomicUsize::new(0));
+        let failed = Arc::new(Mutex::new(None));
+        let f = Fake { steps: steps.clone(), failed: failed.clone(), panic_step, panic_handle };
+        (f, steps, failed)
+    }
+
+    fn wait_for(what: &str, cond: impl Fn() -> bool) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while !cond() {
+            assert!(Instant::now() < end, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_panicking_player_leaves_the_others_playing() {
+        let (tx, rx) = mpsc::channel::<HubMsg<Fake>>();
+        let hub = thread::spawn(move || run_hub(rx));
+        let (good, good_steps, good_failed) = fake(false, false);
+        let (bad, bad_steps, bad_failed) = fake(true, false);
+        let (bad_cmd, _, bad_cmd_failed) = fake(false, true);
+        tx.send(HubMsg::Add(1, Box::new(good))).unwrap();
+        tx.send(HubMsg::Add(2, Box::new(bad))).unwrap();
+        tx.send(HubMsg::Add(3, Box::new(bad_cmd))).unwrap();
+        tx.send(HubMsg::Cmd(3, Cmd::Play)).unwrap();
+        wait_for("both failures reported", || bad_failed.lock().unwrap().is_some() && bad_cmd_failed.lock().unwrap().is_some());
+        assert_eq!(bad_failed.lock().unwrap().as_deref(), Some("bad frame"));
+        assert_eq!(bad_cmd_failed.lock().unwrap().as_deref(), Some("bad command"));
+        assert_eq!(bad_steps.load(Ordering::Relaxed), 0);
+        // The hub is still alive and still ticks the good player.
+        let at = good_steps.load(Ordering::Relaxed);
+        wait_for("the good player to keep stepping", || good_steps.load(Ordering::Relaxed) >= at + 10);
+        assert!(good_failed.lock().unwrap().is_none());
+        // Commands to the dropped players are ignored, not a panic.
+        tx.send(HubMsg::Cmd(2, Cmd::Play)).unwrap();
+        tx.send(HubMsg::Cmd(1, Cmd::Quit)).unwrap();
+        drop(tx);
+        hub.join().expect("the hub thread must not panic");
     }
 }
