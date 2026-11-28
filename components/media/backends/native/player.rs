@@ -9,11 +9,12 @@
 //! when there is no audio (or it has ended). Files with neither report an error.
 
 #[cfg(feature = "video")]
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -145,10 +146,88 @@ enum Cmd {
     Quit,
 }
 
+/// Where a player's commands go. Audio-only players (every `<audio>`, `new Audio()`) share one hub
+/// thread, `PartiiAudioHub`: a game that keeps a pool of sound elements (hexii: 9 effects x 5 plus
+/// its music) used to get one thread each, every one waking every TICK even while paused (perf job
+/// 7613cecf: 50 PartiiAudioPlay threads, 32-63 ms/s CPU, up to 301 ms/s waiting to run). The hub
+/// ticks only while one of its players is playing, and sleeps on its channel otherwise. A `<video>`
+/// player (one with a video renderer) keeps its own thread, so picture decoding never delays audio.
+enum Route {
+    Own(Sender<Cmd>),
+    Hub(Sender<HubMsg>, u64),
+}
+
+enum HubMsg {
+    Add(u64, Box<PlayerThread>),
+    Cmd(u64, Cmd),
+    /// Something outside the commands changed whether a player needs ticks (resume).
+    Wake,
+}
+
+/// The audio players' hub: one thread for every audio-only player in the process, started on first use.
+fn hub() -> Sender<HubMsg> {
+    static HUB: OnceLock<Mutex<Sender<HubMsg>>> = OnceLock::new();
+    HUB.get_or_init(|| {
+        let (tx, rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("PartiiAudioHub".to_owned())
+            .spawn(move || run_hub(rx))
+            .expect("Failed to spawn the audio player hub");
+        Mutex::new(tx)
+    })
+    .lock()
+    .unwrap()
+    .clone()
+}
+
+fn run_hub(rx: Receiver<HubMsg>) {
+    let mut players: HashMap<u64, PlayerThread> = HashMap::new();
+    loop {
+        // Tick every TICK while a player plays; otherwise wait for the next command.
+        let first = if players.values().any(PlayerThread::needs_tick) {
+            match rx.recv_timeout(TICK) {
+                Ok(msg) => Some(msg),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(msg) => Some(msg),
+                Err(_) => break,
+            }
+        };
+        let mut next = first;
+        while let Some(msg) = next.take() {
+            match msg {
+                HubMsg::Add(key, player) => {
+                    let player = *player;
+                    player.start();
+                    players.insert(key, player);
+                },
+                HubMsg::Cmd(key, Cmd::Quit) => {
+                    players.remove(&key);
+                },
+                HubMsg::Cmd(key, cmd) => {
+                    if let Some(player) = players.get_mut(&key) {
+                        player.handle(cmd);
+                    }
+                },
+                HubMsg::Wake => {},
+            }
+            next = rx.try_recv().ok();
+        }
+        // As each player's own loop did after every command and every tick (cheap when paused).
+        for player in players.values_mut() {
+            player.fill();
+            player.report();
+        }
+    }
+}
+
 pub struct NativePlayer {
     id: usize,
     shared: Arc<PlayerShared>,
-    cmd: Mutex<Sender<Cmd>>,
+    cmd: Mutex<Route>,
     data: Mutex<Vec<u8>>,
     input_size: Mutex<Option<u64>>,
     opened: Mutex<bool>,
@@ -182,16 +261,26 @@ impl NativePlayer {
         });
         let source: Arc<dyn OutputSource> = shared.clone();
         output().add_source(Arc::downgrade(&source) as Weak<dyn OutputSource>);
-        let (tx, rx) = mpsc::channel();
-        let shared_ = shared.clone();
-        thread::Builder::new()
-            .name("PartiiAudioPlayer".to_owned())
-            .spawn(move || PlayerThread::new(shared_, sender, video_renderer).run(rx))
-            .expect("Failed to spawn the player thread");
+        let own_thread = video_renderer.is_some();
+        let player = PlayerThread::new(shared.clone(), sender, video_renderer);
+        let route = if own_thread {
+            let (tx, rx) = mpsc::channel();
+            thread::Builder::new()
+                .name("PartiiVideoPlayer".to_owned())
+                .spawn(move || player.run(rx))
+                .expect("Failed to spawn the player thread");
+            Route::Own(tx)
+        } else {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let key = NEXT.fetch_add(1, Ordering::Relaxed);
+            let hub = hub();
+            let _ = hub.send(HubMsg::Add(key, Box::new(player)));
+            Route::Hub(hub, key)
+        };
         Self {
             id,
             shared,
-            cmd: Mutex::new(tx),
+            cmd: Mutex::new(route),
             data: Mutex::new(Vec::new()),
             input_size: Mutex::new(None),
             opened: Mutex::new(false),
@@ -200,7 +289,21 @@ impl NativePlayer {
     }
 
     fn send(&self, cmd: Cmd) {
-        let _ = self.cmd.lock().unwrap().send(cmd);
+        match &*self.cmd.lock().unwrap() {
+            Route::Own(tx) => {
+                let _ = tx.send(cmd);
+            },
+            Route::Hub(hub, key) => {
+                let _ = hub.send(HubMsg::Cmd(*key, cmd));
+            },
+        }
+    }
+
+    /// Lets a hub player tick again after a change made outside the commands (resume).
+    fn wake(&self) {
+        if let Route::Hub(hub, _) = &*self.cmd.lock().unwrap() {
+            let _ = hub.send(HubMsg::Wake);
+        }
     }
 
     fn open_if_complete(&self, force: bool) {
@@ -360,6 +463,7 @@ impl MediaInstance for NativePlayer {
 
     fn resume(&self) -> Result<(), MediaInstanceError> {
         self.shared.state.lock().unwrap().suspended = false;
+        self.wake();
         Ok(())
     }
 }
@@ -679,9 +783,23 @@ impl PlayerThread {
         }
     }
 
-    fn run(mut self, rx: Receiver<Cmd>) {
-        // The DOM holds the fetched bytes back until the player asks for data.
+    /// The DOM holds the fetched bytes back until the player asks for data.
+    fn start(&self) {
         self.emit(PlayerEvent::NeedData);
+    }
+
+    /// Whether time moves for this player (it plays, unsuspended, not yet at its end): only then does
+    /// it need fill and report every TICK. A paused player changes only on a command.
+    fn needs_tick(&self) -> bool {
+        if !self.is_open() || self.ended_sent {
+            return false;
+        }
+        let st = self.shared.state.lock().unwrap();
+        st.playing && !st.suspended
+    }
+
+    fn run(mut self, rx: Receiver<Cmd>) {
+        self.start();
         loop {
             match rx.recv_timeout(TICK) {
                 Ok(Cmd::Quit) | Err(RecvTimeoutError::Disconnected) => break,
