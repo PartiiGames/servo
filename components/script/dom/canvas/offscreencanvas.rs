@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dom_struct::dom_struct;
@@ -115,15 +115,22 @@ pub(crate) struct OffscreenCanvas {
 /// Instead the worker stores a snapshot of the bitmap here at each commit, before the
 /// buffers swap, and the element reads the latest one without waiting on any thread.
 /// Taking a snapshot costs a readback on the worker, so in the default mode it is taken
-/// only while someone reads: during the first `WARM_COMMITS` commits, and for
-/// `READ_WINDOW` after any read. A read never waits: it returns the newest snapshot,
-/// which may be one commit behind (the spec promises the last committed frame; a page
-/// that needs a given frame waits for its commit, by rAF or a message from the worker).
+/// only while someone reads: for `READ_WINDOW` after any read, never before the first one
+/// (a warm-up window of 120 commits cost Digii +120 ms to its first frame and +318 ms to
+/// its 120th commit with no read at all, offcost a2e6ff71). A read while snapshots are
+/// being taken never waits: it returns the newest one, which may be one commit behind
+/// (the spec promises the last committed frame; a page that needs a given frame waits for
+/// its commit, by rAF or a message from the worker). The first read after `READ_WINDOW`
+/// without reads (or the first ever) has no fresh snapshot, so it waits up to
+/// `IDLE_READ_WAIT` for the worker's next commit to take one; a worker that has stopped
+/// committing gives it the last snapshot taken, if any (none if it was never read).
 /// PARTII_OFFSCREEN_READBACK=always snapshots every commit; =off never (reads return
 /// nothing, as before this change). PARTII_OFFSCREEN_READBACK_LOG=1 prints one line a
 /// commit on stderr: the epoch, the size, the snapshot's cost and the wall clock.
 pub(crate) struct PlaceholderReadback {
     state: Mutex<ReadbackState>,
+    /// Notified when a commit stores a snapshot (an idle read waits on it).
+    fresh: Condvar,
 }
 
 #[derive(Default)]
@@ -132,6 +139,8 @@ struct ReadbackState {
     snapshot_epoch: u32,
     committed_epoch: u32,
     commits: u32,
+    /// Snapshots stored so far (an idle read waits for this to change).
+    snapshots: u32,
     /// The bitmap size at the last commit.
     committed_size: Size2D<u32>,
     last_read: Option<Instant>,
@@ -155,8 +164,8 @@ static READBACK_MODE: LazyLock<ReadbackMode> = LazyLock::new(|| {
     }
 });
 
-const WARM_COMMITS: u32 = 120;
 const READ_WINDOW: Duration = Duration::from_secs(5);
+const IDLE_READ_WAIT: Duration = Duration::from_millis(50);
 static READBACK_LOG: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("PARTII_OFFSCREEN_READBACK_LOG").is_some());
 
@@ -164,6 +173,7 @@ impl PlaceholderReadback {
     fn new() -> Self {
         PlaceholderReadback {
             state: Mutex::new(ReadbackState::default()),
+            fresh: Condvar::new(),
         }
     }
 
@@ -173,10 +183,9 @@ impl PlaceholderReadback {
             ReadbackMode::Always => true,
             ReadbackMode::Off => false,
             ReadbackMode::Auto => self.state.lock().is_ok_and(|state| {
-                state.commits < WARM_COMMITS ||
-                    state
-                        .last_read
-                        .is_some_and(|read| read.elapsed() < READ_WINDOW)
+                state
+                    .last_read
+                    .is_some_and(|read| read.elapsed() < READ_WINDOW)
             }),
         }
     }
@@ -199,6 +208,8 @@ impl PlaceholderReadback {
         if let Some(snapshot) = snapshot {
             state.snapshot = Some(snapshot);
             state.snapshot_epoch = epoch;
+            state.snapshots = state.snapshots.wrapping_add(1);
+            self.fresh.notify_all();
         }
     }
 
@@ -208,7 +219,25 @@ impl PlaceholderReadback {
             return None;
         }
         let mut state = self.state.lock().ok()?;
-        state.last_read = Some(Instant::now());
+        let now = Instant::now();
+        let idle = state
+            .last_read
+            .is_none_or(|read| now.duration_since(read) >= READ_WINDOW);
+        // From here on the worker snapshots its commits (`wanted`).
+        state.last_read = Some(now);
+        if idle && *READBACK_MODE == ReadbackMode::Auto {
+            // No snapshot was taken since the last read window closed: wait for the next
+            // commit's, bounded (a worker that stopped committing never sends one).
+            let seen = state.snapshots;
+            let deadline = now + IDLE_READ_WAIT;
+            while state.snapshots == seen {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                state = self.fresh.wait_timeout(state, left).ok()?.0;
+            }
+        }
         state.snapshot.as_ref().map(SharedSnapshot::to_owned)
     }
 
